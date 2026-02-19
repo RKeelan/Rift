@@ -1,0 +1,18 @@
+{
+  "name": "rift",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": ["shared", "server", "client"],
+  "scripts": {
+    "dev": "concurrently -n server,client -c blue,green \"bun run --filter server dev\" \"bun run --filter client dev\"",
+    "build": "bun run --filter shared build && bun run --filter server build && bun run --filter client build",
+    "lint": "biome lint .",
+    "format:check": "biome format .",
+    "test": "bun test"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^1.9.0",
+    "concurrently": "^9.0.0",
+    "typescript": "^5.6.0"
+  }
+}

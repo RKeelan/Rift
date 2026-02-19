@@ -1,0 +1,22 @@
+{
+  "name": "server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "bun --watch src/index.ts",
+    "build": "tsc -b",
+    "start": "bun dist/index.js"
+  },
+  "dependencies": {
+    "express": "^4.21.0",
+    "simple-git": "^3.27.0",
+    "shared": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/supertest": "^6.0.0",
+    "supertest": "^7.0.0"
+  }
+}
