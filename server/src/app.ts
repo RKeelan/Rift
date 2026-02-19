@@ -1,6 +1,8 @@
-import express from "express";
 import path from "node:path";
+import express from "express";
 import { simpleGit } from "simple-git";
+import { sessionRoutes } from "./routes/sessions.js";
+import type { SessionManager } from "./session.js";
 
 export interface AppConfig {
 	port: number;
@@ -16,7 +18,10 @@ export function getConfig(): AppConfig {
 	};
 }
 
-export function createApp(config: AppConfig): express.Express {
+export function createApp(
+	config: AppConfig,
+	sessionManager?: SessionManager,
+): express.Express {
 	const app = express();
 
 	app.use(express.json({ limit: "1mb" }));
@@ -31,6 +36,10 @@ export function createApp(config: AppConfig): express.Express {
 		}
 		res.json({ status: "ok", gitRepo });
 	});
+
+	if (sessionManager) {
+		app.use("/api/sessions", sessionRoutes(sessionManager));
+	}
 
 	// Production: serve static files from client/dist
 	const clientDist = path.resolve(
