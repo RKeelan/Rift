@@ -1,3 +1,9 @@
-// Shared types between server and client.
-// Populated in Task 2 with the message protocol.
-export {};
+export type {
+	ClientMessage,
+	ServerMessage,
+	AssistantTextMessage,
+	ToolUseMessage,
+	ToolResultMessage,
+	SessionEventMessage,
+	HistoryMessage,
+} from "./types.js";
