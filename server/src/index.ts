@@ -1,6 +1,7 @@
 import { EchoAdapter } from "./adapters/index.js";
 import { createApp, getConfig } from "./app.js";
 import { SessionManager } from "./session.js";
+import { setupWebSocket } from "./ws.js";
 
 const config = getConfig();
 
@@ -15,11 +16,16 @@ const server = app.listen(config.port, "0.0.0.0", () => {
 	console.log(`Working directory: ${config.workingDir}`);
 });
 
+const relay = setupWebSocket(server, sessionManager);
+
 let shuttingDown = false;
 function shutdown() {
 	if (shuttingDown) return;
 	shuttingDown = true;
 	console.log("Shutting down...");
+	// Close all WebSocket connections and deregister listeners before
+	// stopping sessions, preventing the stopped handler from racing
+	relay.close();
 	sessionManager.dispose();
 	server.close(() => {
 		process.exit(0);

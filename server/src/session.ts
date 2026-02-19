@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { EventEmitter } from "node:events";
 import type { ServerMessage } from "shared";
 import type { AdapterConfig, AgentAdapter } from "./adapters/index.js";
 
@@ -28,13 +29,14 @@ export interface SessionManagerOptions {
 	adapterFactory: () => AgentAdapter;
 }
 
-export class SessionManager {
+export class SessionManager extends EventEmitter {
 	private sessions = new Map<string, Session>();
 	private cleanupTimer: ReturnType<typeof setInterval> | null = null;
 	private readonly ttlMs: number;
 	private readonly adapterFactory: () => AgentAdapter;
 
 	constructor(options: SessionManagerOptions) {
+		super();
 		this.ttlMs = options.ttlMs ?? DEFAULT_TTL_MS;
 		this.adapterFactory = options.adapterFactory;
 
@@ -68,6 +70,7 @@ export class SessionManager {
 				);
 			}
 			session.buffer.push(msg);
+			this.emit("message", id, msg);
 		});
 
 		adapter.onExit((_code, error) => {
@@ -83,7 +86,9 @@ export class SessionManager {
 					message: error,
 				};
 				session.buffer.push(errorMsg);
+				this.emit("message", id, errorMsg);
 			}
+			this.emit("stopped", id);
 		});
 
 		const config: AdapterConfig = { workingDirectory };
@@ -129,6 +134,7 @@ export class SessionManager {
 			session.state = "stopped";
 			session.stoppedAt = Date.now();
 			session.adapter.stop();
+			this.emit("stopped", id);
 		}
 		return true;
 	}
@@ -139,6 +145,7 @@ export class SessionManager {
 				session.state = "stopped";
 				session.stoppedAt = Date.now();
 				session.adapter.stop();
+				this.emit("stopped", session.id);
 			}
 		}
 	}

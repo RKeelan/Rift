@@ -14,42 +14,6 @@
 
 ---
 
-## Task 3: WebSocket relay
-
-### Requirements
-
-Add the WebSocket layer on top of the session manager so clients can stream messages to and from an agent session in real time.
-
-- WebSocket endpoint at `ws://host/api/sessions/:id/ws`:
-  - On connect, send a `history` message containing the session's buffered messages
-  - Relay incoming `ClientMessage` (parsed from JSON) to the adapter via `send()`
-  - Relay adapter `ServerMessage` events to all connected WebSocket clients
-  - Handle client disconnect gracefully — do not stop the session
-  - If the session id does not exist or is stopped at connect time, close the socket with code 4404 or 4410 and a JSON error message
-  - If a session stops while clients are connected (adapter exit or explicit delete), send a `session_event` with `event: "stopped"` to all connected clients, then close their sockets with code 4410
-- Support multiple simultaneous WebSocket connections to the same session
-- Maximum incoming WebSocket message size: 1 MB. Messages exceeding this are rejected and the socket is closed with an error
-- On adapter error or crash, send a `session_event` error message to all connected clients
-- Graceful shutdown: close all WebSocket connections with a close frame before the server exits (extends the SIGTERM/SIGINT handler from Task 2)
-- Add WebSocket upgrade proxy to the Vite dev server config so that `ws://localhost:5173/api/sessions/:id/ws` proxies to Express
-
-### Verification
-
-- Integration test: create echo session via REST, connect WebSocket client, send a `user_message`, verify `assistant_text` and `tool_use`/`tool_result` events arrive in order
-- Test reconnection: connect, receive events, disconnect, reconnect, verify `history` message replays all prior events
-- Test invalid session: connect to a non-existent session id, verify socket closes with error code
-- Test stopped session: stop a session via REST, attempt WebSocket connect, verify it closes with error
-
-### Validation
-
-- Start server (echo mode)
-- Create a session with curl, then `wscat -c ws://localhost:3000/api/sessions/<id>/ws`
-- Observe the `history` message (empty initially)
-- Type a message, observe echo response with simulated tool-call events
-- Disconnect and reconnect, confirm `history` replays all prior messages
-
----
-
 ## Task 4: App shell with tab bar and routing
 
 ### Requirements
