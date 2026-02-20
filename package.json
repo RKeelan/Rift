@@ -8,7 +8,7 @@
     "build": "bun run --filter shared build && bun run --filter server build && bun run --filter client build",
     "lint": "biome lint .",
     "format:check": "biome format .",
-    "test": "bun test"
+    "test": "bun test --cwd server && bun test --cwd client"
   },
   "devDependencies": {
     "@biomejs/biome": "^1.9.0",

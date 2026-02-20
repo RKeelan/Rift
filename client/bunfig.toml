@@ -1,2 +1,2 @@
 [test]
-preload = ["happy-dom/global-register"]
+preload = ["./src/__tests__/setup.ts"]
