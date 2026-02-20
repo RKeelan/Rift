@@ -14,39 +14,6 @@
 
 ---
 
-## Task 4: App shell with tab bar and routing
-
-### Requirements
-
-Set up the frontend navigation structure, global error handling, and PWA configuration. After this task the app has a bottom tab bar, four routed views, and installs as a standalone PWA.
-
-- On app load, fetch `GET /api/health` to determine whether the working directory is a git repo. If the health check fails, default to showing all four tabs (optimistic). Retry on next tab navigation
-- React Router with four routes: `/chat`, `/files`, `/changes`, `/history`; default redirect to `/chat`
-- Bottom tab bar component with icons and labels for each tab; highlights the active tab. If the working directory is not a git repo, hide the Changes and History tabs
-- Each route renders a placeholder page with the tab name as heading
-- Mobile viewport meta tag, full-height layout, no horizontal scroll
-- `vite-plugin-pwa` configured with:
-  - Service worker: `cacheFirst` for Vite's content-hashed static assets (`/assets/*`), `networkFirst` for the navigation route (`index.html`), `networkFirst` for API calls
-  - `skipWaiting` and `clientsClaim` enabled so new versions activate immediately
-  - `manifest.json` with app name "Imp", theme colour, `display: standalone`
-- CSS reset and base styles: system font stack, dark theme, touch-friendly tap targets (minimum 44px)
-- Shared `useApi` hook or utility for REST calls that handles non-2xx responses by parsing the error envelope and surfacing errors through a toast/banner component at the top of the screen. All subsequent frontend tasks use this utility for API calls
-- All views show a loading indicator (spinner or skeleton) during initial data fetch. This is a cross-cutting requirement for all frontend tasks (5–9), driven by the latency of phone-over-Tailscale connections
-
-### Verification
-
-- Component tests: tab bar renders four tabs, clicking a tab navigates to the correct route
-- PWA: assert `manifest.json` exists in build output with required fields; assert service worker file is generated
-- Component test: error banner renders when `useApi` encounters a non-2xx response
-
-### Validation
-
-- Open app on phone, confirm tab bar appears at bottom with four tabs
-- Tap each tab, confirm navigation works and the correct placeholder renders
-- Add to home screen (iOS or Android), reopen — app launches in standalone mode without browser chrome
-
----
-
 ## Task 5: Session hook and WebSocket connection
 
 ### Requirements

@@ -58,6 +58,11 @@ export function createApp(
 		});
 	});
 
+	// SPA fallback: serve index.html for client-side routes
+	app.get("*", (_req, res) => {
+		res.sendFile(path.join(clientDist, "index.html"));
+	});
+
 	// Catch-all error handler
 	app.use(
 		(
