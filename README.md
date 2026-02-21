@@ -1,5 +1,7 @@
 # Rift
 
+[![CI](https://github.com/RKeelan/Rift/actions/workflows/ci.yml/badge.svg)](https://github.com/RKeelan/Rift/actions/workflows/ci.yml)
+
 Mobile-first coding agent frontend.
 
 ## Commands
