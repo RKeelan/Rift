@@ -1,10 +1,10 @@
-import { NavLink } from "react-router-dom";
 import {
-	MessageSquare,
 	FolderOpen,
 	GitPullRequestArrow,
 	History,
+	MessageSquare,
 } from "lucide-react";
+import { NavLink } from "react-router-dom";
 import "./TabBar.css";
 
 interface Tab {
