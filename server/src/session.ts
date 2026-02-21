@@ -116,6 +116,15 @@ export class SessionManager extends EventEmitter {
 		return this.sessions.get(id)?.buffer;
 	}
 
+	addToBuffer(id: string, message: ServerMessage): void {
+		const session = this.sessions.get(id);
+		if (!session) return;
+		if (session.buffer.length >= MAX_BUFFER_SIZE) {
+			session.buffer.shift();
+		}
+		session.buffer.push(message);
+	}
+
 	send(id: string, message: string): boolean {
 		const session = this.sessions.get(id);
 		if (!session || session.state !== "running") {

@@ -1,5 +1,10 @@
 import type { Server } from "node:http";
-import type { ClientMessage, HistoryMessage, ServerMessage } from "shared";
+import type {
+	ClientMessage,
+	HistoryMessage,
+	ServerMessage,
+	UserMessageRecord,
+} from "shared";
 import { WebSocket, WebSocketServer } from "ws";
 import type { SessionManager } from "./session.js";
 
@@ -132,6 +137,12 @@ export function setupWebSocket(
 					parsed.type === "user_message" &&
 					typeof parsed.content === "string"
 				) {
+					// Store user message in the buffer for history replay
+					const record: UserMessageRecord = {
+						type: "user_message_record",
+						content: parsed.content,
+					};
+					sessionManager.addToBuffer(sessionId, record);
 					sessionManager.send(sessionId, parsed.content);
 				}
 			} catch {

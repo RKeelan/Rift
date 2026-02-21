@@ -237,16 +237,17 @@ describe("WebSocket relay", () => {
 			ws1.close();
 			await waitForClose(ws1);
 
-			// Reconnect -- history should replay the 3 buffered messages
+			// Reconnect -- history should replay the user message + 3 echo responses
 			const ws2 = track(connectWs(ctx.wsBaseUrl, sessionId));
 			await waitForOpen(ws2);
 			const reconnectMsgs = await collectMessages(ws2, 1);
 			const history = reconnectMsgs[0] as HistoryMessage;
 			expect(history.type).toBe("history");
-			expect(history.messages).toHaveLength(3);
-			expect(history.messages[0].type).toBe("assistant_text");
-			expect(history.messages[1].type).toBe("tool_use");
-			expect(history.messages[2].type).toBe("tool_result");
+			expect(history.messages).toHaveLength(4);
+			expect(history.messages[0].type).toBe("user_message_record");
+			expect(history.messages[1].type).toBe("assistant_text");
+			expect(history.messages[2].type).toBe("tool_use");
+			expect(history.messages[3].type).toBe("tool_result");
 		});
 	});
 

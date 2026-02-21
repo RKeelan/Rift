@@ -4,6 +4,7 @@ export type {
 	AssistantTextMessage,
 	ToolUseMessage,
 	ToolResultMessage,
+	UserMessageRecord,
 	SessionEventMessage,
 	HistoryMessage,
 } from "./types.js";
