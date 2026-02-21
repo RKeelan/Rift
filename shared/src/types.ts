@@ -26,6 +26,11 @@ export interface ToolResultMessage {
 	is_error: boolean;
 }
 
+export interface UserMessageRecord {
+	type: "user_message_record";
+	content: string;
+}
+
 export interface SessionEventMessage {
 	type: "session_event";
 	event: "started" | "stopped" | "error";
@@ -41,5 +46,6 @@ export type ServerMessage =
 	| AssistantTextMessage
 	| ToolUseMessage
 	| ToolResultMessage
+	| UserMessageRecord
 	| SessionEventMessage
 	| HistoryMessage;
