@@ -1,0 +1,30 @@
+.diff-viewer {
+	font-family: "SF Mono", "Fira Code", "Fira Mono", Menlo, Consolas, monospace;
+	font-size: 0.8125rem;
+	line-height: 1.4;
+	overflow-x: auto;
+	-webkit-overflow-scrolling: touch;
+	margin: 0;
+	padding: 0.5rem;
+	background: var(--color-bg);
+	border-radius: 4px;
+}
+
+.diff-line {
+	display: block;
+	white-space: pre;
+}
+
+.diff-add {
+	background: rgba(46, 160, 67, 0.2);
+	color: #7ee787;
+}
+
+.diff-remove {
+	background: rgba(248, 81, 73, 0.2);
+	color: #ffa198;
+}
+
+.diff-hunk {
+	color: var(--color-primary);
+}

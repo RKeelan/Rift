@@ -1,12 +1,12 @@
+import { X } from "lucide-react";
 import {
+	type ReactNode,
 	createContext,
 	useCallback,
 	useContext,
 	useRef,
 	useState,
-	type ReactNode,
 } from "react";
-import { X } from "lucide-react";
 
 interface ErrorBannerContextValue {
 	showError: (message: string) => void;

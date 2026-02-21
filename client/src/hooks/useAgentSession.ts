@@ -1,5 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { ClientMessage, ServerMessage, SessionEventMessage } from "shared";
+import type {
+	ClientMessage,
+	ServerMessage,
+	SessionEventMessage,
+	UserMessageRecord,
+} from "shared";
 
 export type SessionStatus =
 	| "connecting"
@@ -165,6 +170,12 @@ export function useAgentSession() {
 		if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
 			return;
 		}
+		// Add user message to local state immediately for display
+		const record: UserMessageRecord = {
+			type: "user_message_record",
+			content,
+		};
+		setMessages((prev) => [...prev, record]);
 		const msg: ClientMessage = { type: "user_message", content };
 		wsRef.current.send(JSON.stringify(msg));
 	}, []);
