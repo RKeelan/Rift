@@ -14,39 +14,6 @@
 
 ---
 
-## Task 7: File browser
-
-### Requirements
-
-Add a file tree and syntax-highlighted file viewer to the Files tab.
-
-- REST endpoints:
-  - `GET /api/files?path=<dir>` — returns directory listing (name, type, size) for the given path relative to the working directory; defaults to root. Entries sorted: directories first, then files, alphabetically. Respects `.gitignore` rules by using `git check-ignore` via `simple-git` (if the working directory is a git repo) to filter out ignored files and directories. When checking directories, append a trailing `/` to the path so that patterns like `node_modules/` match correctly. In non-git directories, all files are shown. Maximum 1,000 entries returned; if a directory exceeds this, return the first 1,000 with a `truncated: true` flag
-  - `GET /api/files/content?path=<file>` — returns file content as plain text. Maximum file size: 1 MB; files exceeding this return 413 with the standard error envelope. Binary files (detected by null bytes in the first 8 KB) return 415 with a message indicating binary files are not supported
-  - **Security:** both endpoints normalise and validate the `path` parameter against the working directory root. Reject any resolved path that escapes the working directory with 403 and the standard error envelope
-- Frontend Files view (replaces the Files tab placeholder):
-  - Collapsible directory tree, lazy-loaded (fetches children on expand)
-  - Tapping a file opens it in a read-only CodeMirror 6 editor configured with `EditorView.editable(false)` and `EditorState.readOnly`. Syntax highlighting by file extension. Language packages are lazy-loaded (dynamic `import()`): the file renders immediately as plain text, and highlighting applies asynchronously once the language pack loads. Unrecognised extensions remain as plain text with no error. Core languages: JavaScript/TypeScript, Python, Go, Rust, JSON, Markdown, CSS/HTML, shell scripts
-  - Binary files and oversized files show an appropriate error message instead of the editor
-  - Truncated directory listings show a message indicating not all entries are displayed
-  - Breadcrumb bar showing current path
-  - Back button returns to tree from file view
-
-### Verification
-
-- API tests: directory listing returns correct entries sorted correctly; gitignored files are excluded; file content returns correct text; path traversal attempts (`../`, absolute paths) return 403; oversized file returns 413; binary file returns 415; directory with >1,000 entries returns truncated result
-- Component tests: tree expands directories, file tap opens viewer, error states render appropriate messages
-
-### Validation
-
-- Open Files tab on phone, browse the project directory, open a source file, confirm syntax highlighting renders correctly
-- Confirm `node_modules` is not shown (assuming it is gitignored)
-- Verify scrolling within the editor works smoothly and does not conflict with tab swiping
-- Attempt to navigate above the working directory via URL manipulation, confirm it is rejected
-- Open a large file (>1 MB), confirm an error message is shown
-
----
-
 ## Task 8: Changes view
 
 ### Requirements
