@@ -10,13 +10,12 @@
     "resolveJsonModule": true,
     "declaration": true,
     "declarationMap": true,
-    "sourceMap": true
+    "sourceMap": true,
+    "outDir": "dist",
+    "rootDir": "src",
+    "composite": true
   },
-  "references": [
-    { "path": "shared" },
-    { "path": "server" },
-    { "path": "client" },
-    { "path": "cli" }
-  ],
-  "files": []
+  "references": [{ "path": "../shared" }],
+  "include": ["src"],
+  "exclude": ["src/**/*.test.ts"]
 }
