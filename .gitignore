@@ -1,0 +1,7 @@
+/target
+.env
+data/*.db
+data/*.db-journal
+data/*.db-wal
+.vscode/
+settings.local.json

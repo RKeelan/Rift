@@ -1,0 +1,7 @@
+- Name: Imp
+- Implemented in Rust
+- Based on Nanoclaw (checked out at ~/Src/External/Nanoclaw)
+- Initially running in a Docker container, but suitable for deplyment to Raspberry Pi or Mac mini
+- Use Claude Agent SDK, but with a migration path to other agent frameworks and possibly self-hosted model (e.g., Pidev + Kimi K2)
+- Highly-locked down, with access to telegram, plus whitelisted websites
+- MVP is telegram chat with me, plus a scheduler so that it can send me reminders and initiate conversations
