@@ -2,13 +2,13 @@
   "name": "rift",
   "version": "0.1.0",
   "private": true,
-  "workspaces": ["shared", "server", "client"],
+  "workspaces": ["shared", "server", "client", "cli"],
   "scripts": {
     "dev": "concurrently -n server,client -c blue,green \"bun run --filter server dev\" \"bun run --filter client dev\"",
-    "build": "bun run --filter shared build && bun run --filter server build && bun run --filter client build",
+    "build": "bun run --filter shared build && bun run --filter server build && bun run --filter client build && bun run --filter cli build",
     "lint": "biome lint .",
     "format:check": "biome format .",
-    "test": "bun test --cwd server && bun test --cwd client"
+    "test": "bun test --cwd server && bun test --cwd client && bun test --cwd cli"
   },
   "devDependencies": {
     "@biomejs/biome": "^1.9.0",
