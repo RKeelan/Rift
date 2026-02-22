@@ -14,37 +14,6 @@
 
 ---
 
-## Task 8: Changes view
-
-### Requirements
-
-Add a working-tree diff view to the Changes tab, showing staged and unstaged modifications. Uses the shared `DiffViewer` component from Task 6.
-
-- REST endpoints:
-  - `GET /api/git/status` — returns list of changed files with their status (modified, added, deleted, renamed, untracked) and staging state (staged, unstaged, or both). If the working directory is not a git repo, return `{ error: { code: "NOT_GIT_REPO", message: "..." } }` with status 400
-  - `GET /api/git/diff?path=<file>&staged=<bool>` — returns unified diff for a specific file (staged or unstaged). If the diff exceeds 1 MB, return a truncated version with a `truncated: true` flag
-  - **Security:** validate the `path` parameter the same way as the file browser endpoints (normalise, reject escapes with 403)
-- Frontend Changes view (replaces the Changes tab placeholder):
-  - Two sections: "Staged" and "Unstaged", each listing changed files with status badges (colour-coded: green for added, yellow for modified, red for deleted)
-  - Tapping a file shows its unified diff using the shared `DiffViewer` component
-  - Refresh button in the header to update status. Auto-refresh when the Changes tab gains focus (tab switch or app foreground)
-  - "Last refreshed" timestamp displayed below the header
-  - Empty state message when the working tree is clean
-  - If the server returns `NOT_GIT_REPO`, show a message indicating the working directory is not a git repository
-
-### Verification
-
-- API tests using a temporary git repo: create, modify, stage, and delete files; verify status endpoint returns correct data; verify diff endpoint returns correct unified diff; verify path traversal is rejected; verify non-git directory returns `NOT_GIT_REPO`
-- Component tests: file list renders staged/unstaged sections with correct badges, diff viewer displays coloured lines, non-git-repo error renders appropriate message
-
-### Validation
-
-- Make changes to a file in the working directory, open the Changes tab, confirm the file appears in "Unstaged"
-- Stage the file with `git add`, refresh, confirm it moves to "Staged"
-- Tap the file to view its diff
-
----
-
 ## Task 9: Git history view
 
 ### Requirements

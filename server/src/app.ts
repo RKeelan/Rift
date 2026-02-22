@@ -2,6 +2,7 @@ import path from "node:path";
 import express from "express";
 import { simpleGit } from "simple-git";
 import { fileRoutes } from "./routes/files.js";
+import { gitRoutes } from "./routes/git.js";
 import { sessionRoutes } from "./routes/sessions.js";
 import type { SessionManager } from "./session.js";
 
@@ -39,6 +40,7 @@ export function createApp(
 	});
 
 	app.use("/api/files", fileRoutes(config.workingDir));
+	app.use("/api/git", gitRoutes(config.workingDir));
 
 	if (sessionManager) {
 		app.use("/api/sessions", sessionRoutes(sessionManager));

@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { Router } from "express";
 import { simpleGit } from "simple-git";
+import { resolveSafePath } from "../pathUtils.js";
 
 const MAX_ENTRIES = 1000;
 const MAX_FILE_SIZE = 1024 * 1024; // 1 MB
@@ -11,17 +12,6 @@ interface DirEntry {
 	name: string;
 	type: "file" | "directory";
 	size: number;
-}
-
-function resolveSafePath(
-	workingDir: string,
-	requestedPath: string,
-): string | null {
-	const resolved = path.resolve(workingDir, requestedPath);
-	if (!resolved.startsWith(workingDir + path.sep) && resolved !== workingDir) {
-		return null;
-	}
-	return resolved;
 }
 
 async function isGitRepo(dir: string): Promise<boolean> {
