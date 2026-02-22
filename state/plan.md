@@ -99,7 +99,7 @@ Three tables:
 - Create `.env.example`, `.gitignore`
 - **Verify**: `cargo build` succeeds
 
-### Step 2: Database layer
+### ~~Step 2: Database layer~~ ✓
 
 - Implement `db.rs`: schema creation, message CRUD, task CRUD, context window loading
 - **Verify**: unit tests against in-memory SQLite
@@ -116,6 +116,7 @@ Three tables:
 
 - Implement `telegram.rs` (teloxide dispatcher, owner filter, message splitting)
 - Wire Telegram → Agent → Telegram in `main.rs` (no tools yet)
+- Remove `#[allow(dead_code)]` / `#![allow(dead_code)]` from `config.rs`, `error.rs`, and `db.rs` now that `main.rs` uses them
 - **Verify**: send Telegram message, get Claude response back
 
 ### Step 5: Tool execution
