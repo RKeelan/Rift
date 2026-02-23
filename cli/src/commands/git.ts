@@ -28,4 +28,40 @@ export function registerGit(
 			const data = await api.get(`/api/git/diff?${params}`);
 			output(data, getFormat());
 		});
+
+	git
+		.command("log")
+		.description("Show recent commits")
+		.option("--limit <n>", "Number of commits", "25")
+		.option("--offset <n>", "Skip commits", "0")
+		.action(async (opts: { limit: string; offset: string }) => {
+			const params = new URLSearchParams({
+				limit: opts.limit,
+				offset: opts.offset,
+			});
+			const data = await api.get(`/api/git/log?${params}`);
+			output(data, getFormat());
+		});
+
+	git
+		.command("show")
+		.description("Show commit details and changed files")
+		.argument("<hash>", "Commit hash")
+		.action(async (hash: string) => {
+			const data = await api.get(`/api/git/commit/${encodeURIComponent(hash)}`);
+			output(data, getFormat());
+		});
+
+	git
+		.command("show-diff")
+		.description("Show diff for a file within a commit")
+		.argument("<hash>", "Commit hash")
+		.argument("<path>", "File path")
+		.action(async (hash: string, filePath: string) => {
+			const params = new URLSearchParams({ path: filePath });
+			const data = await api.get(
+				`/api/git/commit/${encodeURIComponent(hash)}/diff?${params}`,
+			);
+			output(data, getFormat());
+		});
 }

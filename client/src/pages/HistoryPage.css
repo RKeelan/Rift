@@ -1,0 +1,290 @@
+.history-page {
+	display: flex;
+	flex-direction: column;
+	height: 100%;
+	overflow: hidden;
+}
+
+/* Header */
+
+.history-header {
+	display: flex;
+	align-items: center;
+	padding: 0.5rem 0.75rem;
+	border-bottom: 1px solid var(--color-border);
+	background: var(--color-surface);
+	flex-shrink: 0;
+}
+
+.history-header-title {
+	font-weight: 600;
+	font-size: 1rem;
+}
+
+/* Commit list */
+
+.history-list {
+	flex: 1;
+	overflow-y: auto;
+	-webkit-overflow-scrolling: touch;
+}
+
+.history-commit {
+	border-bottom: 1px solid var(--color-border);
+}
+
+.history-commit-row {
+	display: flex;
+	align-items: flex-start;
+	gap: 0.375rem;
+	width: 100%;
+	padding: 0.625rem 0.75rem;
+	background: none;
+	border: none;
+	color: var(--color-text);
+	font-size: 0.875rem;
+	text-align: left;
+	cursor: pointer;
+	min-height: 44px;
+}
+
+.history-commit-row:active {
+	background: var(--color-surface-raised);
+}
+
+.history-commit-chevron {
+	display: flex;
+	align-items: center;
+	flex-shrink: 0;
+	color: var(--color-text-muted);
+	margin-top: 0.125rem;
+}
+
+.history-commit-info {
+	display: flex;
+	flex-direction: column;
+	gap: 0.25rem;
+	min-width: 0;
+	flex: 1;
+}
+
+.history-commit-subject {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.history-commit-meta {
+	display: flex;
+	align-items: center;
+	gap: 0.5rem;
+	font-size: 0.75rem;
+	color: var(--color-text-muted);
+}
+
+.history-commit-hash {
+	font-family: var(--font-mono, monospace);
+	font-size: 0.6875rem;
+}
+
+.history-commit-author {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+/* Expanded file list */
+
+.history-commit-files {
+	border-top: 1px solid var(--color-border);
+	background: var(--color-surface);
+}
+
+.history-file-entry {
+	display: flex;
+	align-items: center;
+	gap: 0.5rem;
+	width: 100%;
+	padding: 0.375rem 0.75rem 0.375rem 2rem;
+	background: none;
+	border: none;
+	color: var(--color-text);
+	font-size: 0.8125rem;
+	text-align: left;
+	cursor: pointer;
+	min-height: 36px;
+}
+
+.history-file-entry:active {
+	background: var(--color-surface-raised);
+}
+
+.history-file-path {
+	flex: 1;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.history-file-stats {
+	display: flex;
+	gap: 0.375rem;
+	font-size: 0.75rem;
+	font-family: var(--font-mono, monospace);
+	flex-shrink: 0;
+}
+
+.history-stat-add {
+	color: #7ee787;
+}
+
+.history-stat-del {
+	color: #ffa198;
+}
+
+/* Status badges — reuse changes-badge pattern */
+
+.history-badge {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 1.25rem;
+	height: 1.25rem;
+	font-size: 0.6875rem;
+	font-weight: 700;
+	border-radius: 3px;
+	flex-shrink: 0;
+	line-height: 1;
+}
+
+.history-badge--added {
+	background: rgba(46, 160, 67, 0.2);
+	color: #7ee787;
+}
+
+.history-badge--modified {
+	background: rgba(210, 153, 34, 0.2);
+	color: #e3b341;
+}
+
+.history-badge--deleted {
+	background: rgba(248, 81, 73, 0.2);
+	color: #ffa198;
+}
+
+.history-badge--renamed {
+	background: rgba(110, 168, 254, 0.2);
+	color: var(--color-primary);
+}
+
+/* Diff viewer panel */
+
+.history-diff-view {
+	display: flex;
+	flex-direction: column;
+	height: 100%;
+	overflow: hidden;
+}
+
+.history-diff-header {
+	display: flex;
+	align-items: center;
+	gap: 0.5rem;
+	padding: 0.5rem 0.75rem;
+	border-bottom: 1px solid var(--color-border);
+	background: var(--color-surface);
+	flex-shrink: 0;
+	min-height: 44px;
+}
+
+.history-back-button {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	background: none;
+	border: none;
+	color: var(--color-primary);
+	cursor: pointer;
+	padding: 0.25rem;
+	border-radius: 4px;
+	flex-shrink: 0;
+}
+
+.history-back-button:active {
+	background: var(--color-surface-raised);
+}
+
+.history-diff-filename {
+	flex: 1;
+	font-size: 0.875rem;
+	font-weight: 500;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.history-diff-hash {
+	font-size: 0.6875rem;
+	font-family: var(--font-mono, monospace);
+	color: var(--color-text-muted);
+	padding: 0.125rem 0.375rem;
+	border: 1px solid var(--color-border);
+	border-radius: 3px;
+	flex-shrink: 0;
+}
+
+.history-diff-content {
+	flex: 1;
+	overflow-y: auto;
+	-webkit-overflow-scrolling: touch;
+}
+
+.history-diff-truncated {
+	padding: 0.5rem 0.75rem;
+	text-align: center;
+	color: var(--color-text-muted);
+	font-size: 0.8125rem;
+	border-top: 1px solid var(--color-border);
+}
+
+/* Load more button */
+
+.history-load-more {
+	display: block;
+	width: 100%;
+	padding: 0.75rem;
+	background: none;
+	border: none;
+	color: var(--color-primary);
+	font-size: 0.875rem;
+	font-weight: 500;
+	cursor: pointer;
+	text-align: center;
+}
+
+.history-load-more:active {
+	background: var(--color-surface-raised);
+}
+
+.history-load-more:disabled {
+	color: var(--color-text-muted);
+	cursor: default;
+}
+
+/* Messages and states */
+
+.history-message {
+	padding: 2rem 1rem;
+	text-align: center;
+	color: var(--color-text-muted);
+}
+
+.history-message--inline {
+	padding: 0.75rem 1rem;
+}
+
+.history-error {
+	padding: 2rem 1rem;
+	text-align: center;
+	color: var(--color-error);
+}

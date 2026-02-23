@@ -89,6 +89,212 @@ export function gitRoutes(workingDir: string): Router {
 		res.json({ files: entries });
 	});
 
+	// GET /api/git/log?limit=<n>&offset=<n>
+	router.get("/log", async (req, res) => {
+		const isRepo = await git.checkIsRepo();
+		if (!isRepo) {
+			res.status(400).json({
+				error: {
+					code: "NOT_GIT_REPO",
+					message: "The working directory is not a git repository",
+				},
+			});
+			return;
+		}
+
+		const limit = Math.min(Math.max(1, Number(req.query.limit) || 25), 100);
+		const offset = Math.max(0, Number(req.query.offset) || 0);
+
+		try {
+			const log = await git.log([`--skip=${offset}`, `--max-count=${limit}`]);
+
+			const commits = log.all.map((entry) => ({
+				hash: entry.hash,
+				author: entry.author_name,
+				date: entry.date,
+				subject: entry.message,
+			}));
+
+			res.json({ commits });
+		} catch {
+			// No commits yet (empty repo)
+			res.json({ commits: [] });
+		}
+	});
+
+	// GET /api/git/commit/:hash
+	router.get("/commit/:hash", async (req, res) => {
+		const { hash } = req.params;
+		if (!/^[0-9a-f]{7,40}$/.test(hash)) {
+			res.status(400).json({
+				error: {
+					code: "INVALID_HASH",
+					message: "Hash must be 7-40 lowercase hex characters",
+				},
+			});
+			return;
+		}
+
+		const isRepo = await git.checkIsRepo();
+		if (!isRepo) {
+			res.status(400).json({
+				error: {
+					code: "NOT_GIT_REPO",
+					message: "The working directory is not a git repository",
+				},
+			});
+			return;
+		}
+
+		try {
+			// Get commit metadata
+			const logResult = await git.log(["-1", hash]);
+			const commit = logResult.latest;
+			if (!commit) {
+				res.status(404).json({
+					error: { code: "NOT_FOUND", message: "Commit not found" },
+				});
+				return;
+			}
+
+			// Get changed files with stats
+			const raw = await git.raw([
+				"diff-tree",
+				"--root",
+				"--no-commit-id",
+				"-r",
+				"--numstat",
+				"--diff-filter=ACDMRT",
+				hash,
+			]);
+
+			const files = raw
+				.trim()
+				.split("\n")
+				.filter(Boolean)
+				.map((line) => {
+					const [add, del, ...pathParts] = line.split("\t");
+					const filePath = pathParts.join("\t"); // handle renames with tabs
+					return {
+						path: filePath,
+						additions: add === "-" ? 0 : Number(add),
+						deletions: del === "-" ? 0 : Number(del),
+					};
+				});
+
+			// Get file statuses (A/M/D/R)
+			const statusRaw = await git.raw([
+				"diff-tree",
+				"--root",
+				"--no-commit-id",
+				"-r",
+				"--name-status",
+				"--diff-filter=ACDMRT",
+				hash,
+			]);
+
+			const statusMap = new Map<string, string>();
+			for (const line of statusRaw.trim().split("\n").filter(Boolean)) {
+				const [status, ...pathParts] = line.split("\t");
+				const filePath = pathParts[pathParts.length - 1]; // for renames, use destination
+				statusMap.set(filePath, status.charAt(0));
+			}
+
+			const filesWithStatus = files.map((f) => ({
+				...f,
+				status: statusMap.get(f.path) ?? "M",
+			}));
+
+			res.json({
+				hash: commit.hash,
+				author: commit.author_name,
+				date: commit.date,
+				subject: commit.message,
+				files: filesWithStatus,
+			});
+		} catch {
+			res.status(404).json({
+				error: { code: "NOT_FOUND", message: "Commit not found" },
+			});
+		}
+	});
+
+	// GET /api/git/commit/:hash/diff?path=<file>
+	router.get("/commit/:hash/diff", async (req, res) => {
+		const { hash } = req.params;
+		if (!/^[0-9a-f]{7,40}$/.test(hash)) {
+			res.status(400).json({
+				error: {
+					code: "INVALID_HASH",
+					message: "Hash must be 7-40 lowercase hex characters",
+				},
+			});
+			return;
+		}
+
+		const filePath = req.query.path as string;
+		if (!filePath) {
+			res.status(400).json({
+				error: {
+					code: "MISSING_PATH",
+					message: "path parameter is required",
+				},
+			});
+			return;
+		}
+
+		const isRepo = await git.checkIsRepo();
+		if (!isRepo) {
+			res.status(400).json({
+				error: {
+					code: "NOT_GIT_REPO",
+					message: "The working directory is not a git repository",
+				},
+			});
+			return;
+		}
+
+		const toplevel = (await git.revparse(["--show-toplevel"])).trim();
+		const resolved = resolveSafePath(toplevel, filePath);
+		if (!resolved) {
+			res.status(403).json({
+				error: {
+					code: "PATH_FORBIDDEN",
+					message: "Path escapes the working directory",
+				},
+			});
+			return;
+		}
+
+		try {
+			const relativePath = path.relative(toplevel, resolved);
+			const gitRoot = simpleGit(toplevel);
+			// Use git show which handles root commits (no parent) naturally
+			const diff = await gitRoot.raw([
+				"show",
+				"--format=",
+				"-p",
+				hash,
+				"--",
+				relativePath,
+			]);
+
+			if (diff.length > MAX_DIFF_SIZE) {
+				res.json({
+					diff: diff.slice(0, MAX_DIFF_SIZE),
+					truncated: true,
+				});
+				return;
+			}
+
+			res.json({ diff, truncated: false });
+		} catch {
+			res.status(404).json({
+				error: { code: "NOT_FOUND", message: "Commit or file not found" },
+			});
+		}
+	});
+
 	// GET /api/git/diff?path=<file>&staged=<bool>
 	router.get("/diff", async (req, res) => {
 		const filePath = req.query.path as string;
