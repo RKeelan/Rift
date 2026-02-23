@@ -104,7 +104,7 @@ Three tables:
 - Implement `db.rs`: schema creation, message CRUD, task CRUD, context window loading
 - **Verify**: unit tests against in-memory SQLite
 
-### Step 3: Agent core
+### ~~Step 3: Agent core~~ ✓
 
 - Implement `agent/types.rs` (Anthropic API request/response types)
 - Implement `agent/mod.rs` (Agent + ToolExecutor traits)
@@ -116,7 +116,7 @@ Three tables:
 
 - Implement `telegram.rs` (teloxide dispatcher, owner filter, message splitting)
 - Wire Telegram → Agent → Telegram in `main.rs` (no tools yet)
-- Remove `#[allow(dead_code)]` / `#![allow(dead_code)]` from `config.rs`, `error.rs`, and `db.rs` now that `main.rs` uses them
+- Remove `#[allow(dead_code)]` / `#![allow(dead_code)]` from `config.rs`, `error.rs`, `db.rs`, and `agent/mod.rs` now that `main.rs` uses them
 - **Verify**: send Telegram message, get Claude response back
 
 ### Step 5: Tool execution
