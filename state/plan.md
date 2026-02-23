@@ -112,7 +112,7 @@ Three tables:
 - Implement `agent/tools.rs` (tool JSON schemas, ImpToolExecutor stub)
 - **Verify**: hardcoded prompt → Claude response round-trip
 
-### Step 4: Telegram integration
+### ~~Step 4: Telegram integration~~ ✓
 
 - Implement `telegram.rs` (teloxide dispatcher, owner filter, message splitting)
 - Wire Telegram → Agent → Telegram in `main.rs` (no tools yet)

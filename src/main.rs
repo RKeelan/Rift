@@ -6,8 +6,14 @@ mod scheduler;
 mod telegram;
 mod web_fetch;
 
+use std::sync::Arc;
+
 use config::Config;
 use tracing_subscriber::EnvFilter;
+
+use agent::anthropic::AnthropicAgent;
+use agent::tools::ImpToolExecutor;
+use db::Database;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -24,7 +30,15 @@ async fn main() -> anyhow::Result<()> {
     let config = Config::from_env()?;
     tracing::info!(model = %config.anthropic_model, "Imp starting");
 
-    // Subsystems will be wired in here in later steps.
+    let db = Arc::new(Database::open(&config.database_path)?);
+    let agent: Arc<dyn agent::Agent> = Arc::new(AnthropicAgent::new(
+        config.anthropic_api_key,
+        config.anthropic_model,
+    ));
+    let tool_executor: Arc<dyn agent::ToolExecutor> = Arc::new(ImpToolExecutor::new());
+    let bot = teloxide::Bot::new(config.telegram_bot_token);
+
+    telegram::run(bot, config.telegram_owner_chat_id, db, agent, tool_executor).await;
 
     tracing::info!("Imp shutting down");
     Ok(())

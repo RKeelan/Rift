@@ -21,3 +21,4 @@ cargo fmt --check  # Check formatting
 - Always run `cargo fmt` before committing
 - Never use `git -C <repo>` for the repo you're working in—it breaks permission checks
 - When updating PRs to fix failing tests, prefer amending the commit to pushing additional commits. Check with the user if you feel you need to violate this guideline
+- Never add PR numbers to commit subject lines (e.g., ending in "(#9)"). These will be added by the GitHub PR machinery; adding one manually will (a) likely be wrong and (b), result in doubled-up PR numbers

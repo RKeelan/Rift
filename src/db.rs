@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -150,6 +148,7 @@ impl Database {
     }
 
     /// Delete all messages.
+    #[allow(dead_code)] // Used in Step 5
     pub fn clear_messages(&self) -> Result<()> {
         let conn = self.lock();
         conn.execute("DELETE FROM messages", [])?;
@@ -159,6 +158,7 @@ impl Database {
     // ── Scheduled Tasks ───────────────────────────────────────────────
 
     /// Create a new scheduled task.
+    #[allow(dead_code)] // Used in Step 5
     pub fn create_task(
         &self,
         id: &str,
@@ -185,6 +185,7 @@ impl Database {
     }
 
     /// Get a task by ID.
+    #[allow(dead_code)] // Used in Step 5
     pub fn get_task(&self, id: &str) -> Result<Option<ScheduledTask>> {
         let conn = self.lock();
         let mut stmt = conn.prepare(
@@ -208,6 +209,7 @@ impl Database {
     }
 
     /// List all tasks, newest first.
+    #[allow(dead_code)] // Used in Step 5
     pub fn list_tasks(&self) -> Result<Vec<ScheduledTask>> {
         let conn = self.lock();
         let mut stmt = conn.prepare(
@@ -231,6 +233,7 @@ impl Database {
     }
 
     /// Get all active tasks whose next_run is at or before `now`.
+    #[allow(dead_code)] // Used in Step 6
     pub fn get_due_tasks(&self, now: &DateTime<Utc>) -> Result<Vec<ScheduledTask>> {
         let conn = self.lock();
         let mut stmt = conn.prepare(
@@ -256,6 +259,7 @@ impl Database {
     }
 
     /// Update a task's status (e.g. to "paused" or "completed").
+    #[allow(dead_code)] // Used in Step 5
     pub fn update_task_status(&self, id: &str, status: &str) -> Result<()> {
         let conn = self.lock();
         conn.execute(
@@ -266,6 +270,7 @@ impl Database {
     }
 
     /// Update a task after it runs: set next_run, and mark completed if next_run is None.
+    #[allow(dead_code)] // Used in Step 6
     pub fn update_task_after_run(&self, id: &str, next_run: Option<&DateTime<Utc>>) -> Result<()> {
         let conn = self.lock();
         match next_run {
@@ -286,6 +291,7 @@ impl Database {
     }
 
     /// Delete a task and its run logs.
+    #[allow(dead_code)] // Used in Step 5
     pub fn delete_task(&self, id: &str) -> Result<()> {
         let conn = self.lock();
         let tx = conn.unchecked_transaction()?;
@@ -298,6 +304,7 @@ impl Database {
     // ── Task Run Logs ─────────────────────────────────────────────────
 
     /// Record the result of a task execution.
+    #[allow(dead_code)] // Used in Step 6
     pub fn log_task_run(
         &self,
         task_id: &str,
@@ -329,10 +336,12 @@ impl Database {
 /// A message retrieved from the database.
 #[derive(Debug, Clone)]
 pub struct StoredMessage {
+    #[allow(dead_code)]
     pub id: String,
     pub role: String,
     /// JSON-encoded content blocks.
     pub content: String,
+    #[allow(dead_code)]
     pub timestamp: String,
     pub token_estimate: i64,
 }
@@ -340,12 +349,19 @@ pub struct StoredMessage {
 /// A scheduled task retrieved from the database.
 #[derive(Debug, Clone)]
 pub struct ScheduledTask {
+    #[allow(dead_code)]
     pub id: String,
+    #[allow(dead_code)]
     pub prompt: String,
+    #[allow(dead_code)]
     pub schedule_type: String,
+    #[allow(dead_code)]
     pub schedule_value: String,
+    #[allow(dead_code)]
     pub next_run: Option<String>,
+    #[allow(dead_code)]
     pub status: String,
+    #[allow(dead_code)]
     pub created_at: String,
 }
 

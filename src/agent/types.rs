@@ -61,6 +61,7 @@ impl ContentBlock {
         ContentBlock::Text { text: text.into() }
     }
 
+    #[allow(dead_code)] // Used in Step 5
     pub fn tool_result(tool_use_id: impl Into<String>, content: impl Into<String>) -> Self {
         ContentBlock::ToolResult {
             tool_use_id: tool_use_id.into(),
@@ -90,6 +91,7 @@ pub struct ToolDefinition {
 // ── Response types ───────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)] // Fields deserialized from API but not yet read in production code
 pub struct MessagesResponse {
     pub id: String,
     pub role: Role,
@@ -122,6 +124,7 @@ pub struct ApiErrorResponse {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 pub struct ApiErrorDetail {
     #[serde(rename = "type")]
     pub error_type: String,

@@ -2,13 +2,13 @@ use crate::error::ImpError;
 use std::env;
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct Config {
     pub anthropic_api_key: String,
     pub telegram_bot_token: String,
     pub telegram_owner_chat_id: i64,
     pub database_path: String,
     pub anthropic_model: String,
+    #[allow(dead_code)] // Used in Step 5
     pub web_fetch_allowed_domains: Vec<String>,
 }
 
