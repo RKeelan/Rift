@@ -53,6 +53,44 @@ function formatGitStatus(data: { files: StatusEntry[] }): string {
 	return lines.join("\n");
 }
 
+interface CommitEntry {
+	hash: string;
+	author: string;
+	date: string;
+	subject: string;
+}
+
+interface CommitFile {
+	path: string;
+	status: string;
+	additions: number;
+	deletions: number;
+}
+
+function formatGitLog(data: { commits: CommitEntry[] }): string {
+	if (data.commits.length === 0) return "No commits";
+	return data.commits
+		.map((c) => `${c.hash.slice(0, 7)}  ${c.subject}  (${c.author})`)
+		.join("\n");
+}
+
+function formatCommitDetail(
+	data: CommitEntry & { files: CommitFile[] },
+): string {
+	const lines = [
+		`commit ${data.hash}`,
+		`Author: ${data.author}`,
+		`Date:   ${data.date}`,
+		"",
+		`    ${data.subject}`,
+		"",
+	];
+	for (const f of data.files) {
+		lines.push(`${f.status}  ${f.path}  +${f.additions} -${f.deletions}`);
+	}
+	return lines.join("\n");
+}
+
 function formatSession(data: Record<string, unknown>): string {
 	const parts: string[] = [];
 	if (data.id) parts.push(`id: ${data.id}`);
@@ -92,10 +130,26 @@ export function output(data: unknown, format: Format): void {
 			return;
 		}
 
+		// Git log
+		if (Array.isArray(obj.commits)) {
+			process.stdout.write(
+				`${formatGitLog(obj as { commits: CommitEntry[] })}\n`,
+			);
+			return;
+		}
+
 		// Git status
-		if (Array.isArray(obj.files)) {
+		if (Array.isArray(obj.files) && !obj.hash) {
 			process.stdout.write(
 				`${formatGitStatus(obj as { files: StatusEntry[] })}\n`,
+			);
+			return;
+		}
+
+		// Commit detail (has hash + files)
+		if (obj.hash && Array.isArray(obj.files)) {
+			process.stdout.write(
+				`${formatCommitDetail(obj as unknown as CommitEntry & { files: CommitFile[] })}\n`,
 			);
 			return;
 		}
