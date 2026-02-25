@@ -17,6 +17,7 @@ function makeConfig(): AppConfig {
 		port: 0,
 		agentCommand: "echo",
 		workingDir: process.cwd(),
+		basePath: "",
 	};
 }
 

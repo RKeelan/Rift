@@ -6,6 +6,7 @@ import {
 	FolderOpen,
 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { apiUrl } from "../apiUrl.ts";
 import { useApi } from "../hooks/useApi.ts";
 import "./FilesPage.css";
 
@@ -126,7 +127,7 @@ function FileViewer({
 		(async () => {
 			try {
 				const response = await fetch(
-					`/api/files/content?path=${encodeURIComponent(filePath)}`,
+					apiUrl(`/api/files/content?path=${encodeURIComponent(filePath)}`),
 					{ signal: controller.signal },
 				);
 				if (!response.ok) {

@@ -1,5 +1,6 @@
 import { ArrowLeft, RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { apiUrl } from "../apiUrl.ts";
 import { DiffViewer } from "../components/DiffViewer.tsx";
 import { useErrorBanner } from "../components/ErrorBanner.tsx";
 import { useApi } from "../hooks/useApi.ts";
@@ -87,7 +88,7 @@ export function ChangesPage() {
 			abortRef.current = controller;
 
 			try {
-				const res = await fetch("/api/git/status", {
+				const res = await fetch(apiUrl("/api/git/status"), {
 					signal: controller.signal,
 				});
 				if (res.ok) {
