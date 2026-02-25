@@ -11,6 +11,7 @@ function makeConfig(workingDir: string): AppConfig {
 		port: 3000,
 		agentCommand: "echo",
 		workingDir,
+		basePath: "",
 	};
 }
 

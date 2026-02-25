@@ -5,6 +5,7 @@ import type {
 	SessionEventMessage,
 	UserMessageRecord,
 } from "shared";
+import { apiUrl } from "../apiUrl.ts";
 
 export type SessionStatus =
 	| "connecting"
@@ -61,7 +62,7 @@ export function useAgentSession() {
 
 			const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
 			const ws = new WebSocket(
-				`${protocol}//${window.location.host}/api/sessions/${id}/ws`,
+				`${protocol}//${window.location.host}${apiUrl(`/api/sessions/${id}/ws`)}`,
 			);
 			wsRef.current = ws;
 			setStatus("connecting");
@@ -131,7 +132,7 @@ export function useAgentSession() {
 
 			if (storedId) {
 				// Check if the stored session is still running
-				const response = await fetch(`/api/sessions/${storedId}`);
+				const response = await fetch(apiUrl(`/api/sessions/${storedId}`));
 				if (response.ok) {
 					const session = (await response.json()) as SessionInfo;
 					if (session.state === "running") {
@@ -145,7 +146,7 @@ export function useAgentSession() {
 			}
 
 			// Create a new session
-			const response = await fetch("/api/sessions", { method: "POST" });
+			const response = await fetch(apiUrl("/api/sessions"), { method: "POST" });
 			if (!response.ok) {
 				setStatus("error");
 				setErrorMessage("Failed to create session");
@@ -188,7 +189,7 @@ export function useAgentSession() {
 		const currentId = localStorage.getItem(STORAGE_KEY);
 		if (currentId) {
 			try {
-				await fetch(`/api/sessions/${currentId}`, { method: "DELETE" });
+				await fetch(apiUrl(`/api/sessions/${currentId}`), { method: "DELETE" });
 			} catch {
 				// Best effort
 			}
@@ -202,7 +203,7 @@ export function useAgentSession() {
 
 		// Create a fresh session
 		try {
-			const response = await fetch("/api/sessions", { method: "POST" });
+			const response = await fetch(apiUrl("/api/sessions"), { method: "POST" });
 			if (!response.ok) {
 				setStatus("error");
 				setErrorMessage("Failed to create session");

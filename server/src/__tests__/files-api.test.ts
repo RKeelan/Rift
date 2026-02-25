@@ -13,6 +13,7 @@ function makeConfig(overrides?: Partial<AppConfig>): AppConfig {
 		port: 3000,
 		agentCommand: "echo",
 		workingDir: tmpDir,
+		basePath: "",
 		...overrides,
 	};
 }

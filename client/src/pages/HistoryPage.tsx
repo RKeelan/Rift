@@ -1,5 +1,6 @@
 import { ArrowLeft, ChevronDown, ChevronRight } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { apiUrl } from "../apiUrl.ts";
 import { DiffViewer } from "../components/DiffViewer.tsx";
 import { useErrorBanner } from "../components/ErrorBanner.tsx";
 import "./HistoryPage.css";
@@ -122,7 +123,7 @@ export function HistoryPage() {
 					limit: String(PAGE_SIZE),
 					offset: String(offset),
 				});
-				const res = await fetch(`/api/git/log?${params}`, {
+				const res = await fetch(apiUrl(`/api/git/log?${params}`), {
 					signal: controller.signal,
 				});
 
@@ -178,7 +179,9 @@ export function HistoryPage() {
 			setExpandedLoading(true);
 
 			try {
-				const res = await fetch(`/api/git/commit/${encodeURIComponent(hash)}`);
+				const res = await fetch(
+					apiUrl(`/api/git/commit/${encodeURIComponent(hash)}`),
+				);
 				if (expandedHashRef.current !== hash) return;
 				if (res.ok) {
 					const data: CommitDetailResponse = await res.json();
@@ -207,7 +210,7 @@ export function HistoryPage() {
 			try {
 				const params = new URLSearchParams({ path: filePath });
 				const res = await fetch(
-					`/api/git/commit/${encodeURIComponent(hash)}/diff?${params}`,
+					apiUrl(`/api/git/commit/${encodeURIComponent(hash)}/diff?${params}`),
 				);
 				if (res.ok) {
 					const data: DiffResponse = await res.json();
