@@ -148,7 +148,7 @@ impl Database {
     }
 
     /// Delete all messages.
-    #[allow(dead_code)] // Used in Step 5
+    #[allow(dead_code)] // Will be used for conversation management
     pub fn clear_messages(&self) -> Result<()> {
         let conn = self.lock();
         conn.execute("DELETE FROM messages", [])?;
@@ -158,7 +158,6 @@ impl Database {
     // ── Scheduled Tasks ───────────────────────────────────────────────
 
     /// Create a new scheduled task.
-    #[allow(dead_code)] // Used in Step 5
     pub fn create_task(
         &self,
         id: &str,
@@ -185,7 +184,6 @@ impl Database {
     }
 
     /// Get a task by ID.
-    #[allow(dead_code)] // Used in Step 5
     pub fn get_task(&self, id: &str) -> Result<Option<ScheduledTask>> {
         let conn = self.lock();
         let mut stmt = conn.prepare(
@@ -209,7 +207,6 @@ impl Database {
     }
 
     /// List all tasks, newest first.
-    #[allow(dead_code)] // Used in Step 5
     pub fn list_tasks(&self) -> Result<Vec<ScheduledTask>> {
         let conn = self.lock();
         let mut stmt = conn.prepare(
@@ -259,7 +256,7 @@ impl Database {
     }
 
     /// Update a task's status (e.g. to "paused" or "completed").
-    #[allow(dead_code)] // Used in Step 5
+    #[allow(dead_code)] // Used by scheduler
     pub fn update_task_status(&self, id: &str, status: &str) -> Result<()> {
         let conn = self.lock();
         conn.execute(
@@ -291,7 +288,6 @@ impl Database {
     }
 
     /// Delete a task and its run logs.
-    #[allow(dead_code)] // Used in Step 5
     pub fn delete_task(&self, id: &str) -> Result<()> {
         let conn = self.lock();
         let tx = conn.unchecked_transaction()?;
@@ -349,17 +345,11 @@ pub struct StoredMessage {
 /// A scheduled task retrieved from the database.
 #[derive(Debug, Clone)]
 pub struct ScheduledTask {
-    #[allow(dead_code)]
     pub id: String,
-    #[allow(dead_code)]
     pub prompt: String,
-    #[allow(dead_code)]
     pub schedule_type: String,
-    #[allow(dead_code)]
     pub schedule_value: String,
-    #[allow(dead_code)]
     pub next_run: Option<String>,
-    #[allow(dead_code)]
     pub status: String,
     #[allow(dead_code)]
     pub created_at: String,

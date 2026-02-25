@@ -119,7 +119,7 @@ Three tables:
 - Remove `#[allow(dead_code)]` / `#![allow(dead_code)]` from `config.rs`, `error.rs`, `db.rs`, and `agent/mod.rs` now that `main.rs` uses them
 - **Verify**: send Telegram message, get Claude response back
 
-### Step 5: Tool execution
+### ~~Step 5: Tool execution~~ ✓
 
 - Implement tool handlers in `agent/tools.rs` (schedule, list, cancel)
 - Implement `web_fetch.rs` (domain whitelist, HTML→text, truncation)

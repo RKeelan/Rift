@@ -35,7 +35,10 @@ async fn main() -> anyhow::Result<()> {
         config.anthropic_api_key,
         config.anthropic_model,
     ));
-    let tool_executor: Arc<dyn agent::ToolExecutor> = Arc::new(ImpToolExecutor::new());
+    let tool_executor: Arc<dyn agent::ToolExecutor> = Arc::new(ImpToolExecutor::new(
+        db.clone(),
+        config.web_fetch_allowed_domains,
+    ));
     let bot = teloxide::Bot::new(config.telegram_bot_token);
 
     telegram::run(bot, config.telegram_owner_chat_id, db, agent, tool_executor).await;

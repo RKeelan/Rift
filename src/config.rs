@@ -8,7 +8,6 @@ pub struct Config {
     pub telegram_owner_chat_id: i64,
     pub database_path: String,
     pub anthropic_model: String,
-    #[allow(dead_code)] // Used in Step 5
     pub web_fetch_allowed_domains: Vec<String>,
 }
 

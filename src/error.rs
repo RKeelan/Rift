@@ -14,15 +14,10 @@ pub enum ImpError {
     #[error("Anthropic API error: {status} - {message}")]
     AnthropicApi { status: u16, message: String },
 
-    #[error("tool execution error: {0}")]
-    #[allow(dead_code)] // Used in Step 5
-    ToolExecution(String),
-
     #[error("configuration error: {0}")]
     Config(String),
 
     #[error("web fetch error: {0}")]
-    #[allow(dead_code)] // Used in Step 5
     WebFetch(String),
 }
 
