@@ -2,7 +2,13 @@ import react from "@vitejs/plugin-react";
 import { VitePWA } from "vite-plugin-pwa";
 import { defineConfig } from "vite";
 
+// BASE_NAME avoids slashes so MSYS doesn't mangle it as a path.
+// e.g. BASE_NAME=rift → base="/rift/"
+const baseName = process.env.BASE_NAME;
+const base = baseName ? `/${baseName}/` : "/";
+
 export default defineConfig({
+	base,
 	plugins: [
 		react(),
 		VitePWA({
@@ -28,7 +34,7 @@ export default defineConfig({
 						},
 					},
 				],
-				navigateFallback: "index.html",
+				navigateFallback: `${base}index.html`,
 			},
 			manifest: {
 				name: "Rift",
@@ -37,15 +43,15 @@ export default defineConfig({
 				theme_color: "#121212",
 				background_color: "#121212",
 				display: "standalone",
-				start_url: "/",
+				start_url: base,
 				icons: [
 					{
-						src: "/icon-192.png",
+						src: `${base}icon-192.png`,
 						sizes: "192x192",
 						type: "image/png",
 					},
 					{
-						src: "/icon-512.png",
+						src: `${base}icon-512.png`,
 						sizes: "512x512",
 						type: "image/png",
 					},

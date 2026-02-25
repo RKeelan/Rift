@@ -1,3 +1,8 @@
+// Set Vite's BASE_URL for tests (normally injected by Vite at build time)
+if (!import.meta.env.BASE_URL) {
+	(import.meta.env as Record<string, string>).BASE_URL = "/";
+}
+
 import { GlobalWindow } from "happy-dom";
 
 const window = new GlobalWindow();

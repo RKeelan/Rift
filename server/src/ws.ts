@@ -9,7 +9,10 @@ import { WebSocket, WebSocketServer } from "ws";
 import type { SessionManager } from "./session.js";
 
 const MAX_PAYLOAD = 1 * 1024 * 1024; // 1 MB
-const SESSION_WS_PATTERN = /^\/api\/sessions\/([^/]+)\/ws$/;
+function sessionWsPattern(basePath: string): RegExp {
+	const escaped = basePath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+	return new RegExp(`^${escaped}/api/sessions/([^/]+)/ws$`);
+}
 
 export interface WebSocketRelay {
 	wss: WebSocketServer;
@@ -19,8 +22,10 @@ export interface WebSocketRelay {
 export function setupWebSocket(
 	server: Server,
 	sessionManager: SessionManager,
+	basePath = "",
 ): WebSocketRelay {
 	const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_PAYLOAD });
+	const pattern = sessionWsPattern(basePath);
 
 	// Track connected clients per session
 	const sessionClients = new Map<string, Set<WebSocket>>();
@@ -66,7 +71,7 @@ export function setupWebSocket(
 	// Handle HTTP upgrade requests
 	server.on("upgrade", (request, socket, head) => {
 		const url = new URL(request.url ?? "", `http://${request.headers.host}`);
-		const match = url.pathname.match(SESSION_WS_PATTERN);
+		const match = url.pathname.match(pattern);
 
 		if (!match) {
 			socket.destroy();

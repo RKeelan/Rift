@@ -16,7 +16,7 @@ const server = app.listen(config.port, "0.0.0.0", () => {
 	console.log(`Working directory: ${config.workingDir}`);
 });
 
-const relay = setupWebSocket(server, sessionManager);
+const relay = setupWebSocket(server, sessionManager, config.basePath);
 
 let shuttingDown = false;
 function shutdown() {

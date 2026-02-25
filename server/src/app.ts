@@ -10,13 +10,16 @@ export interface AppConfig {
 	port: number;
 	agentCommand: string;
 	workingDir: string;
+	basePath: string;
 }
 
 export function getConfig(): AppConfig {
+	const baseName = process.env.BASE_NAME;
 	return {
 		port: Number(process.env.PORT) || 3000,
 		agentCommand: process.env.AGENT_COMMAND || "echo",
 		workingDir: process.env.WORKING_DIR || process.cwd(),
+		basePath: baseName ? `/${baseName}` : "",
 	};
 }
 
@@ -25,10 +28,11 @@ export function createApp(
 	sessionManager?: SessionManager,
 ): express.Express {
 	const app = express();
+	const router = express.Router();
 
-	app.use(express.json({ limit: "1mb" }));
+	router.use(express.json({ limit: "1mb" }));
 
-	app.get("/api/health", async (_req, res) => {
+	router.get("/api/health", async (_req, res) => {
 		let gitRepo = false;
 		try {
 			const git = simpleGit(config.workingDir);
@@ -39,11 +43,11 @@ export function createApp(
 		res.json({ status: "ok", gitRepo });
 	});
 
-	app.use("/api/files", fileRoutes(config.workingDir));
-	app.use("/api/git", gitRoutes(config.workingDir));
+	router.use("/api/files", fileRoutes(config.workingDir));
+	router.use("/api/git", gitRoutes(config.workingDir));
 
 	if (sessionManager) {
-		app.use("/api/sessions", sessionRoutes(sessionManager));
+		router.use("/api/sessions", sessionRoutes(sessionManager));
 	}
 
 	// Production: serve static files from client/dist
@@ -54,19 +58,29 @@ export function createApp(
 		"client",
 		"dist",
 	);
-	app.use(express.static(clientDist));
+	router.use(express.static(clientDist));
 
 	// 404 handler for unmatched API routes
-	app.all("/api/*", (_req, res) => {
+	router.all("/api/*", (_req, res) => {
 		res.status(404).json({
 			error: { code: "NOT_FOUND", message: "Endpoint not found" },
 		});
 	});
 
 	// SPA fallback: serve index.html for client-side routes
-	app.get("*", (_req, res) => {
+	router.get("*", (_req, res) => {
 		res.sendFile(path.join(clientDist, "index.html"));
 	});
+
+	// Mount router at base path (e.g. "/rift" or "/" for dev)
+	app.use(config.basePath || "/", router);
+
+	// Redirect root to base path for convenience
+	if (config.basePath) {
+		app.get("/", (_req, res) => {
+			res.redirect(config.basePath);
+		});
+	}
 
 	// Catch-all error handler
 	app.use(

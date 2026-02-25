@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef } from "react";
+import { apiUrl } from "../apiUrl.ts";
 import { useErrorBanner } from "../components/ErrorBanner.tsx";
 
 export interface ApiError {
@@ -51,7 +52,7 @@ export function useApi() {
 					headers["Content-Type"] ??= "application/json";
 				}
 
-				const response = await fetch(url, {
+				const response = await fetch(apiUrl(url), {
 					...fetchOptions,
 					signal: controller.signal,
 					headers,
