@@ -1,3 +1,4 @@
+import fs from "node:fs/promises";
 import path from "node:path";
 
 /**
@@ -15,4 +16,33 @@ export function resolveSafePath(
 		return null;
 	}
 	return resolved;
+}
+
+export type RepoResult =
+	| { ok: true; path: string }
+	| { ok: false; reason: "forbidden" | "not_found" };
+
+/**
+ * Resolves a repo name (relative path like "RKeelan/Rift") against `reposRoot`
+ * and validates it. Rejects absolute paths, `..` segments, and names that
+ * resolve outside the root.
+ */
+export async function resolveRepo(
+	reposRoot: string,
+	repoName: string,
+): Promise<RepoResult> {
+	if (!repoName || path.isAbsolute(repoName) || repoName.includes("..")) {
+		return { ok: false, reason: "forbidden" };
+	}
+	const resolved = path.resolve(reposRoot, repoName);
+	if (!resolved.startsWith(reposRoot + path.sep) && resolved !== reposRoot) {
+		return { ok: false, reason: "forbidden" };
+	}
+	try {
+		const stat = await fs.stat(resolved);
+		if (!stat.isDirectory()) return { ok: false, reason: "not_found" };
+	} catch {
+		return { ok: false, reason: "not_found" };
+	}
+	return { ok: true, path: resolved };
 }

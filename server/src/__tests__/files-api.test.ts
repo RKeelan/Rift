@@ -5,24 +5,28 @@ import path from "node:path";
 import supertest from "supertest";
 import { type AppConfig, createApp } from "../app.js";
 
-let tmpDir: string;
+let reposRoot: string;
+let repoDir: string;
+const repoName = "test-repo";
 let app: ReturnType<typeof createApp>;
 
 function makeConfig(overrides?: Partial<AppConfig>): AppConfig {
 	return {
 		port: 3000,
 		agentCommand: "echo",
-		workingDir: tmpDir,
+		reposRoot,
 		basePath: "",
 		...overrides,
 	};
 }
 
 beforeAll(async () => {
-	tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "rift-files-test-"));
+	reposRoot = await fs.mkdtemp(path.join(os.tmpdir(), "rift-files-test-"));
+	repoDir = path.join(reposRoot, repoName);
+	await fs.mkdir(repoDir);
 
 	// Create directory structure:
-	// tmpDir/
+	// repoDir/
 	//   alpha.txt        (text file)
 	//   beta.ts          (text file)
 	//   gamma/           (directory)
@@ -30,26 +34,26 @@ beforeAll(async () => {
 	//   delta/           (directory)
 	//   binary.bin       (binary file with null bytes)
 
-	await fs.writeFile(path.join(tmpDir, "alpha.txt"), "Hello, alpha!");
-	await fs.writeFile(path.join(tmpDir, "beta.ts"), "const x = 42;");
-	await fs.mkdir(path.join(tmpDir, "gamma"));
-	await fs.writeFile(path.join(tmpDir, "gamma", "nested.txt"), "Nested file");
-	await fs.mkdir(path.join(tmpDir, "delta"));
+	await fs.writeFile(path.join(repoDir, "alpha.txt"), "Hello, alpha!");
+	await fs.writeFile(path.join(repoDir, "beta.ts"), "const x = 42;");
+	await fs.mkdir(path.join(repoDir, "gamma"));
+	await fs.writeFile(path.join(repoDir, "gamma", "nested.txt"), "Nested file");
+	await fs.mkdir(path.join(repoDir, "delta"));
 
 	// Binary file: valid text then a null byte
 	const binaryContent = Buffer.from("text\x00binary");
-	await fs.writeFile(path.join(tmpDir, "binary.bin"), binaryContent);
+	await fs.writeFile(path.join(repoDir, "binary.bin"), binaryContent);
 
 	app = createApp(makeConfig());
 });
 
 afterAll(async () => {
-	await fs.rm(tmpDir, { recursive: true, force: true });
+	await fs.rm(reposRoot, { recursive: true, force: true });
 });
 
 describe("GET /api/files (directory listing)", () => {
 	test("returns entries sorted: directories first, then alphabetically", async () => {
-		const res = await supertest(app).get("/api/files");
+		const res = await supertest(app).get(`/api/files?repo=${repoName}`);
 
 		expect(res.status).toBe(200);
 		expect(res.body.truncated).toBe(false);
@@ -79,7 +83,7 @@ describe("GET /api/files (directory listing)", () => {
 	});
 
 	test("returns entries with name, type, and size fields", async () => {
-		const res = await supertest(app).get("/api/files");
+		const res = await supertest(app).get(`/api/files?repo=${repoName}`);
 
 		expect(res.status).toBe(200);
 		for (const entry of res.body.entries) {
@@ -90,7 +94,9 @@ describe("GET /api/files (directory listing)", () => {
 	});
 
 	test("returns subdirectory contents when path is specified", async () => {
-		const res = await supertest(app).get("/api/files?path=gamma");
+		const res = await supertest(app).get(
+			`/api/files?repo=${repoName}&path=gamma`,
+		);
 
 		expect(res.status).toBe(200);
 		expect(res.body.entries).toHaveLength(1);
@@ -99,47 +105,82 @@ describe("GET /api/files (directory listing)", () => {
 	});
 
 	test("returns 404 for nonexistent directory", async () => {
-		const res = await supertest(app).get("/api/files?path=nonexistent");
+		const res = await supertest(app).get(
+			`/api/files?repo=${repoName}&path=nonexistent`,
+		);
 
 		expect(res.status).toBe(404);
 		expect(res.body.error.code).toBe("NOT_FOUND");
 	});
 
 	test("returns 400 when path points to a file", async () => {
-		const res = await supertest(app).get("/api/files?path=alpha.txt");
+		const res = await supertest(app).get(
+			`/api/files?repo=${repoName}&path=alpha.txt`,
+		);
 
 		expect(res.status).toBe(400);
 		expect(res.body.error.code).toBe("NOT_A_DIRECTORY");
 	});
 
 	test("returns 403 for path traversal with ../", async () => {
-		const res = await supertest(app).get("/api/files?path=../");
+		const res = await supertest(app).get(
+			`/api/files?repo=${repoName}&path=../`,
+		);
 
 		expect(res.status).toBe(403);
 		expect(res.body.error.code).toBe("PATH_FORBIDDEN");
 	});
 
 	test("returns 403 for path traversal with absolute path", async () => {
-		const res = await supertest(app).get("/api/files?path=/etc");
+		const res = await supertest(app).get(
+			`/api/files?repo=${repoName}&path=/etc`,
+		);
 
 		expect(res.status).toBe(403);
 		expect(res.body.error.code).toBe("PATH_FORBIDDEN");
 	});
 
 	test("returns 403 for encoded path traversal", async () => {
-		const res = await supertest(app).get("/api/files?path=gamma/../../");
+		const res = await supertest(app).get(
+			`/api/files?repo=${repoName}&path=gamma/../../`,
+		);
 
 		expect(res.status).toBe(403);
 		expect(res.body.error.code).toBe("PATH_FORBIDDEN");
 	});
+
+	test("returns 400 when repo parameter is missing", async () => {
+		const res = await supertest(app).get("/api/files?path=.");
+
+		expect(res.status).toBe(400);
+		expect(res.body.error.code).toBe("MISSING_REPO");
+	});
+
+	test("returns 404 for nonexistent repo", async () => {
+		const res = await supertest(app).get("/api/files?repo=no-such-repo");
+
+		expect(res.status).toBe(404);
+		expect(res.body.error.code).toBe("NOT_FOUND");
+	});
+
+	test("returns 403 for repo with path traversal", async () => {
+		const res = await supertest(app).get("/api/files?repo=../etc");
+
+		expect(res.status).toBe(403);
+		expect(res.body.error.code).toBe("REPO_FORBIDDEN");
+	});
 });
 
 describe("GET /api/files (truncation)", () => {
-	let bigDir: string;
+	let bigReposRoot: string;
 	let bigApp: ReturnType<typeof createApp>;
 
 	beforeAll(async () => {
-		bigDir = await fs.mkdtemp(path.join(os.tmpdir(), "rift-files-trunc-"));
+		bigReposRoot = await fs.mkdtemp(
+			path.join(os.tmpdir(), "rift-files-trunc-"),
+		);
+		const bigDir = path.join(bigReposRoot, "big-repo");
+		await fs.mkdir(bigDir);
 		// Create 1,005 files to exceed the 1,000 limit
 		const promises = [];
 		for (let i = 0; i < 1005; i++) {
@@ -147,15 +188,15 @@ describe("GET /api/files (truncation)", () => {
 			promises.push(fs.writeFile(path.join(bigDir, name), `content ${i}`));
 		}
 		await Promise.all(promises);
-		bigApp = createApp(makeConfig({ workingDir: bigDir }));
+		bigApp = createApp(makeConfig({ reposRoot: bigReposRoot }));
 	});
 
 	afterAll(async () => {
-		await fs.rm(bigDir, { recursive: true, force: true });
+		await fs.rm(bigReposRoot, { recursive: true, force: true });
 	});
 
 	test("truncates to 1,000 entries and sets truncated flag", async () => {
-		const res = await supertest(bigApp).get("/api/files");
+		const res = await supertest(bigApp).get("/api/files?repo=big-repo");
 
 		expect(res.status).toBe(200);
 		expect(res.body.entries).toHaveLength(1000);
@@ -164,11 +205,13 @@ describe("GET /api/files (truncation)", () => {
 });
 
 describe("GET /api/files (gitignore filtering)", () => {
-	let gitDir: string;
+	let gitReposRoot: string;
 	let gitApp: ReturnType<typeof createApp>;
 
 	beforeAll(async () => {
-		gitDir = await fs.mkdtemp(path.join(os.tmpdir(), "rift-files-git-"));
+		gitReposRoot = await fs.mkdtemp(path.join(os.tmpdir(), "rift-files-git-"));
+		const gitDir = path.join(gitReposRoot, "git-repo");
+		await fs.mkdir(gitDir);
 
 		// Initialize a git repo
 		const { execSync } = await import("node:child_process");
@@ -194,15 +237,15 @@ describe("GET /api/files (gitignore filtering)", () => {
 		execSync("git add .gitignore", { cwd: gitDir });
 		execSync('git commit -m "init"', { cwd: gitDir });
 
-		gitApp = createApp(makeConfig({ workingDir: gitDir }));
+		gitApp = createApp(makeConfig({ reposRoot: gitReposRoot }));
 	});
 
 	afterAll(async () => {
-		await fs.rm(gitDir, { recursive: true, force: true });
+		await fs.rm(gitReposRoot, { recursive: true, force: true });
 	});
 
 	test("excludes gitignored files from directory listing", async () => {
-		const res = await supertest(gitApp).get("/api/files");
+		const res = await supertest(gitApp).get("/api/files?repo=git-repo");
 
 		expect(res.status).toBe(200);
 
@@ -218,7 +261,9 @@ describe("GET /api/files (gitignore filtering)", () => {
 
 describe("GET /api/files/content", () => {
 	test("returns file content as plain text", async () => {
-		const res = await supertest(app).get("/api/files/content?path=alpha.txt");
+		const res = await supertest(app).get(
+			`/api/files/content?repo=${repoName}&path=alpha.txt`,
+		);
 
 		expect(res.status).toBe(200);
 		expect(res.headers["content-type"]).toMatch(/text\/plain/);
@@ -226,7 +271,7 @@ describe("GET /api/files/content", () => {
 	});
 
 	test("returns 400 when path parameter is missing", async () => {
-		const res = await supertest(app).get("/api/files/content");
+		const res = await supertest(app).get(`/api/files/content?repo=${repoName}`);
 
 		expect(res.status).toBe(400);
 		expect(res.body.error.code).toBe("MISSING_PATH");
@@ -234,7 +279,7 @@ describe("GET /api/files/content", () => {
 
 	test("returns 404 for nonexistent file", async () => {
 		const res = await supertest(app).get(
-			"/api/files/content?path=nonexistent.txt",
+			`/api/files/content?repo=${repoName}&path=nonexistent.txt`,
 		);
 
 		expect(res.status).toBe(404);
@@ -242,7 +287,9 @@ describe("GET /api/files/content", () => {
 	});
 
 	test("returns 400 when path is a directory", async () => {
-		const res = await supertest(app).get("/api/files/content?path=gamma");
+		const res = await supertest(app).get(
+			`/api/files/content?repo=${repoName}&path=gamma`,
+		);
 
 		expect(res.status).toBe(400);
 		expect(res.body.error.code).toBe("IS_DIRECTORY");
@@ -250,7 +297,7 @@ describe("GET /api/files/content", () => {
 
 	test("returns 403 for path traversal with ../", async () => {
 		const res = await supertest(app).get(
-			"/api/files/content?path=../secret.txt",
+			`/api/files/content?repo=${repoName}&path=../secret.txt`,
 		);
 
 		expect(res.status).toBe(403);
@@ -258,41 +305,56 @@ describe("GET /api/files/content", () => {
 	});
 
 	test("returns 403 for absolute path", async () => {
-		const res = await supertest(app).get("/api/files/content?path=/etc/passwd");
+		const res = await supertest(app).get(
+			`/api/files/content?repo=${repoName}&path=/etc/passwd`,
+		);
 
 		expect(res.status).toBe(403);
 		expect(res.body.error.code).toBe("PATH_FORBIDDEN");
 	});
 
 	test("returns 415 for binary file", async () => {
-		const res = await supertest(app).get("/api/files/content?path=binary.bin");
+		const res = await supertest(app).get(
+			`/api/files/content?repo=${repoName}&path=binary.bin`,
+		);
 
 		expect(res.status).toBe(415);
 		expect(res.body.error.code).toBe("BINARY_FILE");
 	});
+
+	test("returns 400 when repo parameter is missing", async () => {
+		const res = await supertest(app).get("/api/files/content?path=alpha.txt");
+
+		expect(res.status).toBe(400);
+		expect(res.body.error.code).toBe("MISSING_REPO");
+	});
 });
 
 describe("GET /api/files/content (oversized file)", () => {
-	let bigFileDir: string;
+	let bigFileReposRoot: string;
 	let bigFileApp: ReturnType<typeof createApp>;
 
 	beforeAll(async () => {
-		bigFileDir = await fs.mkdtemp(path.join(os.tmpdir(), "rift-files-big-"));
+		bigFileReposRoot = await fs.mkdtemp(
+			path.join(os.tmpdir(), "rift-files-big-"),
+		);
+		const bigDir = path.join(bigFileReposRoot, "big-file-repo");
+		await fs.mkdir(bigDir);
 
 		// Create a file larger than 1 MB
 		const onePointFiveMB = Buffer.alloc(1.5 * 1024 * 1024, "x");
-		await fs.writeFile(path.join(bigFileDir, "large.txt"), onePointFiveMB);
+		await fs.writeFile(path.join(bigDir, "large.txt"), onePointFiveMB);
 
-		bigFileApp = createApp(makeConfig({ workingDir: bigFileDir }));
+		bigFileApp = createApp(makeConfig({ reposRoot: bigFileReposRoot }));
 	});
 
 	afterAll(async () => {
-		await fs.rm(bigFileDir, { recursive: true, force: true });
+		await fs.rm(bigFileReposRoot, { recursive: true, force: true });
 	});
 
 	test("returns 413 for file exceeding 1 MB", async () => {
 		const res = await supertest(bigFileApp).get(
-			"/api/files/content?path=large.txt",
+			"/api/files/content?repo=big-file-repo&path=large.txt",
 		);
 
 		expect(res.status).toBe(413);

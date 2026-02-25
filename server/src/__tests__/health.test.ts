@@ -6,17 +6,18 @@ function makeConfig(overrides?: Partial<AppConfig>): AppConfig {
 	return {
 		port: 3000,
 		agentCommand: "echo",
-		workingDir: process.cwd(),
+		reposRoot: process.cwd(),
 		basePath: "",
 		...overrides,
 	};
 }
 
 describe("GET /api/health", () => {
-	test("returns 200 status code", async () => {
+	test("returns 200 with status ok when no repo specified", async () => {
 		const app = createApp(makeConfig());
 		const response = await supertest(app).get("/api/health");
 		expect(response.status).toBe(200);
+		expect(response.body).toEqual({ status: "ok" });
 	});
 
 	test("returns JSON content type", async () => {
@@ -25,40 +26,28 @@ describe("GET /api/health", () => {
 		expect(response.headers["content-type"]).toMatch(/application\/json/);
 	});
 
-	test("response body has status field set to 'ok'", async () => {
-		const app = createApp(makeConfig());
-		const response = await supertest(app).get("/api/health");
-		expect(response.body.status).toBe("ok");
-	});
-
-	test("response body has gitRepo field of type boolean", async () => {
-		const app = createApp(makeConfig());
-		const response = await supertest(app).get("/api/health");
-		expect(typeof response.body.gitRepo).toBe("boolean");
-	});
-
-	test("response body has exactly two fields: status and gitRepo", async () => {
-		const app = createApp(makeConfig());
-		const response = await supertest(app).get("/api/health");
-		const keys = Object.keys(response.body).sort();
-		expect(keys).toEqual(["gitRepo", "status"]);
-	});
-
-	test("reports gitRepo true when workingDir is a git repository", async () => {
-		// The Imp project root should be a git repo
+	test("reports gitRepo true when repo is a git repository", async () => {
+		// The project root (two levels up from server/) should be a git repo
 		const projectRoot = new URL("../../..", import.meta.url).pathname.replace(
 			/\/$/,
 			"",
 		);
-		const app = createApp(makeConfig({ workingDir: projectRoot }));
-		const response = await supertest(app).get("/api/health");
+		// reposRoot is the parent of the repo directory
+		const parts = projectRoot.split("/");
+		const repoName = parts.pop() ?? "";
+		const reposRoot = parts.join("/");
+		const app = createApp(makeConfig({ reposRoot }));
+		const response = await supertest(app).get(`/api/health?repo=${repoName}`);
+		expect(response.status).toBe(200);
 		expect(response.body.gitRepo).toBe(true);
 	});
 
-	test("reports gitRepo false when workingDir is not a git repository", async () => {
-		// /tmp is almost certainly not a git repo
-		const app = createApp(makeConfig({ workingDir: "/tmp" }));
-		const response = await supertest(app).get("/api/health");
-		expect(response.body.gitRepo).toBe(false);
+	test("returns 404 when repo does not exist", async () => {
+		const app = createApp(makeConfig({ reposRoot: "/tmp" }));
+		const response = await supertest(app).get(
+			"/api/health?repo=nonexistent-repo",
+		);
+		expect(response.status).toBe(404);
+		expect(response.body.error.code).toBe("NOT_FOUND");
 	});
 });

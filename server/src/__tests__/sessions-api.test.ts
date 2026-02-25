@@ -9,7 +9,7 @@ function makeConfig(overrides?: Partial<AppConfig>): AppConfig {
 	return {
 		port: 3000,
 		agentCommand: "echo",
-		workingDir: process.cwd(),
+		reposRoot: process.cwd(),
 		basePath: "",
 		...overrides,
 	};
