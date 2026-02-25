@@ -1,7 +1,8 @@
 import path from "node:path";
+import type { Request, Response } from "express";
 import { Router } from "express";
 import { simpleGit } from "simple-git";
-import { resolveSafePath } from "../pathUtils.js";
+import { resolveRepo, resolveSafePath } from "../pathUtils.js";
 
 const MAX_DIFF_SIZE = 1024 * 1024; // 1 MB
 
@@ -41,12 +42,43 @@ function mapWorkingTreeStatus(code: string): FileStatus | null {
 	}
 }
 
-export function gitRoutes(workingDir: string): Router {
-	const router = Router();
-	const git = simpleGit(workingDir);
+async function resolveGitRepo(
+	reposRoot: string,
+	req: Request,
+	res: Response,
+): Promise<ReturnType<typeof simpleGit> | null> {
+	const repoName = req.query.repo as string;
+	if (!repoName) {
+		res.status(400).json({
+			error: {
+				code: "MISSING_REPO",
+				message: "repo query parameter is required",
+			},
+		});
+		return null;
+	}
+	const result = await resolveRepo(reposRoot, repoName);
+	if (!result.ok) {
+		const status = result.reason === "forbidden" ? 403 : 404;
+		const code = result.reason === "forbidden" ? "REPO_FORBIDDEN" : "NOT_FOUND";
+		const message =
+			result.reason === "forbidden"
+				? "Invalid repo name"
+				: "Repository not found";
+		res.status(status).json({ error: { code, message } });
+		return null;
+	}
+	return simpleGit(result.path);
+}
 
-	// GET /api/git/status
-	router.get("/status", async (_req, res) => {
+export function gitRoutes(reposRoot: string): Router {
+	const router = Router();
+
+	// GET /api/git/status?repo=<name>
+	router.get("/status", async (req, res) => {
+		const git = await resolveGitRepo(reposRoot, req, res);
+		if (!git) return;
+
 		const isRepo = await git.checkIsRepo();
 		if (!isRepo) {
 			res.status(400).json({
@@ -89,8 +121,11 @@ export function gitRoutes(workingDir: string): Router {
 		res.json({ files: entries });
 	});
 
-	// GET /api/git/log?limit=<n>&offset=<n>
+	// GET /api/git/log?repo=<name>&limit=<n>&offset=<n>
 	router.get("/log", async (req, res) => {
+		const git = await resolveGitRepo(reposRoot, req, res);
+		if (!git) return;
+
 		const isRepo = await git.checkIsRepo();
 		if (!isRepo) {
 			res.status(400).json({
@@ -122,7 +157,7 @@ export function gitRoutes(workingDir: string): Router {
 		}
 	});
 
-	// GET /api/git/commit/:hash
+	// GET /api/git/commit/:hash?repo=<name>
 	router.get("/commit/:hash", async (req, res) => {
 		const { hash } = req.params;
 		if (!/^[0-9a-f]{7,40}$/.test(hash)) {
@@ -134,6 +169,9 @@ export function gitRoutes(workingDir: string): Router {
 			});
 			return;
 		}
+
+		const git = await resolveGitRepo(reposRoot, req, res);
+		if (!git) return;
 
 		const isRepo = await git.checkIsRepo();
 		if (!isRepo) {
@@ -219,7 +257,7 @@ export function gitRoutes(workingDir: string): Router {
 		}
 	});
 
-	// GET /api/git/commit/:hash/diff?path=<file>
+	// GET /api/git/commit/:hash/diff?repo=<name>&path=<file>
 	router.get("/commit/:hash/diff", async (req, res) => {
 		const { hash } = req.params;
 		if (!/^[0-9a-f]{7,40}$/.test(hash)) {
@@ -242,6 +280,9 @@ export function gitRoutes(workingDir: string): Router {
 			});
 			return;
 		}
+
+		const git = await resolveGitRepo(reposRoot, req, res);
+		if (!git) return;
 
 		const isRepo = await git.checkIsRepo();
 		if (!isRepo) {
@@ -295,7 +336,7 @@ export function gitRoutes(workingDir: string): Router {
 		}
 	});
 
-	// GET /api/git/diff?path=<file>&staged=<bool>
+	// GET /api/git/diff?repo=<name>&path=<file>&staged=<bool>
 	router.get("/diff", async (req, res) => {
 		const filePath = req.query.path as string;
 		if (!filePath) {
@@ -307,6 +348,9 @@ export function gitRoutes(workingDir: string): Router {
 			});
 			return;
 		}
+
+		const git = await resolveGitRepo(reposRoot, req, res);
+		if (!git) return;
 
 		const isRepo = await git.checkIsRepo();
 		if (!isRepo) {

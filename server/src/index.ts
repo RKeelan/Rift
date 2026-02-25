@@ -13,7 +13,7 @@ const app = createApp(config, sessionManager);
 
 const server = app.listen(config.port, "0.0.0.0", () => {
 	console.log(`Rift server listening on 0.0.0.0:${config.port}`);
-	console.log(`Working directory: ${config.workingDir}`);
+	console.log(`Repos root: ${config.reposRoot}`);
 });
 
 const relay = setupWebSocket(server, sessionManager, config.basePath);

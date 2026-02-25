@@ -1,0 +1,138 @@
+# Plan: Multi-repo support
+
+Replace the single-`WORKING_DIR` server model with a repo-aware server that can operate on any repository under a configurable root directory.
+
+**Note on WebSocket/chat route**: The WebSocket endpoint operates on session IDs, and the session already carries the resolved repo path internally. No changes needed to `ws.ts`.
+
+## Task 1: Replace WORKING_DIR with REPOS_ROOT and reparameterise file/git routes
+
+### Requirements
+
+- Replace `WORKING_DIR` env var with `REPOS_ROOT` (defaults to `~/Src`). Update `AppConfig` to replace `workingDir` with `reposRoot`. Update `createApp()` in `app.ts` to pass `config.reposRoot` to route factories instead of `config.workingDir`
+- Add a shared repo-resolution utility that takes `(reposRoot, repoName)` and returns a validated absolute path: the repo name is a relative path (e.g. `RKeelan/Rift`), must not contain `..` or be absolute, must resolve to a directory under `reposRoot`, and must exist. Returns null/throws on invalid input
+- Reparameterise `fileRoutes(workingDir)` → `fileRoutes(reposRoot)`: each request must include a `repo` query parameter, resolved via the utility above. Remove the cached `gitRepoStatus` closure variable (`files.ts` lines 72-78), which assumes a single working directory; re-check per request instead
+- Reparameterise `gitRoutes(workingDir)` → `gitRoutes(reposRoot)`: each request must include a `repo` query parameter. Replace the single `simpleGit(workingDir)` instance created at router-creation time (`git.ts` line 46) with per-request `simpleGit(resolvedPath)` calls
+- Update health endpoint to accept an optional `repo` query parameter; without it, return `{ status: "ok" }` without `gitRepo`
+- Update `.env.example` to document `REPOS_ROOT` and remove `WORKING_DIR`
+- Update startup log in `index.ts` to show `REPOS_ROOT` instead of `Working directory`
+- Update all existing server tests to pass `repo` where needed
+
+### Verification
+
+- Test `GET /api/files?repo=foo&path=.` resolves correctly
+- Test `GET /api/git/status?repo=foo` resolves correctly
+- Test that a `repo` value with `..` or absolute path is rejected (403)
+- Test that a nonexistent repo returns 404
+- Existing file and git tests pass (updated to include `repo`)
+
+### Validation
+
+- `curl localhost:3000/api/files?repo=Rift&path=.` lists Rift's root directory
+- `curl localhost:3000/api/git/status?repo=Rift` shows git status
+
+## Task 2: Add GET /api/repos endpoint
+
+### Requirements
+
+- Add `GET /api/repos` that recursively scans `REPOS_ROOT`, stopping descent at the first directory that contains a `.git` directory (i.e., don't recurse into repos). This handles multi-level structures like `~/Src/RKeelan/Rift`, `~/Src/Keel-Inc/foo`
+- Return `{ repos: [{ name: string, path: string }] }` where `name` is the relative path from `REPOS_ROOT` (e.g. `RKeelan/Rift`) and `path` is the absolute path
+- Follow symlinks when checking subdirectories (common in `~/Src`)
+- Gracefully skip non-directory entries and unreadable subdirectories (log a warning, don't fail the request)
+- Cap recursion depth (e.g. 4 levels) to avoid runaway traversal
+- Add server tests
+
+### Verification
+
+- Test `GET /api/repos` returns repos found in a temp directory with nested git-initialised subdirs (e.g. `org/repo`)
+- Test that non-git subdirectories are recursed into (not returned as repos)
+- Test that directories containing `.git` are returned and not recursed further
+- Test that non-directory entries are excluded
+- Test that unreadable directories don't crash the endpoint
+
+### Validation
+
+- `curl localhost:3000/api/repos` lists available repositories
+
+## Task 3: Make sessions repo-aware
+
+Depends on: Task 1 (for repo-resolution utility)
+
+### Requirements
+
+- `POST /api/sessions` requires a `repo` field in the body (the repo name, not a full path); drop the existing `workingDirectory` body field entirely. The session route resolves the repo name against `REPOS_ROOT` using the shared utility from Task 1, then passes both to `sessionManager.createSession()`
+- Update `sessionRoutes(sessionManager)` to `sessionRoutes(sessionManager, reposRoot)` so the route handler has access to the repo-resolution utility. Update the `createApp` call site at `app.ts` line 50 accordingly
+- Add a `repo` field to the `Session` type (stores the repo name). Change `SessionManager.createSession(workingDirectory)` to `createSession(repo, workingDirectory)` so it can store the repo name on the session object. Both arguments are needed because `SessionManager` should not know about `REPOS_ROOT` or filesystem layout; the route layer resolves repo→path and passes both
+- `AdapterConfig` keeps its existing `{ workingDirectory }` shape; no change needed
+- `SessionInfo` gains a `repo` field (the repo name) so the client knows which repo a session belongs to. Update `toInfo()` to include `session.repo`
+- `GET /api/sessions` and `GET /api/sessions/:id` include `repo` in their responses
+- `POST /api/sessions` with missing or invalid `repo` returns 400
+- Update existing session tests
+
+### Verification
+
+- Test that `POST /api/sessions { repo: "test-repo" }` creates a session with `repo: "test-repo"` in the response
+- Test that `POST /api/sessions {}` (no repo) returns 400
+- Test that `POST /api/sessions { repo: "../../etc" }` returns 400
+- Test that `GET /api/sessions/:id` includes `repo` in the response
+
+### Validation
+
+- `curl -X POST localhost:3000/api/sessions -H 'Content-Type: application/json' -d '{"repo":"Rift"}'` creates a session with `repo` in the response
+- `curl localhost:3000/api/sessions/<id>` shows the repo name
+
+## Task 4: Update the CLI for multi-repo support
+
+Depends on: Tasks 1, 2, 3
+
+### Requirements
+
+- Add `repos list` command that calls `GET /api/repos`
+- Add `--repo <name>` option to `files ls`, `files cat`, `git status`, `git diff`, `git log`, `git show`, and `git show-diff` commands (appends `repo=<name>` to query params)
+- Add `--repo <name>` option to `session create` (sends `{ repo }` in the POST body)
+- Update `health` command to accept optional `--repo`
+- Note: the `chat` command operates on an existing session ID and needs no changes
+
+### Verification
+
+- Existing CLI tests updated for `--repo` parameter
+
+### Validation
+
+- `bun run --cwd cli src/index.ts repos list` shows repos
+- `bun run --cwd cli src/index.ts files ls --repo Rift` lists Rift's root directory
+- `bun run --cwd cli src/index.ts session create --repo Rift` creates a session
+
+## Task 5: Add session dashboard and repo picker to the client
+
+Depends on: Tasks 1, 2, 3
+
+### Requirements
+
+- Replace the current auto-create-single-session flow with a dashboard model that supports multiple concurrent sessions
+- Add a dashboard page (`/` or `/sessions`) as the app's landing page. It shows:
+  - Active sessions (from `GET /api/sessions`), each displaying its repo name and creation time. Tapping a session navigates to it
+  - A stop/close action on each active session (calls `DELETE /api/sessions/:id`); stopped sessions disappear from the list
+  - A "New Session" action that opens the repo picker
+- Add a repo picker (page or modal) that calls `GET /api/repos`, displays available repos, and creates a session via `POST /api/sessions { repo: "<name>" }` on selection
+- Add a `SessionContext` provider that stores the currently selected session (id and repo name) and exposes it to all pages. Populate it when navigating to a session from the dashboard
+- Restructure routing: session-specific pages (`/chat`, `/files`, `/changes`, `/history`) require a session to be selected in `SessionContext`; if none, redirect to the dashboard
+- Update `useAgentSession` to connect to a specific session ID (passed in, not auto-created). Remove the auto-create and localStorage-based session recovery logic
+- Update `useGitRepo` to pass the `repo` query param (from `SessionContext`) to the health endpoint
+- `FilesPage`, `ChangesPage`, and `HistoryPage` read the repo name from `SessionContext` and include `repo=<name>` in their API calls
+- The tab bar or header shows the current repo name; tapping it returns to the dashboard
+
+### Verification
+
+- Hook-level tests for session selection logic
+- Existing client tests updated for the new flow
+
+### Validation
+
+- Open the app in a browser; the dashboard appears showing any active sessions
+- Tap "New Session"; the repo picker shows available repos
+- Select a repo; the chat page loads with a session bound to that repo
+- Files/Changes/History pages show data from the selected repo
+- Navigate back to dashboard; the session appears in the list
+- Stop a session from the dashboard; it disappears from the active list
+- Create a second session in a different repo; both appear on the dashboard
+- Tap between sessions to switch
