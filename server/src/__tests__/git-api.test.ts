@@ -6,49 +6,54 @@ import path from "node:path";
 import supertest from "supertest";
 import { type AppConfig, createApp } from "../app.js";
 
-function makeConfig(workingDir: string): AppConfig {
+const repoName = "test-repo";
+
+function makeConfig(reposRoot: string): AppConfig {
 	return {
 		port: 3000,
 		agentCommand: "echo",
-		workingDir,
+		reposRoot,
 		basePath: "",
 	};
 }
 
 describe("GET /api/git/status", () => {
-	let tmpDir: string;
+	let reposRoot: string;
+	let repoDir: string;
 	let app: ReturnType<typeof createApp>;
 
 	beforeAll(async () => {
-		tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "rift-git-status-"));
+		reposRoot = await fs.mkdtemp(path.join(os.tmpdir(), "rift-git-status-"));
+		repoDir = path.join(reposRoot, repoName);
+		await fs.mkdir(repoDir);
 
-		execSync("git init", { cwd: tmpDir });
-		execSync("git config user.email 'test@test.com'", { cwd: tmpDir });
-		execSync("git config user.name 'Test'", { cwd: tmpDir });
+		execSync("git init", { cwd: repoDir });
+		execSync("git config user.email 'test@test.com'", { cwd: repoDir });
+		execSync("git config user.name 'Test'", { cwd: repoDir });
 
 		// Create an initial commit so HEAD exists
-		await fs.writeFile(path.join(tmpDir, "init.txt"), "init");
-		execSync("git add init.txt", { cwd: tmpDir });
-		execSync('git commit -m "initial"', { cwd: tmpDir });
+		await fs.writeFile(path.join(repoDir, "init.txt"), "init");
+		execSync("git add init.txt", { cwd: repoDir });
+		execSync('git commit -m "initial"', { cwd: repoDir });
 
-		app = createApp(makeConfig(tmpDir));
+		app = createApp(makeConfig(reposRoot));
 	});
 
 	afterAll(async () => {
-		await fs.rm(tmpDir, { recursive: true, force: true });
+		await fs.rm(reposRoot, { recursive: true, force: true });
 	});
 
 	test("returns empty files array when working tree is clean", async () => {
-		const res = await supertest(app).get("/api/git/status");
+		const res = await supertest(app).get(`/api/git/status?repo=${repoName}`);
 
 		expect(res.status).toBe(200);
 		expect(res.body.files).toEqual([]);
 	});
 
 	test("returns untracked file as unstaged", async () => {
-		await fs.writeFile(path.join(tmpDir, "new.txt"), "hello");
+		await fs.writeFile(path.join(repoDir, "new.txt"), "hello");
 
-		const res = await supertest(app).get("/api/git/status");
+		const res = await supertest(app).get(`/api/git/status?repo=${repoName}`);
 
 		expect(res.status).toBe(200);
 		const entries = res.body.files.filter(
@@ -59,14 +64,14 @@ describe("GET /api/git/status", () => {
 		expect(entries[0].staged).toBe(false);
 
 		// Clean up
-		await fs.unlink(path.join(tmpDir, "new.txt"));
+		await fs.unlink(path.join(repoDir, "new.txt"));
 	});
 
 	test("returns staged added file with staged=true", async () => {
-		await fs.writeFile(path.join(tmpDir, "staged.txt"), "staged content");
-		execSync("git add staged.txt", { cwd: tmpDir });
+		await fs.writeFile(path.join(repoDir, "staged.txt"), "staged content");
+		execSync("git add staged.txt", { cwd: repoDir });
 
-		const res = await supertest(app).get("/api/git/status");
+		const res = await supertest(app).get(`/api/git/status?repo=${repoName}`);
 
 		expect(res.status).toBe(200);
 		const entry = res.body.files.find(
@@ -77,15 +82,15 @@ describe("GET /api/git/status", () => {
 		expect(entry.staged).toBe(true);
 
 		// Clean up
-		execSync("git reset HEAD staged.txt", { cwd: tmpDir });
-		await fs.unlink(path.join(tmpDir, "staged.txt"));
+		execSync("git reset HEAD staged.txt", { cwd: repoDir });
+		await fs.unlink(path.join(repoDir, "staged.txt"));
 	});
 
 	test("returns modified file as unstaged", async () => {
 		// Modify an existing committed file
-		await fs.writeFile(path.join(tmpDir, "init.txt"), "modified content");
+		await fs.writeFile(path.join(repoDir, "init.txt"), "modified content");
 
-		const res = await supertest(app).get("/api/git/status");
+		const res = await supertest(app).get(`/api/git/status?repo=${repoName}`);
 
 		expect(res.status).toBe(200);
 		const entry = res.body.files.find(
@@ -97,14 +102,14 @@ describe("GET /api/git/status", () => {
 		expect(entry.staged).toBe(false);
 
 		// Clean up
-		execSync("git checkout -- init.txt", { cwd: tmpDir });
+		execSync("git checkout -- init.txt", { cwd: repoDir });
 	});
 
 	test("returns deleted file as unstaged", async () => {
 		// Delete a committed file without staging the deletion
-		await fs.unlink(path.join(tmpDir, "init.txt"));
+		await fs.unlink(path.join(repoDir, "init.txt"));
 
-		const res = await supertest(app).get("/api/git/status");
+		const res = await supertest(app).get(`/api/git/status?repo=${repoName}`);
 
 		expect(res.status).toBe(200);
 		const entry = res.body.files.find(
@@ -116,16 +121,16 @@ describe("GET /api/git/status", () => {
 		expect(entry.staged).toBe(false);
 
 		// Clean up
-		execSync("git checkout -- init.txt", { cwd: tmpDir });
+		execSync("git checkout -- init.txt", { cwd: repoDir });
 	});
 
 	test("returns both staged and unstaged entries for same file", async () => {
 		// Stage a modification, then modify again
-		await fs.writeFile(path.join(tmpDir, "init.txt"), "first change");
-		execSync("git add init.txt", { cwd: tmpDir });
-		await fs.writeFile(path.join(tmpDir, "init.txt"), "second change");
+		await fs.writeFile(path.join(repoDir, "init.txt"), "first change");
+		execSync("git add init.txt", { cwd: repoDir });
+		await fs.writeFile(path.join(repoDir, "init.txt"), "second change");
 
-		const res = await supertest(app).get("/api/git/status");
+		const res = await supertest(app).get(`/api/git/status?repo=${repoName}`);
 
 		expect(res.status).toBe(200);
 		const stagedEntry = res.body.files.find(
@@ -142,59 +147,110 @@ describe("GET /api/git/status", () => {
 		expect(unstagedEntry.status).toBe("modified");
 
 		// Clean up
-		execSync("git checkout -- init.txt", { cwd: tmpDir });
-		execSync("git reset HEAD init.txt", { cwd: tmpDir });
+		execSync("git checkout -- init.txt", { cwd: repoDir });
+		execSync("git reset HEAD init.txt", { cwd: repoDir });
 	});
 });
 
 describe("GET /api/git/status (not a git repo)", () => {
-	let tmpDir: string;
+	let reposRoot: string;
 	let app: ReturnType<typeof createApp>;
 
 	beforeAll(async () => {
-		tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "rift-git-norepo-"));
-		app = createApp(makeConfig(tmpDir));
+		reposRoot = await fs.mkdtemp(path.join(os.tmpdir(), "rift-git-norepo-"));
+		// Create a non-git directory as the "repo"
+		await fs.mkdir(path.join(reposRoot, "not-a-repo"));
+		app = createApp(makeConfig(reposRoot));
 	});
 
 	afterAll(async () => {
-		await fs.rm(tmpDir, { recursive: true, force: true });
+		await fs.rm(reposRoot, { recursive: true, force: true });
 	});
 
 	test("returns NOT_GIT_REPO error with status 400", async () => {
-		const res = await supertest(app).get("/api/git/status");
+		const res = await supertest(app).get("/api/git/status?repo=not-a-repo");
 
 		expect(res.status).toBe(400);
 		expect(res.body.error.code).toBe("NOT_GIT_REPO");
 	});
 });
 
+describe("GET /api/git/status (missing repo param)", () => {
+	test("returns MISSING_REPO error with status 400", async () => {
+		const reposRoot = await fs.mkdtemp(
+			path.join(os.tmpdir(), "rift-git-noparam-"),
+		);
+		const app = createApp(makeConfig(reposRoot));
+
+		const res = await supertest(app).get("/api/git/status");
+
+		expect(res.status).toBe(400);
+		expect(res.body.error.code).toBe("MISSING_REPO");
+
+		await fs.rm(reposRoot, { recursive: true, force: true });
+	});
+});
+
+describe("GET /api/git/status (repo traversal)", () => {
+	test("returns 403 for repo with ../", async () => {
+		const reposRoot = await fs.mkdtemp(
+			path.join(os.tmpdir(), "rift-git-trav-"),
+		);
+		const app = createApp(makeConfig(reposRoot));
+
+		const res = await supertest(app).get("/api/git/status?repo=../etc");
+
+		expect(res.status).toBe(403);
+		expect(res.body.error.code).toBe("REPO_FORBIDDEN");
+
+		await fs.rm(reposRoot, { recursive: true, force: true });
+	});
+
+	test("returns 404 for nonexistent repo", async () => {
+		const reposRoot = await fs.mkdtemp(
+			path.join(os.tmpdir(), "rift-git-noexist-"),
+		);
+		const app = createApp(makeConfig(reposRoot));
+
+		const res = await supertest(app).get("/api/git/status?repo=no-such-repo");
+
+		expect(res.status).toBe(404);
+		expect(res.body.error.code).toBe("NOT_FOUND");
+
+		await fs.rm(reposRoot, { recursive: true, force: true });
+	});
+});
+
 describe("GET /api/git/diff", () => {
-	let tmpDir: string;
+	let reposRoot: string;
+	let repoDir: string;
 	let app: ReturnType<typeof createApp>;
 
 	beforeAll(async () => {
-		tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "rift-git-diff-"));
+		reposRoot = await fs.mkdtemp(path.join(os.tmpdir(), "rift-git-diff-"));
+		repoDir = path.join(reposRoot, repoName);
+		await fs.mkdir(repoDir);
 
-		execSync("git init", { cwd: tmpDir });
-		execSync("git config user.email 'test@test.com'", { cwd: tmpDir });
-		execSync("git config user.name 'Test'", { cwd: tmpDir });
+		execSync("git init", { cwd: repoDir });
+		execSync("git config user.email 'test@test.com'", { cwd: repoDir });
+		execSync("git config user.name 'Test'", { cwd: repoDir });
 
-		await fs.writeFile(path.join(tmpDir, "file.txt"), "original\n");
-		execSync("git add file.txt", { cwd: tmpDir });
-		execSync('git commit -m "initial"', { cwd: tmpDir });
+		await fs.writeFile(path.join(repoDir, "file.txt"), "original\n");
+		execSync("git add file.txt", { cwd: repoDir });
+		execSync('git commit -m "initial"', { cwd: repoDir });
 
-		app = createApp(makeConfig(tmpDir));
+		app = createApp(makeConfig(reposRoot));
 	});
 
 	afterAll(async () => {
-		await fs.rm(tmpDir, { recursive: true, force: true });
+		await fs.rm(reposRoot, { recursive: true, force: true });
 	});
 
 	test("returns unified diff for unstaged modification", async () => {
-		await fs.writeFile(path.join(tmpDir, "file.txt"), "modified\n");
+		await fs.writeFile(path.join(repoDir, "file.txt"), "modified\n");
 
 		const res = await supertest(app).get(
-			"/api/git/diff?path=file.txt&staged=false",
+			`/api/git/diff?repo=${repoName}&path=file.txt&staged=false`,
 		);
 
 		expect(res.status).toBe(200);
@@ -203,15 +259,15 @@ describe("GET /api/git/diff", () => {
 		expect(res.body.diff).toContain("+modified");
 
 		// Clean up
-		execSync("git checkout -- file.txt", { cwd: tmpDir });
+		execSync("git checkout -- file.txt", { cwd: repoDir });
 	});
 
 	test("returns unified diff for staged modification", async () => {
-		await fs.writeFile(path.join(tmpDir, "file.txt"), "staged change\n");
-		execSync("git add file.txt", { cwd: tmpDir });
+		await fs.writeFile(path.join(repoDir, "file.txt"), "staged change\n");
+		execSync("git add file.txt", { cwd: repoDir });
 
 		const res = await supertest(app).get(
-			"/api/git/diff?path=file.txt&staged=true",
+			`/api/git/diff?repo=${repoName}&path=file.txt&staged=true`,
 		);
 
 		expect(res.status).toBe(200);
@@ -220,13 +276,13 @@ describe("GET /api/git/diff", () => {
 		expect(res.body.diff).toContain("+staged change");
 
 		// Clean up: reset index first, then restore working tree
-		execSync("git reset HEAD file.txt", { cwd: tmpDir });
-		execSync("git checkout -- file.txt", { cwd: tmpDir });
+		execSync("git reset HEAD file.txt", { cwd: repoDir });
+		execSync("git checkout -- file.txt", { cwd: repoDir });
 	});
 
 	test("returns empty diff when file has no changes", async () => {
 		const res = await supertest(app).get(
-			"/api/git/diff?path=file.txt&staged=false",
+			`/api/git/diff?repo=${repoName}&path=file.txt&staged=false`,
 		);
 
 		expect(res.status).toBe(200);
@@ -235,21 +291,25 @@ describe("GET /api/git/diff", () => {
 	});
 
 	test("returns 400 when path parameter is missing", async () => {
-		const res = await supertest(app).get("/api/git/diff");
+		const res = await supertest(app).get(`/api/git/diff?repo=${repoName}`);
 
 		expect(res.status).toBe(400);
 		expect(res.body.error.code).toBe("MISSING_PATH");
 	});
 
 	test("returns 403 for path traversal with ../", async () => {
-		const res = await supertest(app).get("/api/git/diff?path=../secret.txt");
+		const res = await supertest(app).get(
+			`/api/git/diff?repo=${repoName}&path=../secret.txt`,
+		);
 
 		expect(res.status).toBe(403);
 		expect(res.body.error.code).toBe("PATH_FORBIDDEN");
 	});
 
 	test("returns 403 for absolute path", async () => {
-		const res = await supertest(app).get("/api/git/diff?path=/etc/passwd");
+		const res = await supertest(app).get(
+			`/api/git/diff?repo=${repoName}&path=/etc/passwd`,
+		);
 
 		expect(res.status).toBe(403);
 		expect(res.body.error.code).toBe("PATH_FORBIDDEN");
@@ -257,7 +317,7 @@ describe("GET /api/git/diff", () => {
 
 	test("returns 403 for encoded path traversal", async () => {
 		const res = await supertest(app).get(
-			"/api/git/diff?path=subdir/../../secret",
+			`/api/git/diff?repo=${repoName}&path=subdir/../../secret`,
 		);
 
 		expect(res.status).toBe(403);
@@ -266,21 +326,25 @@ describe("GET /api/git/diff", () => {
 });
 
 describe("GET /api/git/diff (not a git repo)", () => {
-	let tmpDir: string;
+	let reposRoot: string;
 	let app: ReturnType<typeof createApp>;
 
 	beforeAll(async () => {
-		tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "rift-git-diffnr-"));
-		await fs.writeFile(path.join(tmpDir, "file.txt"), "content");
-		app = createApp(makeConfig(tmpDir));
+		reposRoot = await fs.mkdtemp(path.join(os.tmpdir(), "rift-git-diffnr-"));
+		const repoDir = path.join(reposRoot, "not-a-repo");
+		await fs.mkdir(repoDir);
+		await fs.writeFile(path.join(repoDir, "file.txt"), "content");
+		app = createApp(makeConfig(reposRoot));
 	});
 
 	afterAll(async () => {
-		await fs.rm(tmpDir, { recursive: true, force: true });
+		await fs.rm(reposRoot, { recursive: true, force: true });
 	});
 
 	test("returns NOT_GIT_REPO error with status 400", async () => {
-		const res = await supertest(app).get("/api/git/diff?path=file.txt");
+		const res = await supertest(app).get(
+			"/api/git/diff?repo=not-a-repo&path=file.txt",
+		);
 
 		expect(res.status).toBe(400);
 		expect(res.body.error.code).toBe("NOT_GIT_REPO");

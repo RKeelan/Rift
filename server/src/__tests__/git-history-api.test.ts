@@ -6,16 +6,18 @@ import path from "node:path";
 import supertest from "supertest";
 import { type AppConfig, createApp } from "../app.js";
 
-function makeConfig(workingDir: string): AppConfig {
+const repoName = "test-repo";
+
+function makeConfig(reposRoot: string): AppConfig {
 	return {
 		port: 3000,
 		agentCommand: "echo",
-		workingDir,
+		reposRoot,
 		basePath: "",
 	};
 }
 
-// Helper to get the short hash of a commit by its message
+// Helper to get the full hash of a commit by its message
 function getHash(cwd: string, msg: string): string {
 	return execSync(`git log --all --format=%H --grep="${msg}"`, { cwd })
 		.toString()
@@ -23,32 +25,35 @@ function getHash(cwd: string, msg: string): string {
 }
 
 describe("GET /api/git/log", () => {
-	let tmpDir: string;
+	let reposRoot: string;
+	let repoDir: string;
 	let app: ReturnType<typeof createApp>;
 
 	beforeAll(async () => {
-		tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "rift-git-log-"));
+		reposRoot = await fs.mkdtemp(path.join(os.tmpdir(), "rift-git-log-"));
+		repoDir = path.join(reposRoot, repoName);
+		await fs.mkdir(repoDir);
 
-		execSync("git init", { cwd: tmpDir });
-		execSync("git config user.email 'test@test.com'", { cwd: tmpDir });
-		execSync("git config user.name 'Test Author'", { cwd: tmpDir });
+		execSync("git init", { cwd: repoDir });
+		execSync("git config user.email 'test@test.com'", { cwd: repoDir });
+		execSync("git config user.name 'Test Author'", { cwd: repoDir });
 
 		// Create 5 commits for pagination testing
 		for (let i = 1; i <= 5; i++) {
-			await fs.writeFile(path.join(tmpDir, `file${i}.txt`), `content ${i}`);
-			execSync(`git add file${i}.txt`, { cwd: tmpDir });
-			execSync(`git commit -m "commit ${i}"`, { cwd: tmpDir });
+			await fs.writeFile(path.join(repoDir, `file${i}.txt`), `content ${i}`);
+			execSync(`git add file${i}.txt`, { cwd: repoDir });
+			execSync(`git commit -m "commit ${i}"`, { cwd: repoDir });
 		}
 
-		app = createApp(makeConfig(tmpDir));
+		app = createApp(makeConfig(reposRoot));
 	});
 
 	afterAll(async () => {
-		await fs.rm(tmpDir, { recursive: true, force: true });
+		await fs.rm(reposRoot, { recursive: true, force: true });
 	});
 
 	test("returns all commits with default pagination", async () => {
-		const res = await supertest(app).get("/api/git/log");
+		const res = await supertest(app).get(`/api/git/log?repo=${repoName}`);
 
 		expect(res.status).toBe(200);
 		expect(res.body.commits).toBeArray();
@@ -59,7 +64,7 @@ describe("GET /api/git/log", () => {
 	});
 
 	test("each commit has expected fields", async () => {
-		const res = await supertest(app).get("/api/git/log");
+		const res = await supertest(app).get(`/api/git/log?repo=${repoName}`);
 
 		expect(res.status).toBe(200);
 		const commit = res.body.commits[0];
@@ -70,7 +75,9 @@ describe("GET /api/git/log", () => {
 	});
 
 	test("respects limit parameter", async () => {
-		const res = await supertest(app).get("/api/git/log?limit=2");
+		const res = await supertest(app).get(
+			`/api/git/log?repo=${repoName}&limit=2`,
+		);
 
 		expect(res.status).toBe(200);
 		expect(res.body.commits.length).toBe(2);
@@ -79,7 +86,9 @@ describe("GET /api/git/log", () => {
 	});
 
 	test("respects offset parameter", async () => {
-		const res = await supertest(app).get("/api/git/log?limit=2&offset=2");
+		const res = await supertest(app).get(
+			`/api/git/log?repo=${repoName}&limit=2&offset=2`,
+		);
 
 		expect(res.status).toBe(200);
 		expect(res.body.commits.length).toBe(2);
@@ -88,14 +97,18 @@ describe("GET /api/git/log", () => {
 	});
 
 	test("offset past end returns empty array", async () => {
-		const res = await supertest(app).get("/api/git/log?offset=100");
+		const res = await supertest(app).get(
+			`/api/git/log?repo=${repoName}&offset=100`,
+		);
 
 		expect(res.status).toBe(200);
 		expect(res.body.commits).toEqual([]);
 	});
 
 	test("invalid limit defaults gracefully", async () => {
-		const res = await supertest(app).get("/api/git/log?limit=abc");
+		const res = await supertest(app).get(
+			`/api/git/log?repo=${repoName}&limit=abc`,
+		);
 
 		expect(res.status).toBe(200);
 		// Should fall back to default (25) and return all 5
@@ -104,20 +117,21 @@ describe("GET /api/git/log", () => {
 });
 
 describe("GET /api/git/log (not a git repo)", () => {
-	let tmpDir: string;
+	let reposRoot: string;
 	let app: ReturnType<typeof createApp>;
 
 	beforeAll(async () => {
-		tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "rift-log-norepo-"));
-		app = createApp(makeConfig(tmpDir));
+		reposRoot = await fs.mkdtemp(path.join(os.tmpdir(), "rift-log-norepo-"));
+		await fs.mkdir(path.join(reposRoot, "not-a-repo"));
+		app = createApp(makeConfig(reposRoot));
 	});
 
 	afterAll(async () => {
-		await fs.rm(tmpDir, { recursive: true, force: true });
+		await fs.rm(reposRoot, { recursive: true, force: true });
 	});
 
 	test("returns NOT_GIT_REPO error with status 400", async () => {
-		const res = await supertest(app).get("/api/git/log");
+		const res = await supertest(app).get("/api/git/log?repo=not-a-repo");
 
 		expect(res.status).toBe(400);
 		expect(res.body.error.code).toBe("NOT_GIT_REPO");
@@ -125,39 +139,44 @@ describe("GET /api/git/log (not a git repo)", () => {
 });
 
 describe("GET /api/git/commit/:hash", () => {
-	let tmpDir: string;
+	let reposRoot: string;
+	let repoDir: string;
 	let app: ReturnType<typeof createApp>;
 	let commitHash: string;
 
 	beforeAll(async () => {
-		tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "rift-git-commit-"));
+		reposRoot = await fs.mkdtemp(path.join(os.tmpdir(), "rift-git-commit-"));
+		repoDir = path.join(reposRoot, repoName);
+		await fs.mkdir(repoDir);
 
-		execSync("git init", { cwd: tmpDir });
-		execSync("git config user.email 'test@test.com'", { cwd: tmpDir });
-		execSync("git config user.name 'Test Author'", { cwd: tmpDir });
+		execSync("git init", { cwd: repoDir });
+		execSync("git config user.email 'test@test.com'", { cwd: repoDir });
+		execSync("git config user.name 'Test Author'", { cwd: repoDir });
 
 		// First commit: add a file
-		await fs.writeFile(path.join(tmpDir, "alpha.txt"), "alpha content\n");
-		execSync("git add alpha.txt", { cwd: tmpDir });
-		execSync('git commit -m "add alpha"', { cwd: tmpDir });
+		await fs.writeFile(path.join(repoDir, "alpha.txt"), "alpha content\n");
+		execSync("git add alpha.txt", { cwd: repoDir });
+		execSync('git commit -m "add alpha"', { cwd: repoDir });
 
 		// Second commit: add another file, modify alpha
-		await fs.writeFile(path.join(tmpDir, "alpha.txt"), "alpha modified\n");
-		await fs.writeFile(path.join(tmpDir, "beta.txt"), "beta content\n");
-		execSync("git add alpha.txt beta.txt", { cwd: tmpDir });
-		execSync('git commit -m "update alpha add beta"', { cwd: tmpDir });
+		await fs.writeFile(path.join(repoDir, "alpha.txt"), "alpha modified\n");
+		await fs.writeFile(path.join(repoDir, "beta.txt"), "beta content\n");
+		execSync("git add alpha.txt beta.txt", { cwd: repoDir });
+		execSync('git commit -m "update alpha add beta"', { cwd: repoDir });
 
-		commitHash = getHash(tmpDir, "update alpha add beta");
+		commitHash = getHash(repoDir, "update alpha add beta");
 
-		app = createApp(makeConfig(tmpDir));
+		app = createApp(makeConfig(reposRoot));
 	});
 
 	afterAll(async () => {
-		await fs.rm(tmpDir, { recursive: true, force: true });
+		await fs.rm(reposRoot, { recursive: true, force: true });
 	});
 
 	test("returns commit metadata and file list", async () => {
-		const res = await supertest(app).get(`/api/git/commit/${commitHash}`);
+		const res = await supertest(app).get(
+			`/api/git/commit/${commitHash}?repo=${repoName}`,
+		);
 
 		expect(res.status).toBe(200);
 		expect(res.body.hash).toBe(commitHash);
@@ -169,7 +188,9 @@ describe("GET /api/git/commit/:hash", () => {
 	});
 
 	test("file entries have path, status, additions, deletions", async () => {
-		const res = await supertest(app).get(`/api/git/commit/${commitHash}`);
+		const res = await supertest(app).get(
+			`/api/git/commit/${commitHash}?repo=${repoName}`,
+		);
 
 		const alpha = res.body.files.find(
 			(f: { path: string }) => f.path === "alpha.txt",
@@ -188,36 +209,46 @@ describe("GET /api/git/commit/:hash", () => {
 
 	test("works with short hash (7 chars)", async () => {
 		const shortHash = commitHash.slice(0, 7);
-		const res = await supertest(app).get(`/api/git/commit/${shortHash}`);
+		const res = await supertest(app).get(
+			`/api/git/commit/${shortHash}?repo=${repoName}`,
+		);
 
 		expect(res.status).toBe(200);
 		expect(res.body.hash).toBe(commitHash);
 	});
 
 	test("returns 400 for malformed hash", async () => {
-		const res = await supertest(app).get("/api/git/commit/not-a-hash!");
+		const res = await supertest(app).get(
+			`/api/git/commit/not-a-hash!?repo=${repoName}`,
+		);
 
 		expect(res.status).toBe(400);
 		expect(res.body.error.code).toBe("INVALID_HASH");
 	});
 
 	test("returns 400 for too-short hash (6 chars)", async () => {
-		const res = await supertest(app).get("/api/git/commit/abcdef");
+		const res = await supertest(app).get(
+			`/api/git/commit/abcdef?repo=${repoName}`,
+		);
 
 		expect(res.status).toBe(400);
 		expect(res.body.error.code).toBe("INVALID_HASH");
 	});
 
 	test("returns 400 for uppercase hex", async () => {
-		const res = await supertest(app).get("/api/git/commit/ABCDEF1");
+		const res = await supertest(app).get(
+			`/api/git/commit/ABCDEF1?repo=${repoName}`,
+		);
 
 		expect(res.status).toBe(400);
 		expect(res.body.error.code).toBe("INVALID_HASH");
 	});
 
 	test("returns file list for root commit", async () => {
-		const rootHash = getHash(tmpDir, "add alpha");
-		const res = await supertest(app).get(`/api/git/commit/${rootHash}`);
+		const rootHash = getHash(repoDir, "add alpha");
+		const res = await supertest(app).get(
+			`/api/git/commit/${rootHash}?repo=${repoName}`,
+		);
 
 		expect(res.status).toBe(200);
 		expect(res.body.files).toBeArray();
@@ -228,7 +259,7 @@ describe("GET /api/git/commit/:hash", () => {
 
 	test("returns 404 for valid but nonexistent hash", async () => {
 		const res = await supertest(app).get(
-			"/api/git/commit/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			`/api/git/commit/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa?repo=${repoName}`,
 		);
 
 		expect(res.status).toBe(404);
@@ -237,21 +268,22 @@ describe("GET /api/git/commit/:hash", () => {
 });
 
 describe("GET /api/git/commit/:hash (not a git repo)", () => {
-	let tmpDir: string;
+	let reposRoot: string;
 	let app: ReturnType<typeof createApp>;
 
 	beforeAll(async () => {
-		tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "rift-commit-norepo-"));
-		app = createApp(makeConfig(tmpDir));
+		reposRoot = await fs.mkdtemp(path.join(os.tmpdir(), "rift-commit-norepo-"));
+		await fs.mkdir(path.join(reposRoot, "not-a-repo"));
+		app = createApp(makeConfig(reposRoot));
 	});
 
 	afterAll(async () => {
-		await fs.rm(tmpDir, { recursive: true, force: true });
+		await fs.rm(reposRoot, { recursive: true, force: true });
 	});
 
 	test("returns NOT_GIT_REPO error with status 400", async () => {
 		const res = await supertest(app).get(
-			"/api/git/commit/abcdef1234567890abcdef1234567890abcdef12",
+			"/api/git/commit/abcdef1234567890abcdef1234567890abcdef12?repo=not-a-repo",
 		);
 
 		expect(res.status).toBe(400);
@@ -260,40 +292,45 @@ describe("GET /api/git/commit/:hash (not a git repo)", () => {
 });
 
 describe("GET /api/git/commit/:hash/diff", () => {
-	let tmpDir: string;
+	let reposRoot: string;
+	let repoDir: string;
 	let app: ReturnType<typeof createApp>;
 	let firstHash: string;
 	let secondHash: string;
 
 	beforeAll(async () => {
-		tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "rift-git-commitdiff-"));
+		reposRoot = await fs.mkdtemp(
+			path.join(os.tmpdir(), "rift-git-commitdiff-"),
+		);
+		repoDir = path.join(reposRoot, repoName);
+		await fs.mkdir(repoDir);
 
-		execSync("git init", { cwd: tmpDir });
-		execSync("git config user.email 'test@test.com'", { cwd: tmpDir });
-		execSync("git config user.name 'Test'", { cwd: tmpDir });
+		execSync("git init", { cwd: repoDir });
+		execSync("git config user.email 'test@test.com'", { cwd: repoDir });
+		execSync("git config user.name 'Test'", { cwd: repoDir });
 
 		// First commit: add a file
-		await fs.writeFile(path.join(tmpDir, "hello.txt"), "hello world\n");
-		execSync("git add hello.txt", { cwd: tmpDir });
-		execSync('git commit -m "add hello"', { cwd: tmpDir });
-		firstHash = getHash(tmpDir, "add hello");
+		await fs.writeFile(path.join(repoDir, "hello.txt"), "hello world\n");
+		execSync("git add hello.txt", { cwd: repoDir });
+		execSync('git commit -m "add hello"', { cwd: repoDir });
+		firstHash = getHash(repoDir, "add hello");
 
 		// Second commit: modify the file
-		await fs.writeFile(path.join(tmpDir, "hello.txt"), "hello universe\n");
-		execSync("git add hello.txt", { cwd: tmpDir });
-		execSync('git commit -m "modify hello"', { cwd: tmpDir });
-		secondHash = getHash(tmpDir, "modify hello");
+		await fs.writeFile(path.join(repoDir, "hello.txt"), "hello universe\n");
+		execSync("git add hello.txt", { cwd: repoDir });
+		execSync('git commit -m "modify hello"', { cwd: repoDir });
+		secondHash = getHash(repoDir, "modify hello");
 
-		app = createApp(makeConfig(tmpDir));
+		app = createApp(makeConfig(reposRoot));
 	});
 
 	afterAll(async () => {
-		await fs.rm(tmpDir, { recursive: true, force: true });
+		await fs.rm(reposRoot, { recursive: true, force: true });
 	});
 
 	test("returns unified diff for a modified file", async () => {
 		const res = await supertest(app).get(
-			`/api/git/commit/${secondHash}/diff?path=hello.txt`,
+			`/api/git/commit/${secondHash}/diff?repo=${repoName}&path=hello.txt`,
 		);
 
 		expect(res.status).toBe(200);
@@ -304,7 +341,7 @@ describe("GET /api/git/commit/:hash/diff", () => {
 
 	test("returns diff for the first commit (no parent)", async () => {
 		const res = await supertest(app).get(
-			`/api/git/commit/${firstHash}/diff?path=hello.txt`,
+			`/api/git/commit/${firstHash}/diff?repo=${repoName}&path=hello.txt`,
 		);
 
 		expect(res.status).toBe(200);
@@ -314,7 +351,7 @@ describe("GET /api/git/commit/:hash/diff", () => {
 
 	test("returns 400 for malformed hash", async () => {
 		const res = await supertest(app).get(
-			"/api/git/commit/ZZZZZZZZ/diff?path=hello.txt",
+			`/api/git/commit/ZZZZZZZZ/diff?repo=${repoName}&path=hello.txt`,
 		);
 
 		expect(res.status).toBe(400);
@@ -322,7 +359,9 @@ describe("GET /api/git/commit/:hash/diff", () => {
 	});
 
 	test("returns 400 when path parameter is missing", async () => {
-		const res = await supertest(app).get(`/api/git/commit/${secondHash}/diff`);
+		const res = await supertest(app).get(
+			`/api/git/commit/${secondHash}/diff?repo=${repoName}`,
+		);
 
 		expect(res.status).toBe(400);
 		expect(res.body.error.code).toBe("MISSING_PATH");
@@ -330,7 +369,7 @@ describe("GET /api/git/commit/:hash/diff", () => {
 
 	test("returns 403 for path traversal with ../", async () => {
 		const res = await supertest(app).get(
-			`/api/git/commit/${secondHash}/diff?path=../secret.txt`,
+			`/api/git/commit/${secondHash}/diff?repo=${repoName}&path=../secret.txt`,
 		);
 
 		expect(res.status).toBe(403);
@@ -339,7 +378,7 @@ describe("GET /api/git/commit/:hash/diff", () => {
 
 	test("returns 403 for absolute path", async () => {
 		const res = await supertest(app).get(
-			`/api/git/commit/${secondHash}/diff?path=/etc/passwd`,
+			`/api/git/commit/${secondHash}/diff?repo=${repoName}&path=/etc/passwd`,
 		);
 
 		expect(res.status).toBe(403);
@@ -348,7 +387,7 @@ describe("GET /api/git/commit/:hash/diff", () => {
 
 	test("returns 403 for encoded path traversal", async () => {
 		const res = await supertest(app).get(
-			`/api/git/commit/${secondHash}/diff?path=sub/../../secret`,
+			`/api/git/commit/${secondHash}/diff?repo=${repoName}&path=sub/../../secret`,
 		);
 
 		expect(res.status).toBe(403);
@@ -358,7 +397,7 @@ describe("GET /api/git/commit/:hash/diff", () => {
 	test("works with short hash", async () => {
 		const shortHash = secondHash.slice(0, 7);
 		const res = await supertest(app).get(
-			`/api/git/commit/${shortHash}/diff?path=hello.txt`,
+			`/api/git/commit/${shortHash}/diff?repo=${repoName}&path=hello.txt`,
 		);
 
 		expect(res.status).toBe(200);
@@ -368,23 +407,24 @@ describe("GET /api/git/commit/:hash/diff", () => {
 });
 
 describe("GET /api/git/commit/:hash/diff (not a git repo)", () => {
-	let tmpDir: string;
+	let reposRoot: string;
 	let app: ReturnType<typeof createApp>;
 
 	beforeAll(async () => {
-		tmpDir = await fs.mkdtemp(
+		reposRoot = await fs.mkdtemp(
 			path.join(os.tmpdir(), "rift-commitdiff-norepo-"),
 		);
-		app = createApp(makeConfig(tmpDir));
+		await fs.mkdir(path.join(reposRoot, "not-a-repo"));
+		app = createApp(makeConfig(reposRoot));
 	});
 
 	afterAll(async () => {
-		await fs.rm(tmpDir, { recursive: true, force: true });
+		await fs.rm(reposRoot, { recursive: true, force: true });
 	});
 
 	test("returns NOT_GIT_REPO error with status 400", async () => {
 		const res = await supertest(app).get(
-			"/api/git/commit/abcdef1234567890abcdef1234567890abcdef12/diff?path=file.txt",
+			"/api/git/commit/abcdef1234567890abcdef1234567890abcdef12/diff?repo=not-a-repo&path=file.txt",
 		);
 
 		expect(res.status).toBe(400);
