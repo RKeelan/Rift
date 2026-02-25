@@ -230,7 +230,6 @@ impl Database {
     }
 
     /// Get all active tasks whose next_run is at or before `now`.
-    #[allow(dead_code)] // Used in Step 6
     pub fn get_due_tasks(&self, now: &DateTime<Utc>) -> Result<Vec<ScheduledTask>> {
         let conn = self.lock();
         let mut stmt = conn.prepare(
@@ -256,7 +255,7 @@ impl Database {
     }
 
     /// Update a task's status (e.g. to "paused" or "completed").
-    #[allow(dead_code)] // Used by scheduler
+    #[allow(dead_code)] // Reserved for future pause/resume commands
     pub fn update_task_status(&self, id: &str, status: &str) -> Result<()> {
         let conn = self.lock();
         conn.execute(
@@ -267,7 +266,6 @@ impl Database {
     }
 
     /// Update a task after it runs: set next_run, and mark completed if next_run is None.
-    #[allow(dead_code)] // Used in Step 6
     pub fn update_task_after_run(&self, id: &str, next_run: Option<&DateTime<Utc>>) -> Result<()> {
         let conn = self.lock();
         match next_run {
@@ -300,7 +298,6 @@ impl Database {
     // ── Task Run Logs ─────────────────────────────────────────────────
 
     /// Record the result of a task execution.
-    #[allow(dead_code)] // Used in Step 6
     pub fn log_task_run(
         &self,
         task_id: &str,

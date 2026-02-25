@@ -126,7 +126,7 @@ Three tables:
 - Wire tools into the agent loop
 - **Verify**: "Fetch the front page of Hacker News" works end-to-end
 
-### Step 6: Scheduler
+### ~~Step 6: Scheduler~~ ✓
 
 - Implement `scheduler.rs` (polling loop, cron evaluation, task→agent→Telegram pipeline)
 - Wire into `main.rs` alongside Telegram listener

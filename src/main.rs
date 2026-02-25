@@ -41,7 +41,22 @@ async fn main() -> anyhow::Result<()> {
     ));
     let bot = teloxide::Bot::new(config.telegram_bot_token);
 
-    telegram::run(bot, config.telegram_owner_chat_id, db, agent, tool_executor).await;
+    let scheduler_handle = tokio::spawn(scheduler::run(
+        bot.clone(),
+        config.telegram_owner_chat_id,
+        db.clone(),
+        agent.clone(),
+        tool_executor.clone(),
+    ));
+
+    tokio::select! {
+        _ = telegram::run(bot, config.telegram_owner_chat_id, db, agent, tool_executor) => {}
+        result = scheduler_handle => {
+            if let Err(e) = result {
+                tracing::error!(error = %e, "scheduler task panicked");
+            }
+        }
+    }
 
     tracing::info!("Imp shutting down");
     Ok(())

@@ -3,9 +3,14 @@ pub mod tools;
 pub mod types;
 
 use async_trait::async_trait;
+use tokio::sync::mpsc;
 
 use crate::error::Result;
 use types::{ContentBlock, Message, ToolDefinition};
+
+/// Sender for retry notifications. Each message carries the retry attempt
+/// number (0-indexed), allowing callers to react (e.g. send filler messages).
+pub type RetryNotifier = mpsc::UnboundedSender<u32>;
 
 /// Conversational agent that sends messages and returns responses.
 #[async_trait]
@@ -14,11 +19,15 @@ pub trait Agent: Send + Sync {
     /// The implementation handles the tool-use loop internally, calling
     /// `tool_executor` for each tool invocation until the model produces a
     /// final text response or the loop cap is reached.
+    ///
+    /// If `retry_tx` is provided, the agent sends the attempt number on each
+    /// retry of a transient API error (429/529).
     async fn send(
         &self,
         system: Option<&str>,
         messages: Vec<Message>,
         tool_executor: &dyn ToolExecutor,
+        retry_tx: Option<&RetryNotifier>,
     ) -> Result<AgentResponse>;
 }
 

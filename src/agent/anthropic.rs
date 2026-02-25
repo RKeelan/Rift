@@ -4,13 +4,14 @@ use tracing::{debug, warn};
 use super::types::{
     ApiErrorResponse, ContentBlock, Message, MessagesRequest, MessagesResponse, Role, StopReason,
 };
-use super::{Agent, AgentResponse, ToolExecutor};
+use super::{Agent, AgentResponse, RetryNotifier, ToolExecutor};
 use crate::error::{ImpError, Result};
 
 const API_URL: &str = "https://api.anthropic.com/v1/messages";
 const API_VERSION: &str = "2023-06-01";
 const MAX_TOOL_LOOPS: usize = 10;
 const MAX_TOKENS: u32 = 8192;
+const MAX_RETRIES: u32 = 5;
 
 /// Agent backed by the Anthropic Messages API.
 pub struct AnthropicAgent {
@@ -40,32 +41,59 @@ impl AnthropicAgent {
         }
     }
 
-    async fn call_api(&self, request: &MessagesRequest) -> Result<MessagesResponse> {
-        let response = self
-            .client
-            .post(&self.api_url)
-            .header("x-api-key", &self.api_key)
-            .header("anthropic-version", API_VERSION)
-            .header("content-type", "application/json")
-            .json(request)
-            .send()
-            .await?;
+    async fn call_api(
+        &self,
+        request: &MessagesRequest,
+        retry_tx: Option<&RetryNotifier>,
+    ) -> Result<MessagesResponse> {
+        for attempt in 0..=MAX_RETRIES {
+            let response = self
+                .client
+                .post(&self.api_url)
+                .header("x-api-key", &self.api_key)
+                .header("anthropic-version", API_VERSION)
+                .header("content-type", "application/json")
+                .json(request)
+                .send()
+                .await?;
 
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            let message = serde_json::from_str::<ApiErrorResponse>(&body)
-                .map(|e| e.error.message)
-                .unwrap_or(body);
-            return Err(ImpError::AnthropicApi {
-                status: status.as_u16(),
-                message,
-            });
+            let status = response.status().as_u16();
+
+            if status == 429 || status == 529 {
+                if attempt == MAX_RETRIES {
+                    let body = response.text().await.unwrap_or_default();
+                    let message = serde_json::from_str::<ApiErrorResponse>(&body)
+                        .map(|e| e.error.message)
+                        .unwrap_or(body);
+                    return Err(ImpError::AnthropicApi { status, message });
+                }
+                warn!(status, attempt, "retryable API error, backing off");
+                if let Some(tx) = retry_tx {
+                    let _ = tx.send(attempt);
+                }
+                let base_ms = 1000u64 * 2u64.pow(attempt);
+                let jitter_ms = (std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .subsec_nanos()
+                    % 1000) as u64;
+                tokio::time::sleep(tokio::time::Duration::from_millis(base_ms + jitter_ms)).await;
+                continue;
+            }
+
+            if !reqwest::StatusCode::from_u16(status).unwrap().is_success() {
+                let body = response.text().await.unwrap_or_default();
+                let message = serde_json::from_str::<ApiErrorResponse>(&body)
+                    .map(|e| e.error.message)
+                    .unwrap_or(body);
+                return Err(ImpError::AnthropicApi { status, message });
+            }
+
+            let body = response.text().await?;
+            let parsed: MessagesResponse = serde_json::from_str(&body)?;
+            return Ok(parsed);
         }
-
-        let body = response.text().await?;
-        let parsed: MessagesResponse = serde_json::from_str(&body)?;
-        Ok(parsed)
+        unreachable!()
     }
 }
 
@@ -76,6 +104,7 @@ impl Agent for AnthropicAgent {
         system: Option<&str>,
         messages: Vec<Message>,
         tool_executor: &dyn ToolExecutor,
+        retry_tx: Option<&RetryNotifier>,
     ) -> Result<AgentResponse> {
         let tools = tool_executor.tool_definitions();
         let mut conversation = messages;
@@ -92,7 +121,7 @@ impl Agent for AnthropicAgent {
             };
 
             debug!(iteration, "calling Anthropic Messages API");
-            let response = self.call_api(&request).await?;
+            let response = self.call_api(&request, retry_tx).await?;
 
             total_input += response.usage.input_tokens;
             total_output += response.usage.output_tokens;
@@ -633,7 +662,7 @@ mod tests {
             content: vec![ContentBlock::text("Hello")],
         }];
 
-        let response = agent.send(None, messages, &executor).await.unwrap();
+        let response = agent.send(None, messages, &executor, None).await.unwrap();
         assert_eq!(response.text, "Hello back!");
         assert_eq!(response.input_tokens, 10);
         assert_eq!(response.output_tokens, 5);
@@ -685,7 +714,7 @@ mod tests {
             content: vec![ContentBlock::text("Echo this: ping")],
         }];
 
-        let response = agent.send(None, messages, &executor).await.unwrap();
+        let response = agent.send(None, messages, &executor, None).await.unwrap();
         assert_eq!(response.text, "The echo said: ping");
         // Tokens accumulate across both API calls
         assert_eq!(response.input_tokens, 20);
@@ -722,7 +751,7 @@ mod tests {
             content: vec![ContentBlock::text("Hello")],
         }];
 
-        let result = agent.send(None, messages, &executor).await;
+        let result = agent.send(None, messages, &executor, None).await;
         assert!(result.is_err());
         let err = result.unwrap_err();
         let err_str = err.to_string();
@@ -759,7 +788,7 @@ mod tests {
         }];
 
         let response = agent
-            .send(Some("You are Imp."), messages, &executor)
+            .send(Some("You are Imp."), messages, &executor, None)
             .await
             .unwrap();
         assert_eq!(response.text, "I am Imp.");
@@ -795,7 +824,7 @@ mod tests {
             content: vec![ContentBlock::text("Tell me something.")],
         }];
 
-        let response = agent.send(None, messages, &executor).await.unwrap();
+        let response = agent.send(None, messages, &executor, None).await.unwrap();
         assert_eq!(response.text, "First part. Second part.");
     }
 
@@ -803,5 +832,170 @@ mod tests {
     fn test_agent_default_api_url() {
         let agent = AnthropicAgent::new("key".to_string(), "model".to_string());
         assert_eq!(agent.api_url, "https://api.anthropic.com/v1/messages");
+    }
+
+    // ── Retry behavior tests ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_retry_on_529_then_success() {
+        let server = MockServer::start().await;
+
+        let body = make_api_response(json!([{"type": "text", "text": "recovered"}]), "end_turn");
+
+        // First call returns 529, second succeeds
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(ResponseTemplate::new(529).set_body_string("overloaded"))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&body))
+            .mount(&server)
+            .await;
+
+        let agent = AnthropicAgent::with_api_url(
+            "test-key".to_string(),
+            "test-model".to_string(),
+            format!("{}/v1/messages", server.uri()),
+        );
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let executor = EmptyToolExecutor;
+        let messages = vec![Message {
+            role: Role::User,
+            content: vec![ContentBlock::text("hello")],
+        }];
+
+        let response = agent
+            .send(None, messages, &executor, Some(&tx))
+            .await
+            .unwrap();
+        assert_eq!(response.text, "recovered");
+
+        // Should have received exactly one retry notification (attempt 0)
+        assert_eq!(rx.try_recv().unwrap(), 0);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn test_retry_on_429_then_success() {
+        let server = MockServer::start().await;
+
+        let body = make_api_response(json!([{"type": "text", "text": "ok"}]), "end_turn");
+
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(ResponseTemplate::new(429).set_body_string("rate limited"))
+            .up_to_n_times(2)
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&body))
+            .mount(&server)
+            .await;
+
+        let agent = AnthropicAgent::with_api_url(
+            "test-key".to_string(),
+            "test-model".to_string(),
+            format!("{}/v1/messages", server.uri()),
+        );
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let executor = EmptyToolExecutor;
+        let messages = vec![Message {
+            role: Role::User,
+            content: vec![ContentBlock::text("hello")],
+        }];
+
+        let response = agent
+            .send(None, messages, &executor, Some(&tx))
+            .await
+            .unwrap();
+        assert_eq!(response.text, "ok");
+
+        // Two retry notifications: attempts 0 and 1
+        assert_eq!(rx.try_recv().unwrap(), 0);
+        assert_eq!(rx.try_recv().unwrap(), 1);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn test_non_retryable_error_not_retried() {
+        let server = MockServer::start().await;
+
+        let error_body = json!({
+            "type": "error",
+            "error": {
+                "type": "authentication_error",
+                "message": "invalid key"
+            }
+        });
+
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(&error_body))
+            .expect(1) // Must be called exactly once — no retries
+            .mount(&server)
+            .await;
+
+        let agent = AnthropicAgent::with_api_url(
+            "bad-key".to_string(),
+            "test-model".to_string(),
+            format!("{}/v1/messages", server.uri()),
+        );
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let executor = EmptyToolExecutor;
+        let messages = vec![Message {
+            role: Role::User,
+            content: vec![ContentBlock::text("hello")],
+        }];
+
+        let result = agent.send(None, messages, &executor, Some(&tx)).await;
+        assert!(result.is_err());
+
+        // No retry notifications
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn test_retry_without_notifier() {
+        let server = MockServer::start().await;
+
+        let body = make_api_response(json!([{"type": "text", "text": "ok"}]), "end_turn");
+
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(ResponseTemplate::new(529).set_body_string("overloaded"))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&body))
+            .mount(&server)
+            .await;
+
+        let agent = AnthropicAgent::with_api_url(
+            "test-key".to_string(),
+            "test-model".to_string(),
+            format!("{}/v1/messages", server.uri()),
+        );
+
+        let executor = EmptyToolExecutor;
+        let messages = vec![Message {
+            role: Role::User,
+            content: vec![ContentBlock::text("hello")],
+        }];
+
+        // None for retry_tx — should still retry without panicking
+        let response = agent.send(None, messages, &executor, None).await.unwrap();
+        assert_eq!(response.text, "ok");
     }
 }

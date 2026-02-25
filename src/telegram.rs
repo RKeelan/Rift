@@ -161,9 +161,27 @@ async fn handle_message(
         })
         .collect();
 
-    // Call the agent
+    // Call the agent, with filler messages on retries
+    let (retry_tx, mut retry_rx) = tokio::sync::mpsc::unbounded_channel();
+    let filler_bot = bot.clone();
+    let filler_chat_id = msg.chat.id;
+    let filler_task = tokio::spawn(async move {
+        const FILLERS: &[&str] = &["Uh\u{2014}", "Um...", "That is..", "You see\u{2014}", "Hm."];
+        let mut i = 0;
+        while retry_rx.recv().await.is_some() {
+            let filler = FILLERS[i.min(FILLERS.len() - 1)];
+            let _ = filler_bot.send_message(filler_chat_id, filler).await;
+            i += 1;
+        }
+    });
+
     let response = match agent
-        .send(Some(SYSTEM_PROMPT), agent_messages, tool_executor.as_ref())
+        .send(
+            Some(SYSTEM_PROMPT),
+            agent_messages,
+            tool_executor.as_ref(),
+            Some(&retry_tx),
+        )
         .await
     {
         Ok(r) => r,
@@ -174,9 +192,12 @@ async fn handle_message(
                 "Something went wrong. Check the logs for details.",
             )
             .await?;
+            filler_task.abort();
             return Ok(());
         }
     };
+    drop(retry_tx);
+    filler_task.abort();
 
     info!(
         input_tokens = response.input_tokens,
@@ -438,7 +459,7 @@ mod tests {
     // ── Integration test: message handling flow ─────────────────────
 
     use crate::agent::types::ToolDefinition;
-    use crate::agent::AgentResponse;
+    use crate::agent::{AgentResponse, RetryNotifier};
     use crate::db::Database;
     use async_trait::async_trait;
 
@@ -454,6 +475,7 @@ mod tests {
             _system: Option<&str>,
             _messages: Vec<AgentMessage>,
             _tool_executor: &dyn ToolExecutor,
+            _retry_tx: Option<&RetryNotifier>,
         ) -> crate::error::Result<AgentResponse> {
             Ok(AgentResponse {
                 text: self.response_text.clone(),
@@ -527,7 +549,12 @@ mod tests {
 
         // 4. Call agent
         let response = agent
-            .send(Some(SYSTEM_PROMPT), agent_messages, tool_executor.as_ref())
+            .send(
+                Some(SYSTEM_PROMPT),
+                agent_messages,
+                tool_executor.as_ref(),
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(response.text, "Hello from mock agent!");
@@ -587,7 +614,12 @@ mod tests {
             .collect();
 
         let response = agent
-            .send(Some(SYSTEM_PROMPT), agent_messages, tool_executor.as_ref())
+            .send(
+                Some(SYSTEM_PROMPT),
+                agent_messages,
+                tool_executor.as_ref(),
+                None,
+            )
             .await
             .unwrap();
 
@@ -664,7 +696,12 @@ mod tests {
 
         // Call agent with full context
         let response = agent
-            .send(Some(SYSTEM_PROMPT), agent_messages, tool_executor.as_ref())
+            .send(
+                Some(SYSTEM_PROMPT),
+                agent_messages,
+                tool_executor.as_ref(),
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(response.text, "Response 3");

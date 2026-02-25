@@ -223,9 +223,12 @@ fn parse_once_schedule(
 }
 
 /// Parse a cron expression and return the next occurrence after now.
-fn parse_cron_next(expr: &str) -> Result<chrono::DateTime<Utc>, String> {
-    // The `cron` crate expects 7-field expressions (sec min hour dom mon dow year).
-    // Standard 5-field cron (min hour dom mon dow) needs a "0" prefix for seconds.
+///
+/// Accepts 5-field (min hour dom mon dow), 6-field (sec min hour dom mon dow),
+/// or 7-field (sec min hour dom mon dow year) expressions. 5-field expressions
+/// get a "0" seconds prefix automatically; 6- and 7-field expressions are
+/// passed to the cron crate as-is.
+pub(crate) fn parse_cron_next(expr: &str) -> Result<chrono::DateTime<Utc>, String> {
     let full_expr = if expr.split_whitespace().count() == 5 {
         format!("0 {expr}")
     } else {
