@@ -68,7 +68,10 @@ export function createApp(
 	router.use("/api/repos", repoRoutes(config.reposRoot));
 
 	if (sessionManager) {
-		router.use("/api/sessions", sessionRoutes(sessionManager));
+		router.use(
+			"/api/sessions",
+			sessionRoutes(sessionManager, config.reposRoot),
+		);
 	}
 
 	// Production: serve static files from client/dist
