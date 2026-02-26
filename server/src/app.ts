@@ -5,6 +5,7 @@ import { simpleGit } from "simple-git";
 import { resolveRepo } from "./pathUtils.js";
 import { fileRoutes } from "./routes/files.js";
 import { gitRoutes } from "./routes/git.js";
+import { repoRoutes } from "./routes/repos.js";
 import { sessionRoutes } from "./routes/sessions.js";
 import type { SessionManager } from "./session.js";
 
@@ -64,6 +65,7 @@ export function createApp(
 
 	router.use("/api/files", fileRoutes(config.reposRoot));
 	router.use("/api/git", gitRoutes(config.reposRoot));
+	router.use("/api/repos", repoRoutes(config.reposRoot));
 
 	if (sessionManager) {
 		router.use("/api/sessions", sessionRoutes(sessionManager));
