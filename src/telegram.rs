@@ -80,7 +80,6 @@ pub async fn run(
             tool_executor
         ])
         .default_handler(|_| async {})
-        .enable_ctrlc_handler()
         .build()
         .dispatch()
         .await;

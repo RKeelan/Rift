@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use teloxide::prelude::*;
+use tokio::sync::watch;
 use tokio::time::{interval, Duration};
 use tracing::{error, info, warn};
 
@@ -19,22 +20,29 @@ You are executing a scheduled task. The user set this up earlier and it has now 
 Carry out the instruction below. Be helpful, concise, and conversational. \
 You have access to tools for scheduling tasks and fetching web content.";
 
-/// Start the scheduler polling loop. Runs indefinitely, checking for due tasks
-/// every 60 seconds. Each due task is sent to the agent and the response is
-/// delivered to the owner via Telegram.
+/// Start the scheduler polling loop. Runs until the shutdown receiver signals,
+/// checking for due tasks every 60 seconds. Each due task is sent to the agent
+/// and the response is delivered to the owner via Telegram.
 pub async fn run(
     bot: Bot,
     owner_chat_id: i64,
     db: Arc<Database>,
     agent: Arc<dyn Agent>,
     tool_executor: Arc<dyn ToolExecutor>,
+    mut shutdown: watch::Receiver<()>,
 ) {
     info!("starting scheduler (poll interval: {POLL_INTERVAL_SECS}s)");
     let chat_id = ChatId(owner_chat_id);
     let mut ticker = interval(Duration::from_secs(POLL_INTERVAL_SECS));
 
     loop {
-        ticker.tick().await;
+        tokio::select! {
+            _ = ticker.tick() => {}
+            _ = shutdown.changed() => {
+                info!("scheduler shutting down");
+                break;
+            }
+        }
 
         let now = Utc::now();
         let db_poll = db.clone();

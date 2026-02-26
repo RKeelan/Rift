@@ -1,0 +1,10 @@
+services:
+  imp:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - imp-data:/data
+
+volumes:
+  imp-data:
