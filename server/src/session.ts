@@ -12,6 +12,7 @@ export interface Session {
 	state: "running" | "stopped";
 	createdAt: string;
 	stoppedAt?: number;
+	repo: string;
 	workingDirectory: string;
 	adapter: AgentAdapter;
 	buffer: ServerMessage[];
@@ -21,6 +22,7 @@ export interface SessionInfo {
 	id: string;
 	state: "running" | "stopped";
 	createdAt: string;
+	repo: string;
 }
 
 export interface SessionManagerOptions {
@@ -50,13 +52,17 @@ export class SessionManager extends EventEmitter {
 		this.cleanupTimer.unref();
 	}
 
-	async createSession(workingDirectory: string): Promise<SessionInfo> {
+	async createSession(
+		repo: string,
+		workingDirectory: string,
+	): Promise<SessionInfo> {
 		const id = randomUUID();
 		const adapter = this.adapterFactory();
 		const session: Session = {
 			id,
 			state: "running",
 			createdAt: new Date().toISOString(),
+			repo,
 			workingDirectory,
 			adapter,
 			buffer: [],
@@ -100,7 +106,7 @@ export class SessionManager extends EventEmitter {
 		}
 
 		this.sessions.set(id, session);
-		return { id, state: session.state, createdAt: session.createdAt };
+		return toInfo(session);
 	}
 
 	listSessions(): SessionInfo[] {
@@ -186,5 +192,6 @@ function toInfo(session: Session): SessionInfo {
 		id: session.id,
 		state: session.state,
 		createdAt: session.createdAt,
+		repo: session.repo,
 	};
 }

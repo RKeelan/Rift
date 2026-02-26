@@ -37,12 +37,13 @@ describe("Session REST endpoints", () => {
 
 			const response = await supertest(app)
 				.post("/api/sessions")
-				.send({ workingDirectory: "/tmp" })
+				.send({ repo: "src" })
 				.expect(201);
 
 			expect(response.body.id).toBeTruthy();
 			expect(response.body.state).toBe("running");
 			expect(response.body.createdAt).toBeTruthy();
+			expect(response.body.repo).toBe("src");
 		});
 
 		test("created session appears in list", async () => {
@@ -51,7 +52,7 @@ describe("Session REST endpoints", () => {
 
 			const createRes = await supertest(app)
 				.post("/api/sessions")
-				.send({ workingDirectory: "/tmp" })
+				.send({ repo: "src" })
 				.expect(201);
 
 			const listRes = await supertest(app).get("/api/sessions").expect(200);
@@ -59,6 +60,67 @@ describe("Session REST endpoints", () => {
 			expect(listRes.body).toHaveLength(1);
 			expect(listRes.body[0].id).toBe(createRes.body.id);
 			expect(listRes.body[0].state).toBe("running");
+			expect(listRes.body[0].repo).toBe("src");
+		});
+
+		test("returns 400 when repo is missing", async () => {
+			manager = makeManager();
+			const app = createApp(makeConfig(), manager);
+
+			const response = await supertest(app)
+				.post("/api/sessions")
+				.send({})
+				.expect(400);
+
+			expect(response.body.error.code).toBe("BAD_REQUEST");
+		});
+
+		test("returns 400 when repo contains path traversal", async () => {
+			manager = makeManager();
+			const app = createApp(makeConfig(), manager);
+
+			const response = await supertest(app)
+				.post("/api/sessions")
+				.send({ repo: "../../etc" })
+				.expect(400);
+
+			expect(response.body.error.code).toBe("BAD_REQUEST");
+		});
+
+		test("returns 400 when repo is an absolute path", async () => {
+			manager = makeManager();
+			const app = createApp(makeConfig(), manager);
+
+			const response = await supertest(app)
+				.post("/api/sessions")
+				.send({ repo: "/etc/passwd" })
+				.expect(400);
+
+			expect(response.body.error.code).toBe("BAD_REQUEST");
+		});
+
+		test("returns 400 when repo is not a string", async () => {
+			manager = makeManager();
+			const app = createApp(makeConfig(), manager);
+
+			const response = await supertest(app)
+				.post("/api/sessions")
+				.send({ repo: 42 })
+				.expect(400);
+
+			expect(response.body.error.code).toBe("BAD_REQUEST");
+		});
+
+		test("returns 404 when repo does not exist", async () => {
+			manager = makeManager();
+			const app = createApp(makeConfig(), manager);
+
+			const response = await supertest(app)
+				.post("/api/sessions")
+				.send({ repo: "nonexistent-repo" })
+				.expect(404);
+
+			expect(response.body.error.code).toBe("NOT_FOUND");
 		});
 
 		test("returns 500 when adapter spawn fails", async () => {
@@ -77,7 +139,7 @@ describe("Session REST endpoints", () => {
 
 			const response = await supertest(app)
 				.post("/api/sessions")
-				.send({ workingDirectory: "/tmp" })
+				.send({ repo: "src" })
 				.expect(500);
 
 			expect(response.body.error).toBeDefined();
@@ -100,12 +162,8 @@ describe("Session REST endpoints", () => {
 			manager = makeManager();
 			const app = createApp(makeConfig(), manager);
 
-			await supertest(app)
-				.post("/api/sessions")
-				.send({ workingDirectory: "/tmp" });
-			await supertest(app)
-				.post("/api/sessions")
-				.send({ workingDirectory: "/tmp" });
+			await supertest(app).post("/api/sessions").send({ repo: "src" });
+			await supertest(app).post("/api/sessions").send({ repo: "src" });
 
 			const response = await supertest(app).get("/api/sessions").expect(200);
 
@@ -114,13 +172,30 @@ describe("Session REST endpoints", () => {
 	});
 
 	describe("GET /api/sessions/:id", () => {
-		test("returns session details for existing session", async () => {
+		test("response contains only SessionInfo fields", async () => {
 			manager = makeManager();
 			const app = createApp(makeConfig(), manager);
 
 			const createRes = await supertest(app)
 				.post("/api/sessions")
-				.send({ workingDirectory: "/tmp" })
+				.send({ repo: "src" })
+				.expect(201);
+
+			const response = await supertest(app)
+				.get(`/api/sessions/${createRes.body.id}`)
+				.expect(200);
+
+			const keys = Object.keys(response.body).sort();
+			expect(keys).toEqual(["createdAt", "id", "repo", "state"]);
+		});
+
+		test("returns session details including repo", async () => {
+			manager = makeManager();
+			const app = createApp(makeConfig(), manager);
+
+			const createRes = await supertest(app)
+				.post("/api/sessions")
+				.send({ repo: "src" })
 				.expect(201);
 
 			const response = await supertest(app)
@@ -130,6 +205,7 @@ describe("Session REST endpoints", () => {
 			expect(response.body.id).toBe(createRes.body.id);
 			expect(response.body.state).toBe("running");
 			expect(response.body.createdAt).toBeTruthy();
+			expect(response.body.repo).toBe("src");
 		});
 
 		test("returns 404 for non-existent session", async () => {
@@ -146,13 +222,13 @@ describe("Session REST endpoints", () => {
 	});
 
 	describe("DELETE /api/sessions/:id", () => {
-		test("stops a running session", async () => {
+		test("stops a running session and preserves repo in response", async () => {
 			manager = makeManager();
 			const app = createApp(makeConfig(), manager);
 
 			const createRes = await supertest(app)
 				.post("/api/sessions")
-				.send({ workingDirectory: "/tmp" })
+				.send({ repo: "src" })
 				.expect(201);
 
 			const deleteRes = await supertest(app)
@@ -160,6 +236,7 @@ describe("Session REST endpoints", () => {
 				.expect(200);
 
 			expect(deleteRes.body.state).toBe("stopped");
+			expect(deleteRes.body.repo).toBe("src");
 		});
 
 		test("session state changes to stopped after delete", async () => {
@@ -168,7 +245,7 @@ describe("Session REST endpoints", () => {
 
 			const createRes = await supertest(app)
 				.post("/api/sessions")
-				.send({ workingDirectory: "/tmp" })
+				.send({ repo: "src" })
 				.expect(201);
 
 			await supertest(app)
@@ -200,7 +277,7 @@ describe("Session REST endpoints", () => {
 
 			const createRes = await supertest(app)
 				.post("/api/sessions")
-				.send({ workingDirectory: "/tmp" })
+				.send({ repo: "src" })
 				.expect(201);
 
 			await supertest(app)
@@ -223,9 +300,10 @@ describe("Session REST endpoints", () => {
 			// Create
 			const createRes = await supertest(app)
 				.post("/api/sessions")
-				.send({ workingDirectory: "/tmp" })
+				.send({ repo: "src" })
 				.expect(201);
 			const sessionId = createRes.body.id;
+			expect(createRes.body.repo).toBe("src");
 
 			// List: session is running
 			const listRes1 = await supertest(app).get("/api/sessions").expect(200);
@@ -238,6 +316,7 @@ describe("Session REST endpoints", () => {
 				.expect(200);
 			expect(getRes1.body.id).toBe(sessionId);
 			expect(getRes1.body.state).toBe("running");
+			expect(getRes1.body.repo).toBe("src");
 
 			// Stop
 			const deleteRes = await supertest(app)

@@ -30,33 +30,6 @@ Replace the single-`WORKING_DIR` server model with a repo-aware server that can 
 - `curl localhost:3000/api/files?repo=Rift&path=.` lists Rift's root directory
 - `curl localhost:3000/api/git/status?repo=Rift` shows git status
 
-## Task 3: Make sessions repo-aware
-
-Depends on: Task 1 (for repo-resolution utility)
-
-### Requirements
-
-- `POST /api/sessions` requires a `repo` field in the body (the repo name, not a full path); drop the existing `workingDirectory` body field entirely. The session route resolves the repo name against `REPOS_ROOT` using the shared utility from Task 1, then passes both to `sessionManager.createSession()`
-- Update `sessionRoutes(sessionManager)` to `sessionRoutes(sessionManager, reposRoot)` so the route handler has access to the repo-resolution utility. Update the `createApp` call site at `app.ts` line 50 accordingly
-- Add a `repo` field to the `Session` type (stores the repo name). Change `SessionManager.createSession(workingDirectory)` to `createSession(repo, workingDirectory)` so it can store the repo name on the session object. Both arguments are needed because `SessionManager` should not know about `REPOS_ROOT` or filesystem layout; the route layer resolves repo→path and passes both
-- `AdapterConfig` keeps its existing `{ workingDirectory }` shape; no change needed
-- `SessionInfo` gains a `repo` field (the repo name) so the client knows which repo a session belongs to. Update `toInfo()` to include `session.repo`
-- `GET /api/sessions` and `GET /api/sessions/:id` include `repo` in their responses
-- `POST /api/sessions` with missing or invalid `repo` returns 400
-- Update existing session tests
-
-### Verification
-
-- Test that `POST /api/sessions { repo: "test-repo" }` creates a session with `repo: "test-repo"` in the response
-- Test that `POST /api/sessions {}` (no repo) returns 400
-- Test that `POST /api/sessions { repo: "../../etc" }` returns 400
-- Test that `GET /api/sessions/:id` includes `repo` in the response
-
-### Validation
-
-- `curl -X POST localhost:3000/api/sessions -H 'Content-Type: application/json' -d '{"repo":"Rift"}'` creates a session with `repo` in the response
-- `curl localhost:3000/api/sessions/<id>` shows the repo name
-
 ## Task 4: Update the CLI for multi-repo support
 
 Depends on: Tasks 1, 2, 3

@@ -29,7 +29,7 @@ describe("SessionManager", () => {
 	describe("createSession", () => {
 		test("returns session info with id, running state, and createdAt", async () => {
 			manager = createManager();
-			const info = await manager.createSession("/tmp");
+			const info = await manager.createSession("test-repo", "/tmp");
 
 			expect(info.id).toBeTruthy();
 			expect(info.state).toBe("running");
@@ -38,10 +38,17 @@ describe("SessionManager", () => {
 			expect(new Date(info.createdAt).toISOString()).toBe(info.createdAt);
 		});
 
+		test("stores the repo name in the returned info", async () => {
+			manager = createManager();
+			const info = await manager.createSession("my-repo", "/some/path");
+
+			expect(info.repo).toBe("my-repo");
+		});
+
 		test("each session gets a unique id", async () => {
 			manager = createManager();
-			const info1 = await manager.createSession("/tmp");
-			const info2 = await manager.createSession("/tmp");
+			const info1 = await manager.createSession("test-repo", "/tmp");
+			const info2 = await manager.createSession("test-repo", "/tmp");
 
 			expect(info1.id).not.toBe(info2.id);
 		});
@@ -55,27 +62,37 @@ describe("SessionManager", () => {
 
 		test("returns all created sessions", async () => {
 			manager = createManager();
-			await manager.createSession("/tmp");
-			await manager.createSession("/tmp");
+			await manager.createSession("test-repo", "/tmp");
+			await manager.createSession("test-repo", "/tmp");
 
 			const sessions = manager.listSessions();
 			expect(sessions).toHaveLength(2);
 		});
 
+		test("each session preserves its own repo name", async () => {
+			manager = createManager();
+			await manager.createSession("repo-alpha", "/tmp/alpha");
+			await manager.createSession("repo-beta", "/tmp/beta");
+
+			const sessions = manager.listSessions();
+			const repos = sessions.map((s) => s.repo).sort();
+			expect(repos).toEqual(["repo-alpha", "repo-beta"]);
+		});
+
 		test("session info does not expose adapter or buffer", async () => {
 			manager = createManager();
-			await manager.createSession("/tmp");
+			await manager.createSession("test-repo", "/tmp");
 
 			const sessions = manager.listSessions();
 			const keys = Object.keys(sessions[0]).sort();
-			expect(keys).toEqual(["createdAt", "id", "state"]);
+			expect(keys).toEqual(["createdAt", "id", "repo", "state"]);
 		});
 	});
 
 	describe("getSession", () => {
 		test("returns session info for existing session", async () => {
 			manager = createManager();
-			const created = await manager.createSession("/tmp");
+			const created = await manager.createSession("test-repo", "/tmp");
 
 			const fetched = manager.getSession(created.id);
 			expect(fetched).toBeDefined();
@@ -92,7 +109,7 @@ describe("SessionManager", () => {
 	describe("stopSession", () => {
 		test("stops a running session", async () => {
 			manager = createManager();
-			const created = await manager.createSession("/tmp");
+			const created = await manager.createSession("test-repo", "/tmp");
 
 			const stopped = manager.stopSession(created.id);
 			expect(stopped).toBe(true);
@@ -108,7 +125,7 @@ describe("SessionManager", () => {
 
 		test("stopping an already stopped session returns true", async () => {
 			manager = createManager();
-			const created = await manager.createSession("/tmp");
+			const created = await manager.createSession("test-repo", "/tmp");
 
 			manager.stopSession(created.id);
 			const result = manager.stopSession(created.id);
@@ -123,7 +140,7 @@ describe("SessionManager", () => {
 	describe("message buffering", () => {
 		test("send buffers messages from the adapter", async () => {
 			manager = createManager();
-			const created = await manager.createSession("/tmp");
+			const created = await manager.createSession("test-repo", "/tmp");
 
 			manager.send(created.id, "hello");
 
@@ -148,7 +165,7 @@ describe("SessionManager", () => {
 
 		test("send returns false for stopped session", async () => {
 			manager = createManager();
-			const created = await manager.createSession("/tmp");
+			const created = await manager.createSession("test-repo", "/tmp");
 
 			manager.stopSession(created.id);
 			expect(manager.send(created.id, "hello")).toBe(false);
@@ -156,7 +173,7 @@ describe("SessionManager", () => {
 
 		test("buffer accumulates messages across multiple sends", async () => {
 			manager = createManager();
-			const created = await manager.createSession("/tmp");
+			const created = await manager.createSession("test-repo", "/tmp");
 
 			manager.send(created.id, "first");
 			manager.send(created.id, "second");
@@ -170,7 +187,7 @@ describe("SessionManager", () => {
 	describe("buffer eviction at limit", () => {
 		test("drops oldest messages when buffer exceeds 10,000", async () => {
 			manager = createManager();
-			const created = await manager.createSession("/tmp");
+			const created = await manager.createSession("test-repo", "/tmp");
 
 			// EchoAdapter emits 3 messages per send
 			// To exceed 10,000: send 3,334 times = 10,002 messages
@@ -208,7 +225,7 @@ describe("SessionManager", () => {
 				cleanupIntervalMs: 25,
 			});
 
-			const created = await manager.createSession("/tmp");
+			const created = await manager.createSession("test-repo", "/tmp");
 			manager.stopSession(created.id);
 
 			// Session should still exist immediately
@@ -227,7 +244,7 @@ describe("SessionManager", () => {
 				cleanupIntervalMs: 25,
 			});
 
-			const created = await manager.createSession("/tmp");
+			const created = await manager.createSession("test-repo", "/tmp");
 
 			// Wait for cleanup to run
 			await new Promise((resolve) => setTimeout(resolve, 150));
@@ -241,8 +258,8 @@ describe("SessionManager", () => {
 	describe("stopAll", () => {
 		test("stops all running sessions", async () => {
 			manager = createManager();
-			const s1 = await manager.createSession("/tmp");
-			const s2 = await manager.createSession("/tmp");
+			const s1 = await manager.createSession("test-repo", "/tmp");
+			const s2 = await manager.createSession("test-repo", "/tmp");
 
 			manager.stopAll();
 
@@ -254,7 +271,7 @@ describe("SessionManager", () => {
 	describe("dispose", () => {
 		test("stops all sessions and clears cleanup timer", async () => {
 			manager = createManager();
-			const created = await manager.createSession("/tmp");
+			const created = await manager.createSession("test-repo", "/tmp");
 
 			manager.dispose();
 
@@ -276,7 +293,7 @@ describe("SessionManager", () => {
 
 			manager = createManager({ adapterFactory: failingFactory });
 
-			await expect(manager.createSession("/tmp")).rejects.toThrow(
+			await expect(manager.createSession("test-repo", "/tmp")).rejects.toThrow(
 				"Spawn failed",
 			);
 		});
@@ -302,7 +319,7 @@ describe("SessionManager", () => {
 				cleanupIntervalMs: 60_000,
 			});
 
-			const created = await manager.createSession("/tmp");
+			const created = await manager.createSession("test-repo", "/tmp");
 			expect(manager.getSession(created.id)?.state).toBe("running");
 
 			// Simulate adapter exit
