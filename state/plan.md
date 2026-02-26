@@ -30,29 +30,6 @@ Replace the single-`WORKING_DIR` server model with a repo-aware server that can 
 - `curl localhost:3000/api/files?repo=Rift&path=.` lists Rift's root directory
 - `curl localhost:3000/api/git/status?repo=Rift` shows git status
 
-## Task 2: Add GET /api/repos endpoint
-
-### Requirements
-
-- Add `GET /api/repos` that recursively scans `REPOS_ROOT`, stopping descent at the first directory that contains a `.git` directory (i.e., don't recurse into repos). This handles multi-level structures like `~/Src/RKeelan/Rift`, `~/Src/Keel-Inc/foo`
-- Return `{ repos: [{ name: string, path: string }] }` where `name` is the relative path from `REPOS_ROOT` (e.g. `RKeelan/Rift`) and `path` is the absolute path
-- Follow symlinks when checking subdirectories (common in `~/Src`)
-- Gracefully skip non-directory entries and unreadable subdirectories (log a warning, don't fail the request)
-- Cap recursion depth (e.g. 4 levels) to avoid runaway traversal
-- Add server tests
-
-### Verification
-
-- Test `GET /api/repos` returns repos found in a temp directory with nested git-initialised subdirs (e.g. `org/repo`)
-- Test that non-git subdirectories are recursed into (not returned as repos)
-- Test that directories containing `.git` are returned and not recursed further
-- Test that non-directory entries are excluded
-- Test that unreadable directories don't crash the endpoint
-
-### Validation
-
-- `curl localhost:3000/api/repos` lists available repositories
-
 ## Task 3: Make sessions repo-aware
 
 Depends on: Task 1 (for repo-resolution utility)
