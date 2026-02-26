@@ -66,7 +66,7 @@ async function createSession(baseUrl: string): Promise<string> {
 	const res = await fetch(`${baseUrl}/api/sessions`, {
 		method: "POST",
 		headers: { "Content-Type": "application/json" },
-		body: JSON.stringify({ workingDirectory: "/tmp" }),
+		body: JSON.stringify({ repo: "src" }),
 	});
 	const body = (await res.json()) as { id: string };
 	return body.id;
