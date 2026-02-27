@@ -6,15 +6,23 @@ interface HealthResponse {
 	gitRepo: boolean;
 }
 
-export function useGitRepo() {
+export function useGitRepo(repo: string | null) {
 	const { request } = useApi();
 	const [isGitRepo, setIsGitRepo] = useState<boolean | null>(null);
 	const [loading, setLoading] = useState(true);
 
 	const check = useCallback(async () => {
-		const data = await request<HealthResponse>("/api/health", {
-			silent: true,
-		});
+		if (!repo) {
+			setIsGitRepo(null);
+			setLoading(false);
+			return;
+		}
+		const data = await request<HealthResponse>(
+			`/api/health?repo=${encodeURIComponent(repo)}`,
+			{
+				silent: true,
+			},
+		);
 		if (data) {
 			setIsGitRepo(data.gitRepo);
 		} else {
@@ -22,7 +30,7 @@ export function useGitRepo() {
 			setIsGitRepo(true);
 		}
 		setLoading(false);
-	}, [request]);
+	}, [repo, request]);
 
 	useEffect(() => {
 		check();

@@ -14,27 +14,18 @@ export type SessionStatus =
 	| "error"
 	| "stopped";
 
-interface SessionInfo {
-	id: string;
-	state: "running" | "stopped";
-	createdAt: string;
-}
-
-const STORAGE_KEY = "rift:sessionId";
 const INITIAL_BACKOFF_MS = 1000;
 const MAX_BACKOFF_MS = 30_000;
 
-export function useAgentSession() {
+export function useAgentSession(sessionId: string) {
 	const [messages, setMessages] = useState<ServerMessage[]>([]);
 	const [status, setStatus] = useState<SessionStatus>("connecting");
-	const [sessionId, setSessionId] = useState<string | null>(null);
 	const [errorMessage, setErrorMessage] = useState<string | undefined>();
 
 	const wsRef = useRef<WebSocket | null>(null);
 	const backoffRef = useRef(INITIAL_BACKOFF_MS);
 	const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 	const mountedRef = useRef(true);
-	const initializingRef = useRef(false);
 
 	const clearReconnectTimer = useCallback(() => {
 		if (reconnectTimerRef.current !== null) {
@@ -123,50 +114,6 @@ export function useAgentSession() {
 		[closeWebSocket],
 	);
 
-	const initSession = useCallback(async () => {
-		if (initializingRef.current) return;
-		initializingRef.current = true;
-
-		try {
-			const storedId = localStorage.getItem(STORAGE_KEY);
-
-			if (storedId) {
-				// Check if the stored session is still running
-				const response = await fetch(apiUrl(`/api/sessions/${storedId}`));
-				if (response.ok) {
-					const session = (await response.json()) as SessionInfo;
-					if (session.state === "running") {
-						setSessionId(storedId);
-						connectWebSocket(storedId);
-						return;
-					}
-				}
-				// Session gone or stopped — clear and create new
-				localStorage.removeItem(STORAGE_KEY);
-			}
-
-			// Create a new session
-			const response = await fetch(apiUrl("/api/sessions"), { method: "POST" });
-			if (!response.ok) {
-				setStatus("error");
-				setErrorMessage("Failed to create session");
-				return;
-			}
-
-			const session = (await response.json()) as SessionInfo;
-			localStorage.setItem(STORAGE_KEY, session.id);
-			setSessionId(session.id);
-			connectWebSocket(session.id);
-		} catch {
-			if (mountedRef.current) {
-				setStatus("error");
-				setErrorMessage("Failed to connect to server");
-			}
-		} finally {
-			initializingRef.current = false;
-		}
-	}, [connectWebSocket]);
-
 	const send = useCallback((content: string) => {
 		if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
 			return;
@@ -181,55 +128,16 @@ export function useAgentSession() {
 		wsRef.current.send(JSON.stringify(msg));
 	}, []);
 
-	const newSession = useCallback(async () => {
-		clearReconnectTimer();
-		closeWebSocket();
-
-		// Stop the current session if we have one
-		const currentId = localStorage.getItem(STORAGE_KEY);
-		if (currentId) {
-			try {
-				await fetch(apiUrl(`/api/sessions/${currentId}`), { method: "DELETE" });
-			} catch {
-				// Best effort
-			}
-		}
-
-		localStorage.removeItem(STORAGE_KEY);
-		setSessionId(null);
-		setMessages([]);
-		setStatus("connecting");
-		setErrorMessage(undefined);
-
-		// Create a fresh session
-		try {
-			const response = await fetch(apiUrl("/api/sessions"), { method: "POST" });
-			if (!response.ok) {
-				setStatus("error");
-				setErrorMessage("Failed to create session");
-				return;
-			}
-
-			const session = (await response.json()) as SessionInfo;
-			localStorage.setItem(STORAGE_KEY, session.id);
-			setSessionId(session.id);
-			connectWebSocket(session.id);
-		} catch {
-			setStatus("error");
-			setErrorMessage("Failed to connect to server");
-		}
-	}, [clearReconnectTimer, closeWebSocket, connectWebSocket]);
-
 	useEffect(() => {
 		mountedRef.current = true;
-		initSession();
+		connectWebSocket(sessionId);
 
 		return () => {
 			mountedRef.current = false;
 			clearReconnectTimer();
 			closeWebSocket();
 		};
-	}, [initSession, clearReconnectTimer, closeWebSocket]);
+	}, [sessionId, connectWebSocket, clearReconnectTimer, closeWebSocket]);
 
-	return { messages, send, status, sessionId, newSession, errorMessage };
+	return { messages, send, status, errorMessage };
 }

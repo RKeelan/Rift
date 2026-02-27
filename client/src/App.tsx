@@ -1,41 +1,22 @@
 import { Navigate, Route, Routes } from "react-router-dom";
 import { ErrorBannerProvider } from "./components/ErrorBanner.tsx";
-import { TabBar } from "./components/TabBar.tsx";
-import { useGitRepo } from "./hooks/useGitRepo.ts";
-import { ChangesPage } from "./pages/ChangesPage.tsx";
-import { ChatPage } from "./pages/ChatPage.tsx";
-import { FilesPage } from "./pages/FilesPage.tsx";
-import { HistoryPage } from "./pages/HistoryPage.tsx";
+import { SessionProvider } from "./contexts/SessionContext.tsx";
+import { DashboardPage } from "./pages/DashboardPage.tsx";
+import { RepoPickerPage } from "./pages/RepoPickerPage.tsx";
+import { SessionShell } from "./components/SessionShell.tsx";
 import "./App.css";
 import "./components/ErrorBanner.css";
 
 export function App() {
 	return (
 		<ErrorBannerProvider>
-			<AppShell />
+			<SessionProvider>
+				<Routes>
+					<Route path="/" element={<DashboardPage />} />
+					<Route path="/repo-picker" element={<RepoPickerPage />} />
+					<Route path="/*" element={<SessionShell />} />
+				</Routes>
+			</SessionProvider>
 		</ErrorBannerProvider>
-	);
-}
-
-function AppShell() {
-	const { isGitRepo, recheckGitRepo } = useGitRepo();
-
-	const showGitTabs = isGitRepo !== false;
-
-	return (
-		<div className="app">
-			<Routes>
-				<Route path="/chat" element={<ChatPage />} />
-				<Route path="/files" element={<FilesPage />} />
-				{showGitTabs && (
-					<>
-						<Route path="/changes" element={<ChangesPage />} />
-						<Route path="/history" element={<HistoryPage />} />
-					</>
-				)}
-				<Route path="*" element={<Navigate to="/chat" replace />} />
-			</Routes>
-			<TabBar isGitRepo={isGitRepo} onNavigate={recheckGitRepo} />
-		</div>
 	);
 }

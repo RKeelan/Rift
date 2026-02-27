@@ -52,3 +52,8 @@ for (const key of globals) {
 		)[key];
 	}
 }
+
+// Add window.confirm polyfill for tests
+if (!globalThis.window.confirm) {
+	globalThis.window.confirm = () => true;
+}

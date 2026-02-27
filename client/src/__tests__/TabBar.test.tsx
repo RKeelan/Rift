@@ -2,14 +2,17 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { cleanup, render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { TabBar } from "../components/TabBar.tsx";
+import { SessionProvider } from "../contexts/SessionContext.tsx";
 
 afterEach(cleanup);
 
 function renderTabBar(isGitRepo: boolean | null, initialRoute = "/chat") {
 	return render(
-		<MemoryRouter initialEntries={[initialRoute]}>
-			<TabBar isGitRepo={isGitRepo} />
-		</MemoryRouter>,
+		<SessionProvider>
+			<MemoryRouter initialEntries={[initialRoute]}>
+				<TabBar isGitRepo={isGitRepo} repoName="test-repo" />
+			</MemoryRouter>
+		</SessionProvider>,
 	);
 }
 

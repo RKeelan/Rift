@@ -9,6 +9,39 @@
 	flex-shrink: 0;
 }
 
+.tab-bar-repo {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	justify-content: center;
+	flex: 1;
+	gap: 2px;
+	padding: 6px 8px;
+	min-height: 44px;
+	min-width: 44px;
+	background: transparent;
+	border: none;
+	color: var(--color-text-secondary);
+	text-decoration: none;
+	cursor: pointer;
+	transition: color 0.15s;
+	-webkit-tap-highlight-color: transparent;
+}
+
+.tab-bar-repo:hover {
+	color: var(--color-text);
+}
+
+.tab-bar-repo-name {
+	font-size: 0.625rem;
+	font-weight: 500;
+	letter-spacing: 0.02em;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	max-width: 100%;
+}
+
 .tab-bar-item {
 	display: flex;
 	flex-direction: column;
