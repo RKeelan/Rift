@@ -7,7 +7,9 @@ import {
 	screen,
 	waitFor,
 } from "@testing-library/react";
+import { useEffect } from "react";
 import { ErrorBannerProvider } from "../components/ErrorBanner.tsx";
+import { SessionProvider, useSession } from "../contexts/SessionContext.tsx";
 import { ChangesPage } from "../pages/ChangesPage.tsx";
 
 const originalFetch = globalThis.fetch;
@@ -17,10 +19,23 @@ afterEach(() => {
 	globalThis.fetch = originalFetch;
 });
 
+// Test wrapper that sets up a session
+function TestWrapper({ children }: { children: React.ReactNode }) {
+	const { setSession } = useSession();
+	useEffect(() => {
+		setSession("test-session", "test-repo");
+	}, [setSession]);
+	return <>{children}</>;
+}
+
 function renderChangesPage() {
 	return render(
 		<ErrorBannerProvider>
-			<ChangesPage />
+			<SessionProvider>
+				<TestWrapper>
+					<ChangesPage />
+				</TestWrapper>
+			</SessionProvider>
 		</ErrorBannerProvider>,
 	);
 }

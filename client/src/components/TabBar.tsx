@@ -2,9 +2,11 @@ import {
 	FolderOpen,
 	GitPullRequestArrow,
 	History,
+	Home,
 	MessageSquare,
 } from "lucide-react";
-import { NavLink } from "react-router-dom";
+import { NavLink, useNavigate } from "react-router-dom";
+import { useSession } from "../contexts/SessionContext.tsx";
 import "./TabBar.css";
 
 interface Tab {
@@ -34,15 +36,33 @@ const tabs: Tab[] = [
 interface TabBarProps {
 	isGitRepo: boolean | null;
 	onNavigate?: () => void;
+	repoName: string;
 }
 
-export function TabBar({ isGitRepo, onNavigate }: TabBarProps) {
+export function TabBar({ isGitRepo, onNavigate, repoName }: TabBarProps) {
+	const navigate = useNavigate();
+	const { clearSession } = useSession();
+
 	const visibleTabs = tabs.filter(
 		(tab) => !tab.requiresGit || isGitRepo !== false,
 	);
 
+	const handleBackToDashboard = () => {
+		clearSession();
+		navigate("/");
+	};
+
 	return (
 		<nav className="tab-bar" aria-label="Main navigation">
+			<button
+				type="button"
+				className="tab-bar-repo"
+				onClick={handleBackToDashboard}
+				title="Back to dashboard"
+			>
+				<Home size={16} />
+				<span className="tab-bar-repo-name">{repoName}</span>
+			</button>
 			{visibleTabs.map((tab) => (
 				<NavLink
 					key={tab.to}

@@ -8,6 +8,7 @@ import {
 import { useCallback, useEffect, useRef, useState } from "react";
 import { apiUrl } from "../apiUrl.ts";
 import { useApi } from "../hooks/useApi.ts";
+import { useSession } from "../contexts/SessionContext.tsx";
 import "./FilesPage.css";
 
 interface DirEntry {
@@ -110,7 +111,8 @@ function getLanguageLoader(filename: string): LanguageLoader | null {
 function FileViewer({
 	filePath,
 	onNavigate,
-}: { filePath: string; onNavigate: (dir: string) => void }) {
+	repo,
+}: { filePath: string; onNavigate: (dir: string) => void; repo: string }) {
 	const editorRef = useRef<HTMLDivElement>(null);
 	const viewRef = useRef<import("@codemirror/view").EditorView | null>(null);
 	const [content, setContent] = useState<string | null>(null);
@@ -127,7 +129,9 @@ function FileViewer({
 		(async () => {
 			try {
 				const response = await fetch(
-					apiUrl(`/api/files/content?path=${encodeURIComponent(filePath)}`),
+					apiUrl(
+						`/api/files/content?repo=${encodeURIComponent(repo)}&path=${encodeURIComponent(filePath)}`,
+					),
 					{ signal: controller.signal },
 				);
 				if (!response.ok) {
@@ -150,7 +154,7 @@ function FileViewer({
 		return () => {
 			controller.abort();
 		};
-	}, [filePath]);
+	}, [filePath, repo]);
 
 	// Create and manage the CodeMirror editor
 	useEffect(() => {
@@ -362,6 +366,7 @@ function TreeEntry({
 
 export function FilesPage() {
 	const { request } = useApi();
+	const { repoName } = useSession();
 	const [tree, setTree] = useState<TreeNode[]>([]);
 	const treeRef = useRef<TreeNode[]>([]);
 	treeRef.current = tree;
@@ -374,7 +379,7 @@ export function FilesPage() {
 			dirPath: string,
 		): Promise<{ nodes: TreeNode[]; truncated: boolean }> => {
 			const data = await request<DirListing>(
-				`/api/files?path=${encodeURIComponent(dirPath)}`,
+				`/api/files?repo=${encodeURIComponent(repoName as string)}&path=${encodeURIComponent(dirPath)}`,
 			);
 			if (!data) return { nodes: [], truncated: false };
 			return {
@@ -389,7 +394,7 @@ export function FilesPage() {
 				truncated: data.truncated,
 			};
 		},
-		[request],
+		[request, repoName],
 	);
 
 	// Load root directory on mount
@@ -493,7 +498,13 @@ export function FilesPage() {
 	);
 
 	if (viewingFile) {
-		return <FileViewer filePath={viewingFile} onNavigate={handleNavigate} />;
+		return (
+			<FileViewer
+				filePath={viewingFile}
+				onNavigate={handleNavigate}
+				repo={repoName as string}
+			/>
+		);
 	}
 
 	return (

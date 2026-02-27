@@ -1,8 +1,8 @@
-import { RotateCcw } from "lucide-react";
 import { useCallback, useState } from "react";
 import { ChatInput } from "../components/ChatInput.tsx";
 import { MessageList } from "../components/MessageList.tsx";
 import { useAgentSession } from "../hooks/useAgentSession.ts";
+import { useSession } from "../contexts/SessionContext.tsx";
 import type { SessionStatus } from "../hooks/useAgentSession.ts";
 import "./ChatPage.css";
 
@@ -25,8 +25,10 @@ function StatusDot({ status }: { status: SessionStatus }) {
 }
 
 export function ChatPage() {
-	const { messages, send, status, newSession, errorMessage } =
-		useAgentSession();
+	const { sessionId } = useSession();
+	const { messages, send, status, errorMessage } = useAgentSession(
+		sessionId as string,
+	);
 	const [errorDismissed, setErrorDismissed] = useState(false);
 
 	const handleSend = useCallback(
@@ -35,16 +37,6 @@ export function ChatPage() {
 		},
 		[send],
 	);
-
-	const handleNewSession = useCallback(async () => {
-		if (
-			!window.confirm("Start a new session? Current conversation will end.")
-		) {
-			return;
-		}
-		setErrorDismissed(false);
-		await newSession();
-	}, [newSession]);
 
 	const showError = !errorDismissed && status === "error" && errorMessage;
 
@@ -55,15 +47,6 @@ export function ChatPage() {
 					<StatusDot status={status} />
 					<span className="chat-header-title">Chat</span>
 				</div>
-				<button
-					type="button"
-					className="chat-header-action"
-					onClick={handleNewSession}
-					aria-label="New session"
-					title="New session"
-				>
-					<RotateCcw size={18} />
-				</button>
 			</header>
 
 			{showError && (
@@ -80,16 +63,7 @@ export function ChatPage() {
 			)}
 
 			{status === "stopped" && (
-				<div className="chat-stopped-banner">
-					Session ended.{" "}
-					<button
-						type="button"
-						className="chat-stopped-link"
-						onClick={handleNewSession}
-					>
-						Start a new session
-					</button>
-				</div>
+				<div className="chat-stopped-banner">Session ended.</div>
 			)}
 
 			<MessageList messages={messages} />

@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { apiUrl } from "../apiUrl.ts";
 import { DiffViewer } from "../components/DiffViewer.tsx";
 import { useErrorBanner } from "../components/ErrorBanner.tsx";
+import { useSession } from "../contexts/SessionContext.tsx";
 import "./HistoryPage.css";
 
 interface Commit {
@@ -82,6 +83,7 @@ function StatusBadge({ status }: { status: string }) {
 
 export function HistoryPage() {
 	const { showError } = useErrorBanner();
+	const { repoName } = useSession();
 	const [commits, setCommits] = useState<Commit[]>([]);
 	const [loading, setLoading] = useState(true);
 	const [loadingMore, setLoadingMore] = useState(false);
@@ -120,6 +122,7 @@ export function HistoryPage() {
 
 			try {
 				const params = new URLSearchParams({
+					repo: repoName as string,
 					limit: String(PAGE_SIZE),
 					offset: String(offset),
 				});
@@ -153,7 +156,7 @@ export function HistoryPage() {
 			setLoading(false);
 			setLoadingMore(false);
 		},
-		[showError],
+		[showError, repoName],
 	);
 
 	useEffect(() => {
@@ -180,7 +183,9 @@ export function HistoryPage() {
 
 			try {
 				const res = await fetch(
-					apiUrl(`/api/git/commit/${encodeURIComponent(hash)}`),
+					apiUrl(
+						`/api/git/commit/${encodeURIComponent(hash)}?repo=${encodeURIComponent(repoName as string)}`,
+					),
 				);
 				if (expandedHashRef.current !== hash) return;
 				if (res.ok) {
@@ -197,7 +202,7 @@ export function HistoryPage() {
 
 			setExpandedLoading(false);
 		},
-		[showError],
+		[showError, repoName],
 	);
 
 	const handleSelectFile = useCallback(
@@ -208,7 +213,10 @@ export function HistoryPage() {
 			setDiffTruncated(false);
 
 			try {
-				const params = new URLSearchParams({ path: filePath });
+				const params = new URLSearchParams({
+					repo: repoName as string,
+					path: filePath,
+				});
 				const res = await fetch(
 					apiUrl(`/api/git/commit/${encodeURIComponent(hash)}/diff?${params}`),
 				);
@@ -226,7 +234,7 @@ export function HistoryPage() {
 
 			setDiffLoading(false);
 		},
-		[showError],
+		[showError, repoName],
 	);
 
 	const handleBackFromDiff = useCallback(() => {
