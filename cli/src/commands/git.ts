@@ -12,8 +12,12 @@ export function registerGit(
 	git
 		.command("status")
 		.description("Show staged/unstaged changes")
-		.action(async () => {
-			const data = await api.get("/api/git/status");
+		.option("--repo <name>", "Repository name")
+		.action(async (opts: { repo?: string }) => {
+			const params = new URLSearchParams();
+			if (opts.repo) params.set("repo", opts.repo);
+			const qs = params.toString();
+			const data = await api.get(`/api/git/status${qs ? `?${qs}` : ""}`);
 			output(data, getFormat());
 		});
 
@@ -22,23 +26,29 @@ export function registerGit(
 		.description("Show unified diff for a file")
 		.argument("<path>", "File path")
 		.option("--staged", "Show staged diff", false)
-		.action(async (filePath: string, opts: { staged: boolean }) => {
-			const params = new URLSearchParams({ path: filePath });
-			if (opts.staged) params.set("staged", "true");
-			const data = await api.get(`/api/git/diff?${params}`);
-			output(data, getFormat());
-		});
+		.option("--repo <name>", "Repository name")
+		.action(
+			async (filePath: string, opts: { staged: boolean; repo?: string }) => {
+				const params = new URLSearchParams({ path: filePath });
+				if (opts.staged) params.set("staged", "true");
+				if (opts.repo) params.set("repo", opts.repo);
+				const data = await api.get(`/api/git/diff?${params}`);
+				output(data, getFormat());
+			},
+		);
 
 	git
 		.command("log")
 		.description("Show recent commits")
 		.option("--limit <n>", "Number of commits", "25")
 		.option("--offset <n>", "Skip commits", "0")
-		.action(async (opts: { limit: string; offset: string }) => {
+		.option("--repo <name>", "Repository name")
+		.action(async (opts: { limit: string; offset: string; repo?: string }) => {
 			const params = new URLSearchParams({
 				limit: opts.limit,
 				offset: opts.offset,
 			});
+			if (opts.repo) params.set("repo", opts.repo);
 			const data = await api.get(`/api/git/log?${params}`);
 			output(data, getFormat());
 		});
@@ -47,8 +57,14 @@ export function registerGit(
 		.command("show")
 		.description("Show commit details and changed files")
 		.argument("<hash>", "Commit hash")
-		.action(async (hash: string) => {
-			const data = await api.get(`/api/git/commit/${encodeURIComponent(hash)}`);
+		.option("--repo <name>", "Repository name")
+		.action(async (hash: string, opts: { repo?: string }) => {
+			const params = new URLSearchParams();
+			if (opts.repo) params.set("repo", opts.repo);
+			const qs = params.toString();
+			const data = await api.get(
+				`/api/git/commit/${encodeURIComponent(hash)}${qs ? `?${qs}` : ""}`,
+			);
 			output(data, getFormat());
 		});
 
@@ -57,8 +73,10 @@ export function registerGit(
 		.description("Show diff for a file within a commit")
 		.argument("<hash>", "Commit hash")
 		.argument("<path>", "File path")
-		.action(async (hash: string, filePath: string) => {
+		.option("--repo <name>", "Repository name")
+		.action(async (hash: string, filePath: string, opts: { repo?: string }) => {
 			const params = new URLSearchParams({ path: filePath });
+			if (opts.repo) params.set("repo", opts.repo);
 			const data = await api.get(
 				`/api/git/commit/${encodeURIComponent(hash)}/diff?${params}`,
 			);

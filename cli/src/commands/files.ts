@@ -13,8 +13,10 @@ export function registerFiles(
 		.command("ls")
 		.description("List directory contents")
 		.argument("[path]", "Directory path", ".")
-		.action(async (dirPath: string) => {
+		.option("--repo <name>", "Repository name")
+		.action(async (dirPath: string, opts: { repo?: string }) => {
 			const params = new URLSearchParams({ path: dirPath });
+			if (opts.repo) params.set("repo", opts.repo);
 			const data = await api.get(`/api/files?${params}`);
 			output(data, getFormat());
 		});
@@ -23,8 +25,10 @@ export function registerFiles(
 		.command("cat")
 		.description("Read file contents")
 		.argument("<path>", "File path")
-		.action(async (filePath: string) => {
+		.option("--repo <name>", "Repository name")
+		.action(async (filePath: string, opts: { repo?: string }) => {
 			const params = new URLSearchParams({ path: filePath });
+			if (opts.repo) params.set("repo", opts.repo);
 			const content = await api.getText(`/api/files/content?${params}`);
 			const fmt = getFormat();
 			if (fmt === "json") {
