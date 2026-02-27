@@ -5,6 +5,7 @@ import { registerChat } from "./commands/chat.js";
 import { registerFiles } from "./commands/files.js";
 import { registerGit } from "./commands/git.js";
 import { registerHealth } from "./commands/health.js";
+import { registerRepos } from "./commands/repos.js";
 import { registerSession } from "./commands/session.js";
 import { outputError } from "./format.js";
 
@@ -42,6 +43,7 @@ const api = new Proxy({} as ApiClient, {
 });
 
 registerHealth(program, api, getFormat);
+registerRepos(program, api, getFormat);
 registerFiles(program, api, getFormat);
 registerGit(program, api, getFormat);
 registerSession(program, api, getFormat);

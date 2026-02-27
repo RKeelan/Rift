@@ -12,8 +12,11 @@ export function registerSession(
 	session
 		.command("create")
 		.description("Create a new session")
-		.action(async () => {
-			const data = await api.post("/api/sessions", {});
+		.option("--repo <name>", "Repository name")
+		.action(async (opts: { repo?: string }) => {
+			const body: Record<string, string> = {};
+			if (opts.repo) body.repo = opts.repo;
+			const data = await api.post("/api/sessions", body);
 			output(data, getFormat());
 		});
 

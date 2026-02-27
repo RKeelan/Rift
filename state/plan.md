@@ -30,28 +30,6 @@ Replace the single-`WORKING_DIR` server model with a repo-aware server that can 
 - `curl localhost:3000/api/files?repo=Rift&path=.` lists Rift's root directory
 - `curl localhost:3000/api/git/status?repo=Rift` shows git status
 
-## Task 4: Update the CLI for multi-repo support
-
-Depends on: Tasks 1, 2, 3
-
-### Requirements
-
-- Add `repos list` command that calls `GET /api/repos`
-- Add `--repo <name>` option to `files ls`, `files cat`, `git status`, `git diff`, `git log`, `git show`, and `git show-diff` commands (appends `repo=<name>` to query params)
-- Add `--repo <name>` option to `session create` (sends `{ repo }` in the POST body)
-- Update `health` command to accept optional `--repo`
-- Note: the `chat` command operates on an existing session ID and needs no changes
-
-### Verification
-
-- Existing CLI tests updated for `--repo` parameter
-
-### Validation
-
-- `bun run --cwd cli src/index.ts repos list` shows repos
-- `bun run --cwd cli src/index.ts files ls --repo Rift` lists Rift's root directory
-- `bun run --cwd cli src/index.ts session create --repo Rift` creates a session
-
 ## Task 5: Add session dashboard and repo picker to the client
 
 Depends on: Tasks 1, 2, 3
