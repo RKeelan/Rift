@@ -10,8 +10,12 @@ export function registerHealth(
 	parent
 		.command("health")
 		.description("Server health check")
-		.action(async () => {
-			const data = await api.get("/api/health");
+		.option("--repo <name>", "Repository name")
+		.action(async (opts: { repo?: string }) => {
+			const params = new URLSearchParams();
+			if (opts.repo) params.set("repo", opts.repo);
+			const qs = params.toString();
+			const data = await api.get(`/api/health${qs ? `?${qs}` : ""}`);
 			output(data, getFormat());
 		});
 }

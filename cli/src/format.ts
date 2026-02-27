@@ -2,6 +2,11 @@ import { ApiError } from "./api.js";
 
 type Format = "json" | "text";
 
+interface RepoEntry {
+	name: string;
+	path: string;
+}
+
 interface DirEntry {
 	name: string;
 	type: "file" | "directory";
@@ -12,6 +17,11 @@ interface StatusEntry {
 	path: string;
 	status: string;
 	staged: boolean;
+}
+
+function formatRepoList(data: { repos: RepoEntry[] }): string {
+	if (data.repos.length === 0) return "No repositories";
+	return data.repos.map((r) => r.name).join("\n");
 }
 
 function formatFileList(data: {
@@ -121,6 +131,14 @@ export function output(data: unknown, format: Format): void {
 	// Text mode: format based on shape of data
 	if (data && typeof data === "object") {
 		const obj = data as Record<string, unknown>;
+
+		// Repo list
+		if (Array.isArray(obj.repos)) {
+			process.stdout.write(
+				`${formatRepoList(obj as { repos: RepoEntry[] })}\n`,
+			);
+			return;
+		}
 
 		// File listing
 		if (Array.isArray(obj.entries)) {
