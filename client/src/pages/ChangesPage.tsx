@@ -4,6 +4,7 @@ import { apiUrl } from "../apiUrl.ts";
 import { DiffViewer } from "../components/DiffViewer.tsx";
 import { useErrorBanner } from "../components/ErrorBanner.tsx";
 import { useApi } from "../hooks/useApi.ts";
+import { useSession } from "../contexts/SessionContext.tsx";
 import "./ChangesPage.css";
 
 type FileStatus = "added" | "modified" | "deleted" | "renamed" | "untracked";
@@ -55,6 +56,7 @@ function StatusBadge({ status }: { status: FileStatus }) {
 export function ChangesPage() {
 	const { request } = useApi();
 	const { showError } = useErrorBanner();
+	const { repoName } = useSession();
 	const [files, setFiles] = useState<StatusEntry[]>([]);
 	const [loading, setLoading] = useState(true);
 	const [refreshing, setRefreshing] = useState(false);
@@ -88,9 +90,14 @@ export function ChangesPage() {
 			abortRef.current = controller;
 
 			try {
-				const res = await fetch(apiUrl("/api/git/status"), {
-					signal: controller.signal,
-				});
+				const res = await fetch(
+					apiUrl(
+						`/api/git/status?repo=${encodeURIComponent(repoName as string)}`,
+					),
+					{
+						signal: controller.signal,
+					},
+				);
 				if (res.ok) {
 					const data: StatusResponse = await res.json();
 					setFiles(data.files);
@@ -115,7 +122,7 @@ export function ChangesPage() {
 			setLoading(false);
 			setRefreshing(false);
 		},
-		[showError],
+		[showError, repoName],
 	);
 
 	// Initial fetch
@@ -156,6 +163,7 @@ export function ChangesPage() {
 			setDiffTruncated(false);
 
 			const params = new URLSearchParams({
+				repo: repoName as string,
 				path: entry.path,
 				staged: String(entry.staged),
 			});
@@ -167,7 +175,7 @@ export function ChangesPage() {
 			}
 			setDiffLoading(false);
 		},
-		[request],
+		[request, repoName],
 	);
 
 	const handleBack = useCallback(() => {

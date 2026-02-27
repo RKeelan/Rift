@@ -1,0 +1,148 @@
+.dashboard-page {
+	display: flex;
+	flex-direction: column;
+	height: 100%;
+	background: var(--color-bg);
+}
+
+.dashboard-header {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	padding: 1rem 1.5rem;
+	border-bottom: 1px solid var(--color-border);
+}
+
+.dashboard-title {
+	font-size: 1.25rem;
+	font-weight: 600;
+	margin: 0;
+}
+
+.dashboard-new-button {
+	display: flex;
+	align-items: center;
+	gap: 0.5rem;
+	padding: 0.5rem 1rem;
+	background: var(--color-primary);
+	color: white;
+	border: none;
+	border-radius: 6px;
+	font-size: 0.875rem;
+	font-weight: 500;
+	cursor: pointer;
+	transition: background 0.2s;
+}
+
+.dashboard-new-button:hover {
+	background: var(--color-primary-hover);
+}
+
+.dashboard-content {
+	flex: 1;
+	overflow-y: auto;
+	padding: 1.5rem;
+}
+
+.dashboard-message {
+	text-align: center;
+	padding: 2rem;
+	color: var(--color-text-secondary);
+}
+
+.dashboard-empty {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	justify-content: center;
+	padding: 4rem 2rem;
+	text-align: center;
+}
+
+.dashboard-empty p {
+	color: var(--color-text-secondary);
+	margin-bottom: 1.5rem;
+	font-size: 1rem;
+}
+
+.dashboard-empty-button {
+	display: flex;
+	align-items: center;
+	gap: 0.5rem;
+	padding: 0.75rem 1.5rem;
+	background: var(--color-primary);
+	color: white;
+	border: none;
+	border-radius: 6px;
+	font-size: 0.875rem;
+	font-weight: 500;
+	cursor: pointer;
+	transition: background 0.2s;
+}
+
+.dashboard-empty-button:hover {
+	background: var(--color-primary-hover);
+}
+
+.session-list {
+	display: grid;
+	grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+	gap: 1rem;
+}
+
+.session-card {
+	background: var(--color-surface);
+	border: 1px solid var(--color-border);
+	border-radius: 8px;
+	padding: 1rem;
+	cursor: pointer;
+	transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+.session-card:hover {
+	border-color: var(--color-primary);
+	box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+}
+
+.session-card:focus {
+	outline: 2px solid var(--color-primary);
+	outline-offset: 2px;
+}
+
+.session-card-header {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	margin-bottom: 0.5rem;
+}
+
+.session-card-repo {
+	font-size: 1rem;
+	font-weight: 600;
+	margin: 0;
+	color: var(--color-text);
+}
+
+.session-card-stop {
+	background: transparent;
+	border: none;
+	color: var(--color-text-secondary);
+	cursor: pointer;
+	padding: 0.25rem;
+	border-radius: 4px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	transition: background 0.2s, color 0.2s;
+}
+
+.session-card-stop:hover {
+	background: var(--color-error-bg);
+	color: var(--color-error);
+}
+
+.session-card-date {
+	font-size: 0.875rem;
+	color: var(--color-text-secondary);
+	margin: 0;
+}

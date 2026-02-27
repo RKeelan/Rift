@@ -1,15 +1,28 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import {
+	afterAll,
+	afterEach,
+	beforeAll,
+	describe,
+	expect,
+	test,
+} from "bun:test";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import supertest from "supertest";
 import type { AgentAdapter } from "../adapters/adapter.js";
 import { EchoAdapter } from "../adapters/echo.js";
 import { type AppConfig, createApp } from "../app.js";
 import { SessionManager } from "../session.js";
 
+let reposRoot: string;
+const testRepoName = "test-repo";
+
 function makeConfig(overrides?: Partial<AppConfig>): AppConfig {
 	return {
 		port: 3000,
 		agentCommand: "echo",
-		reposRoot: process.cwd(),
+		reposRoot,
 		basePath: "",
 		...overrides,
 	};
@@ -26,6 +39,15 @@ function makeManager(adapterFactory?: () => AgentAdapter): SessionManager {
 describe("Session REST endpoints", () => {
 	let manager: SessionManager;
 
+	beforeAll(async () => {
+		reposRoot = await fs.mkdtemp(path.join(os.tmpdir(), "rift-sessions-test-"));
+		await fs.mkdir(path.join(reposRoot, testRepoName));
+	});
+
+	afterAll(async () => {
+		await fs.rm(reposRoot, { recursive: true, force: true });
+	});
+
 	afterEach(() => {
 		manager?.dispose();
 	});
@@ -37,13 +59,13 @@ describe("Session REST endpoints", () => {
 
 			const response = await supertest(app)
 				.post("/api/sessions")
-				.send({ repo: "src" })
+				.send({ repo: testRepoName })
 				.expect(201);
 
 			expect(response.body.id).toBeTruthy();
 			expect(response.body.state).toBe("running");
 			expect(response.body.createdAt).toBeTruthy();
-			expect(response.body.repo).toBe("src");
+			expect(response.body.repo).toBe(testRepoName);
 		});
 
 		test("created session appears in list", async () => {
@@ -52,7 +74,7 @@ describe("Session REST endpoints", () => {
 
 			const createRes = await supertest(app)
 				.post("/api/sessions")
-				.send({ repo: "src" })
+				.send({ repo: testRepoName })
 				.expect(201);
 
 			const listRes = await supertest(app).get("/api/sessions").expect(200);
@@ -60,7 +82,7 @@ describe("Session REST endpoints", () => {
 			expect(listRes.body).toHaveLength(1);
 			expect(listRes.body[0].id).toBe(createRes.body.id);
 			expect(listRes.body[0].state).toBe("running");
-			expect(listRes.body[0].repo).toBe("src");
+			expect(listRes.body[0].repo).toBe(testRepoName);
 		});
 
 		test("returns 400 when repo is missing", async () => {
@@ -139,7 +161,7 @@ describe("Session REST endpoints", () => {
 
 			const response = await supertest(app)
 				.post("/api/sessions")
-				.send({ repo: "src" })
+				.send({ repo: testRepoName })
 				.expect(500);
 
 			expect(response.body.error).toBeDefined();
@@ -162,8 +184,8 @@ describe("Session REST endpoints", () => {
 			manager = makeManager();
 			const app = createApp(makeConfig(), manager);
 
-			await supertest(app).post("/api/sessions").send({ repo: "src" });
-			await supertest(app).post("/api/sessions").send({ repo: "src" });
+			await supertest(app).post("/api/sessions").send({ repo: testRepoName });
+			await supertest(app).post("/api/sessions").send({ repo: testRepoName });
 
 			const response = await supertest(app).get("/api/sessions").expect(200);
 
@@ -178,7 +200,7 @@ describe("Session REST endpoints", () => {
 
 			const createRes = await supertest(app)
 				.post("/api/sessions")
-				.send({ repo: "src" })
+				.send({ repo: testRepoName })
 				.expect(201);
 
 			const response = await supertest(app)
@@ -195,7 +217,7 @@ describe("Session REST endpoints", () => {
 
 			const createRes = await supertest(app)
 				.post("/api/sessions")
-				.send({ repo: "src" })
+				.send({ repo: testRepoName })
 				.expect(201);
 
 			const response = await supertest(app)
@@ -205,7 +227,7 @@ describe("Session REST endpoints", () => {
 			expect(response.body.id).toBe(createRes.body.id);
 			expect(response.body.state).toBe("running");
 			expect(response.body.createdAt).toBeTruthy();
-			expect(response.body.repo).toBe("src");
+			expect(response.body.repo).toBe(testRepoName);
 		});
 
 		test("returns 404 for non-existent session", async () => {
@@ -228,7 +250,7 @@ describe("Session REST endpoints", () => {
 
 			const createRes = await supertest(app)
 				.post("/api/sessions")
-				.send({ repo: "src" })
+				.send({ repo: testRepoName })
 				.expect(201);
 
 			const deleteRes = await supertest(app)
@@ -236,7 +258,7 @@ describe("Session REST endpoints", () => {
 				.expect(200);
 
 			expect(deleteRes.body.state).toBe("stopped");
-			expect(deleteRes.body.repo).toBe("src");
+			expect(deleteRes.body.repo).toBe(testRepoName);
 		});
 
 		test("session state changes to stopped after delete", async () => {
@@ -245,7 +267,7 @@ describe("Session REST endpoints", () => {
 
 			const createRes = await supertest(app)
 				.post("/api/sessions")
-				.send({ repo: "src" })
+				.send({ repo: testRepoName })
 				.expect(201);
 
 			await supertest(app)
@@ -277,7 +299,7 @@ describe("Session REST endpoints", () => {
 
 			const createRes = await supertest(app)
 				.post("/api/sessions")
-				.send({ repo: "src" })
+				.send({ repo: testRepoName })
 				.expect(201);
 
 			await supertest(app)
@@ -300,10 +322,10 @@ describe("Session REST endpoints", () => {
 			// Create
 			const createRes = await supertest(app)
 				.post("/api/sessions")
-				.send({ repo: "src" })
+				.send({ repo: testRepoName })
 				.expect(201);
 			const sessionId = createRes.body.id;
-			expect(createRes.body.repo).toBe("src");
+			expect(createRes.body.repo).toBe(testRepoName);
 
 			// List: session is running
 			const listRes1 = await supertest(app).get("/api/sessions").expect(200);
@@ -316,7 +338,7 @@ describe("Session REST endpoints", () => {
 				.expect(200);
 			expect(getRes1.body.id).toBe(sessionId);
 			expect(getRes1.body.state).toBe("running");
-			expect(getRes1.body.repo).toBe("src");
+			expect(getRes1.body.repo).toBe(testRepoName);
 
 			// Stop
 			const deleteRes = await supertest(app)
