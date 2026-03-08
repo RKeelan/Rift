@@ -11,8 +11,12 @@ export function resolveSafePath(
 	workingDir: string,
 	requestedPath: string,
 ): string | null {
-	const resolved = path.resolve(workingDir, requestedPath);
-	if (!resolved.startsWith(workingDir + path.sep) && resolved !== workingDir) {
+	const normalizedDir = path.resolve(workingDir);
+	const resolved = path.resolve(normalizedDir, requestedPath);
+	if (
+		!resolved.startsWith(normalizedDir + path.sep) &&
+		resolved !== normalizedDir
+	) {
 		return null;
 	}
 	return resolved;
@@ -34,8 +38,12 @@ export async function resolveRepo(
 	if (!repoName || path.isAbsolute(repoName) || repoName.includes("..")) {
 		return { ok: false, reason: "forbidden" };
 	}
-	const resolved = path.resolve(reposRoot, repoName);
-	if (!resolved.startsWith(reposRoot + path.sep) && resolved !== reposRoot) {
+	const normalizedRoot = path.resolve(reposRoot);
+	const resolved = path.resolve(normalizedRoot, repoName);
+	if (
+		!resolved.startsWith(normalizedRoot + path.sep) &&
+		resolved !== normalizedRoot
+	) {
 		return { ok: false, reason: "forbidden" };
 	}
 	try {
