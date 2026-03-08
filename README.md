@@ -4,13 +4,24 @@
 
 Mobile-first coding agent frontend.
 
-## Commands
+## Usage
 
-```bash
-bun install        # Install dependencies
-bun run dev        # Start dev servers (Express + Vite)
-bun run build      # Build all workspaces
-bun test           # Run tests
-bun run lint       # Lint with Biome
-bun run format:check  # Check formatting with Biome
+```powershell
+bun install
+bun run dev          # start Express API + Vite dev server on port 3000
+```
+
+To serve over Tailscale (e.g. from a desktop to a phone):
+
+```powershell
+bun run tailscale & bun run prod
+```
+
+## Development
+
+```powershell
+bun run build        # build all workspaces
+bun test             # run tests
+bun run lint         # lint with Biome
+bun run format:check # check formatting with Biome
 ```
