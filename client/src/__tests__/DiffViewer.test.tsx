@@ -122,4 +122,14 @@ describe("DiffViewer", () => {
 		expect(container.querySelectorAll(".diff-remove").length).toBe(0);
 		expect(container.querySelectorAll(".diff-hunk").length).toBe(0);
 	});
+
+	test("does not style dash-prefixed plain text as removals", () => {
+		const plainText = "- first bullet\n- second bullet\nplain line";
+		const { container } = render(<DiffViewer diff={plainText} />);
+
+		expect(container.querySelectorAll(".diff-remove").length).toBe(0);
+		expect(container.querySelector("pre.diff-viewer")?.textContent).toContain(
+			"- first bullet",
+		);
+	});
 });
