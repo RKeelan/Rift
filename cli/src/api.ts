@@ -59,11 +59,4 @@ export class ApiClient {
 		await this.throwIfNotOk(res);
 		return res.json() as Promise<T>;
 	}
-
-	wsUrl(path: string): string {
-		const base = this.baseUrl.startsWith("https")
-			? this.baseUrl.replace("https", "wss")
-			: this.baseUrl.replace("http", "ws");
-		return `${base}${path}`;
-	}
 }

@@ -11,7 +11,6 @@ const repoName = "test-repo";
 function makeConfig(reposRoot: string): AppConfig {
 	return {
 		port: 3000,
-		agentCommand: "echo",
 		reposRoot,
 		basePath: "",
 	};

@@ -10,7 +10,6 @@
     "build": "tsc -b"
   },
   "dependencies": {
-    "commander": "^13.0.0",
-    "shared": "workspace:*"
+    "commander": "^13.0.0"
   }
 }

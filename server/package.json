@@ -11,14 +11,11 @@
   },
   "dependencies": {
     "express": "^4.21.0",
-    "shared": "workspace:*",
-    "simple-git": "^3.27.0",
-    "ws": "^8.19.0"
+    "simple-git": "^3.27.0"
   },
   "devDependencies": {
     "@types/express": "^5.0.0",
     "@types/supertest": "^6.0.0",
-    "@types/ws": "^8.18.1",
     "supertest": "^7.0.0",
     "tsx": "^4.21.0"
   }

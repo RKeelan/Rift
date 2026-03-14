@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/RKeelan/Rift/actions/workflows/ci.yml/badge.svg)](https://github.com/RKeelan/Rift/actions/workflows/ci.yml)
 
-Mobile-first coding agent frontend.
+Mobile-first front-end for local repositories.
 
 ## Usage
 

@@ -7,34 +7,38 @@ import {
 } from "react";
 
 interface SessionContextValue {
-	sessionId: string | null;
 	repoName: string | null;
-	setSession: (sessionId: string, repoName: string) => void;
-	clearSession: () => void;
+	selectRepo: (repoName: string) => void;
+	clearRepo: () => void;
 }
 
 const SessionContext = createContext<SessionContextValue | undefined>(
 	undefined,
 );
 
+const STORAGE_KEY = "rift:selected-repo";
+
 export function SessionProvider({ children }: { children: ReactNode }) {
-	const [sessionId, setSessionId] = useState<string | null>(null);
-	const [repoName, setRepoName] = useState<string | null>(null);
+	const [repoName, setRepoName] = useState<string | null>(() => {
+		if (typeof window === "undefined") {
+			return null;
+		}
+		return window.localStorage.getItem(STORAGE_KEY);
+	});
 
 	const value = useMemo<SessionContextValue>(
 		() => ({
-			sessionId,
 			repoName,
-			setSession: (id: string, repo: string) => {
-				setSessionId(id);
+			selectRepo: (repo: string) => {
 				setRepoName(repo);
+				window.localStorage.setItem(STORAGE_KEY, repo);
 			},
-			clearSession: () => {
-				setSessionId(null);
+			clearRepo: () => {
 				setRepoName(null);
+				window.localStorage.removeItem(STORAGE_KEY);
 			},
 		}),
-		[sessionId, repoName],
+		[repoName],
 	);
 
 	return (

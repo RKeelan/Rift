@@ -1,125 +1,80 @@
-import { Plus, Trash2 } from "lucide-react";
+import { FolderGit2 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useApi } from "../hooks/useApi.ts";
 import { useSession } from "../contexts/SessionContext.tsx";
 import "./DashboardPage.css";
 
-interface SessionInfo {
-	id: string;
-	state: "running" | "stopped";
-	createdAt: string;
-	repo: string;
+interface RepoEntry {
+	name: string;
+	path: string;
 }
 
 export function DashboardPage() {
 	const { request } = useApi();
-	const { setSession } = useSession();
+	const { selectRepo } = useSession();
 	const navigate = useNavigate();
-	const [sessions, setSessions] = useState<SessionInfo[]>([]);
+	const [repos, setRepos] = useState<RepoEntry[]>([]);
 	const [loading, setLoading] = useState(true);
 
-	const fetchSessions = useCallback(async () => {
+	const fetchRepos = useCallback(async () => {
 		setLoading(true);
-		const data = await request<SessionInfo[]>("/api/sessions");
+		const data = await request<{ repos: RepoEntry[] }>("/api/repos");
 		if (data) {
-			setSessions(data.filter((s) => s.state === "running"));
+			setRepos(data.repos);
 		}
 		setLoading(false);
 	}, [request]);
 
 	useEffect(() => {
-		fetchSessions();
-	}, [fetchSessions]);
+		fetchRepos();
+	}, [fetchRepos]);
 
-	const handleSelectSession = useCallback(
-		(session: SessionInfo) => {
-			setSession(session.id, session.repo);
-			navigate("/chat");
+	const handleSelectRepo = useCallback(
+		(repoName: string) => {
+			selectRepo(repoName);
+			navigate("/files");
 		},
-		[setSession, navigate],
+		[selectRepo, navigate],
 	);
-
-	const handleStopSession = useCallback(
-		async (sessionId: string, event: React.MouseEvent) => {
-			event.stopPropagation();
-			if (
-				!window.confirm(
-					"Stop this session? Any unsaved work or chat history will be lost.",
-				)
-			) {
-				return;
-			}
-			const result = await request(`/api/sessions/${sessionId}`, {
-				method: "DELETE",
-			});
-			if (result) {
-				await fetchSessions();
-			}
-		},
-		[request, fetchSessions],
-	);
-
-	const handleNewSession = useCallback(() => {
-		navigate("/repo-picker");
-	}, [navigate]);
 
 	return (
 		<div className="dashboard-page">
 			<header className="dashboard-header">
-				<h1 className="dashboard-title">Sessions</h1>
-				<button
-					type="button"
-					className="dashboard-new-button"
-					onClick={handleNewSession}
-				>
-					<Plus size={18} />
-					New Session
-				</button>
+				<h1 className="dashboard-title">Repositories</h1>
 			</header>
 
 			<div className="dashboard-content">
+				<p className="dashboard-intro">
+					Browse local repos from your phone. Open files, inspect changes, and
+					read history without starting an agent session.
+				</p>
 				{loading && (
-					<div className="dashboard-message">Loading sessions...</div>
+					<div className="dashboard-message">Loading repositories...</div>
 				)}
-				{!loading && sessions.length === 0 && (
+				{!loading && repos.length === 0 && (
 					<div className="dashboard-empty">
-						<p>No active sessions</p>
-						<button
-							type="button"
-							className="dashboard-empty-button"
-							onClick={handleNewSession}
-						>
-							<Plus size={18} />
-							Create your first session
-						</button>
+						<p>No repositories found</p>
+						<p className="dashboard-empty-hint">
+							Check your `REPOS_ROOT` configuration
+						</p>
 					</div>
 				)}
-				{!loading && sessions.length > 0 && (
+				{!loading && repos.length > 0 && (
 					<div className="session-list">
-						{sessions.map((session) => (
+						{repos.map((repo) => (
 							<button
 								type="button"
-								key={session.id}
+								key={repo.name}
 								className="session-card"
-								onClick={() => handleSelectSession(session)}
-								aria-label={`Open session for ${session.repo}`}
+								onClick={() => handleSelectRepo(repo.name)}
+								aria-label={`Open repository ${repo.name}`}
 							>
 								<div className="session-card-header">
-									<h3 className="session-card-repo">{session.repo}</h3>
-									<button
-										type="button"
-										className="session-card-stop"
-										onClick={(e) => handleStopSession(session.id, e)}
-										aria-label="Stop session"
-										title="Stop session"
-									>
-										<Trash2 size={16} />
-									</button>
+									<FolderGit2 size={18} className="session-card-icon" />
+									<h3 className="session-card-repo">{repo.name}</h3>
 								</div>
-								<p className="session-card-date">
-									Created {new Date(session.createdAt).toLocaleString()}
-								</p>
+								<p className="session-card-date">{repo.path}</p>
 							</button>
 						))}
 					</div>
