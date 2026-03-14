@@ -284,130 +284,6 @@ describe("git show-diff", () => {
 	});
 });
 
-// --- Sessions ---
-
-describe("session create", () => {
-	test("POST /api/sessions", async () => {
-		const session = {
-			id: "abc123",
-			state: "running",
-			workingDirectory: "/tmp",
-		};
-
-		globalThis.fetch = mock(
-			(_url: string | URL | Request, _opts?: RequestInit) =>
-				Promise.resolve(
-					new Response(JSON.stringify(session), {
-						status: 201,
-						headers: { "Content-Type": "application/json" },
-					}),
-				),
-		) as typeof fetch;
-
-		const data = await api.post("/api/sessions", {});
-		expect(data).toEqual(session);
-	});
-
-	test("POST /api/sessions with repo in body", async () => {
-		const session = {
-			id: "abc123",
-			state: "running",
-			workingDirectory: "/home/user/Src/Rift",
-		};
-
-		globalThis.fetch = mock(
-			(_url: string | URL | Request, opts?: RequestInit) => {
-				// Verify the repo is included in the POST body
-				const body = JSON.parse(opts?.body as string);
-				expect(body).toEqual({ repo: "Rift" });
-				return Promise.resolve(
-					new Response(JSON.stringify(session), {
-						status: 201,
-						headers: { "Content-Type": "application/json" },
-					}),
-				);
-			},
-		) as typeof fetch;
-
-		const data = await api.post("/api/sessions", { repo: "Rift" });
-		expect(data).toEqual(session);
-		expect(globalThis.fetch).toHaveBeenCalledWith(
-			"http://localhost:3000/api/sessions",
-			{
-				method: "POST",
-				headers: { "Content-Type": "application/json" },
-				body: JSON.stringify({ repo: "Rift" }),
-			},
-		);
-	});
-});
-
-describe("session list", () => {
-	test("GET /api/sessions", async () => {
-		const sessions = [
-			{ id: "abc", state: "running" },
-			{ id: "def", state: "stopped" },
-		];
-		mockFetch(sessions);
-		const data = await api.get("/api/sessions");
-		expect(data).toEqual(sessions);
-	});
-});
-
-describe("session get", () => {
-	test("GET /api/sessions/:id", async () => {
-		const session = { id: "abc123", state: "running" };
-		mockFetch(session);
-		const data = await api.get("/api/sessions/abc123");
-		expect(data).toEqual(session);
-	});
-
-	test("404 throws ApiError", async () => {
-		mockFetch(
-			{ error: { code: "NOT_FOUND", message: "Session not found" } },
-			{ status: 404 },
-		);
-		try {
-			await api.get("/api/sessions/nonexistent");
-			expect(true).toBe(false);
-		} catch (err) {
-			expect(err).toBeInstanceOf(ApiError);
-			expect((err as ApiError).code).toBe("NOT_FOUND");
-			expect((err as ApiError).statusCode).toBe(404);
-		}
-	});
-});
-
-describe("session stop", () => {
-	test("DELETE /api/sessions/:id", async () => {
-		const session = { id: "abc123", state: "stopped" };
-		mockFetch(session);
-		const data = await api.delete("/api/sessions/abc123");
-		expect(data).toEqual(session);
-		expect(globalThis.fetch).toHaveBeenCalledWith(
-			"http://localhost:3000/api/sessions/abc123",
-			{ method: "DELETE" },
-		);
-	});
-});
-
-// --- ApiClient ---
-
-describe("ApiClient", () => {
-	test("wsUrl converts http to ws", () => {
-		expect(api.wsUrl("/api/sessions/abc/ws")).toBe(
-			"ws://localhost:3000/api/sessions/abc/ws",
-		);
-	});
-
-	test("wsUrl converts https to wss", () => {
-		const secureApi = new ApiClient("https://example.com");
-		expect(secureApi.wsUrl("/api/sessions/abc/ws")).toBe(
-			"wss://example.com/api/sessions/abc/ws",
-		);
-	});
-});
-
 // --- Format ---
 
 describe("format", () => {
@@ -491,29 +367,14 @@ describe("format", () => {
 		expect(text).toContain("No repositories");
 	});
 
-	test("output formats session list array in text mode", async () => {
-		const { output } = await import("../format.js");
-		const text = captureStdout(() =>
-			output(
-				[
-					{ id: "abc", state: "running" },
-					{ id: "def", state: "stopped" },
-				],
-				"text",
-			),
-		);
-		expect(text).toContain("id: abc");
-		expect(text).toContain("id: def");
-	});
-
 	test("outputError formats ApiError with code", async () => {
 		const { outputError } = await import("../format.js");
 		const text = captureStderr(() =>
-			outputError(new ApiError("NOT_FOUND", "Session not found", 404)),
+			outputError(new ApiError("NOT_FOUND", "Repository not found", 404)),
 		);
 		const parsed = JSON.parse(text);
 		expect(parsed.error.code).toBe("NOT_FOUND");
-		expect(parsed.error.message).toBe("Session not found");
+		expect(parsed.error.message).toBe("Repository not found");
 	});
 
 	test("outputError formats plain Error with generic code", async () => {

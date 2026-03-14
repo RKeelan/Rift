@@ -14,7 +14,6 @@ import { resolveRepo } from "../pathUtils.js";
 function makeConfig(reposRoot: string): AppConfig {
 	return {
 		port: 3000,
-		agentCommand: "echo",
 		reposRoot,
 		basePath: "",
 	};

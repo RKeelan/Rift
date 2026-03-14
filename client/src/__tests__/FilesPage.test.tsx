@@ -19,12 +19,12 @@ afterEach(() => {
 	globalThis.fetch = originalFetch;
 });
 
-// Test wrapper that sets up a session
+// Test wrapper that selects a repository
 function TestWrapper({ children }: { children: React.ReactNode }) {
-	const { setSession } = useSession();
+	const { selectRepo } = useSession();
 	useEffect(() => {
-		setSession("test-session", "test-repo");
-	}, [setSession]);
+		selectRepo("test-repo");
+	}, [selectRepo]);
 	return <>{children}</>;
 }
 

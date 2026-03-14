@@ -101,30 +101,9 @@ function formatCommitDetail(
 	return lines.join("\n");
 }
 
-function formatSession(data: Record<string, unknown>): string {
-	const parts: string[] = [];
-	if (data.id) parts.push(`id: ${data.id}`);
-	if (data.state) parts.push(`state: ${data.state}`);
-	if (data.workingDirectory) parts.push(`dir: ${data.workingDirectory}`);
-	return parts.join("  ");
-}
-
-function formatSessionList(data: unknown[]): string {
-	if (data.length === 0) return "No sessions";
-	return data
-		.map((s) => formatSession(s as Record<string, unknown>))
-		.join("\n");
-}
-
 export function output(data: unknown, format: Format): void {
 	if (format === "json") {
 		process.stdout.write(`${JSON.stringify(data)}\n`);
-		return;
-	}
-
-	// Session list (array at top level)
-	if (Array.isArray(data)) {
-		process.stdout.write(`${formatSessionList(data)}\n`);
 		return;
 	}
 
@@ -189,12 +168,6 @@ export function output(data: unknown, format: Format): void {
 			const parts = [`status: ${obj.status}`];
 			if (obj.gitRepo !== undefined) parts.push(`gitRepo: ${obj.gitRepo}`);
 			process.stdout.write(`${parts.join("  ")}\n`);
-			return;
-		}
-
-		// Single session
-		if (obj.id || obj.state) {
-			process.stdout.write(`${formatSession(obj)}\n`);
 			return;
 		}
 	}

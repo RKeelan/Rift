@@ -1,10 +1,4 @@
-import {
-	FolderOpen,
-	GitPullRequestArrow,
-	History,
-	Home,
-	MessageSquare,
-} from "lucide-react";
+import { FolderOpen, GitPullRequestArrow, History, Home } from "lucide-react";
 import { NavLink, useNavigate } from "react-router-dom";
 import { useSession } from "../contexts/SessionContext.tsx";
 import "./TabBar.css";
@@ -17,7 +11,6 @@ interface Tab {
 }
 
 const tabs: Tab[] = [
-	{ to: "/chat", label: "Chat", icon: <MessageSquare size={22} /> },
 	{ to: "/files", label: "Files", icon: <FolderOpen size={22} /> },
 	{
 		to: "/changes",
@@ -41,14 +34,14 @@ interface TabBarProps {
 
 export function TabBar({ isGitRepo, onNavigate, repoName }: TabBarProps) {
 	const navigate = useNavigate();
-	const { clearSession } = useSession();
+	const { clearRepo } = useSession();
 
 	const visibleTabs = tabs.filter(
 		(tab) => !tab.requiresGit || isGitRepo !== false,
 	);
 
 	const handleBackToDashboard = () => {
-		clearSession();
+		clearRepo();
 		navigate("/");
 	};
 
