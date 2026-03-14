@@ -19,17 +19,22 @@ export function DiffViewer({ diff }: DiffViewerProps) {
 		return null;
 	}
 
+	const isUnifiedDiff = containsUnifiedDiff(diff);
 	const lines = diff.split("\n");
 
 	return (
 		<pre className="diff-viewer">
 			{lines.map((line, i) => {
 				let className = "diff-line";
-				if (line.startsWith("+") && !line.startsWith("+++")) {
+				if (isUnifiedDiff && line.startsWith("+") && !line.startsWith("+++")) {
 					className += " diff-add";
-				} else if (line.startsWith("-") && !line.startsWith("---")) {
+				} else if (
+					isUnifiedDiff &&
+					line.startsWith("-") &&
+					!line.startsWith("---")
+				) {
 					className += " diff-remove";
-				} else if (line.startsWith("@@")) {
+				} else if (isUnifiedDiff && line.startsWith("@@")) {
 					className += " diff-hunk";
 				}
 				return (
