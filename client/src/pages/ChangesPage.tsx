@@ -67,15 +67,14 @@ export function ChangesPage() {
 	const hasSelectedFile =
 		selectedPath !== null &&
 		(selectedStaged === "true" || selectedStaged === "false");
-	const selected =
-		hasSelectedFile
-			? { path: selectedPath, staged: selectedStaged === "true" }
-			: null;
+	const selected = hasSelectedFile
+		? { path: selectedPath, staged: selectedStaged === "true" }
+		: null;
 	const selectedStatus = selected
-		? files.find(
+		? (files.find(
 				(file) =>
 					file.path === selected.path && file.staged === selected.staged,
-			)?.status ?? null
+			)?.status ?? null)
 		: null;
 
 	// Abort any in-flight requests on unmount
