@@ -1,9 +1,9 @@
 import { ArrowLeft, RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { apiUrl } from "../apiUrl.ts";
 import { DiffViewer } from "../components/DiffViewer.tsx";
 import { useErrorBanner } from "../components/ErrorBanner.tsx";
-import { useApi } from "../hooks/useApi.ts";
 import { useSession } from "../contexts/SessionContext.tsx";
 import "./ChangesPage.css";
 
@@ -22,11 +22,6 @@ interface StatusResponse {
 interface DiffResponse {
 	diff: string;
 	truncated: boolean;
-}
-
-interface SelectedFile {
-	path: string;
-	staged: boolean;
 }
 
 const BADGE_LABELS: Record<FileStatus, string> = {
@@ -54,24 +49,40 @@ function StatusBadge({ status }: { status: FileStatus }) {
 }
 
 export function ChangesPage() {
-	const { request } = useApi();
 	const { showError } = useErrorBanner();
 	const { repoName } = useSession();
+	const [searchParams, setSearchParams] = useSearchParams();
 	const [files, setFiles] = useState<StatusEntry[]>([]);
 	const [loading, setLoading] = useState(true);
 	const [refreshing, setRefreshing] = useState(false);
 	const [notGitRepo, setNotGitRepo] = useState(false);
 	const [lastRefreshed, setLastRefreshed] = useState<Date | null>(null);
-	const [selected, setSelected] = useState<SelectedFile | null>(null);
 	const [diff, setDiff] = useState<string | null>(null);
 	const [diffTruncated, setDiffTruncated] = useState(false);
 	const [diffLoading, setDiffLoading] = useState(false);
 	const abortRef = useRef<AbortController | null>(null);
+	const diffAbortRef = useRef<AbortController | null>(null);
+	const selectedPath = searchParams.get("path");
+	const selectedStaged = searchParams.get("staged");
+	const hasSelectedFile =
+		selectedPath !== null &&
+		(selectedStaged === "true" || selectedStaged === "false");
+	const selected =
+		hasSelectedFile
+			? { path: selectedPath, staged: selectedStaged === "true" }
+			: null;
+	const selectedStatus = selected
+		? files.find(
+				(file) =>
+					file.path === selected.path && file.staged === selected.staged,
+			)?.status ?? null
+		: null;
 
-	// Abort any in-flight status fetch on unmount
+	// Abort any in-flight requests on unmount
 	useEffect(() => {
 		return () => {
 			abortRef.current?.abort();
+			diffAbortRef.current?.abort();
 		};
 	}, []);
 
@@ -156,33 +167,99 @@ export function ChangesPage() {
 	}, [fetchStatus]);
 
 	const handleSelectFile = useCallback(
-		async (entry: StatusEntry) => {
-			setSelected({ path: entry.path, staged: entry.staged });
-			setDiffLoading(true);
-			setDiff(null);
-			setDiffTruncated(false);
-
-			const params = new URLSearchParams({
-				repo: repoName as string,
+		(entry: StatusEntry) => {
+			setSearchParams({
 				path: entry.path,
 				staged: String(entry.staged),
 			});
-			const data = await request<DiffResponse>(`/api/git/diff?${params}`);
-
-			if (data) {
-				setDiff(data.diff);
-				setDiffTruncated(data.truncated);
-			}
-			setDiffLoading(false);
 		},
-		[request, repoName],
+		[setSearchParams],
 	);
 
 	const handleBack = useCallback(() => {
-		setSelected(null);
+		diffAbortRef.current?.abort();
 		setDiff(null);
 		setDiffTruncated(false);
-	}, []);
+		setDiffLoading(false);
+		setSearchParams({}, { replace: true });
+	}, [setSearchParams]);
+
+	useEffect(() => {
+		diffAbortRef.current?.abort();
+
+		if (!hasSelectedFile || !repoName || selectedPath === null) {
+			setDiff(null);
+			setDiffTruncated(false);
+			setDiffLoading(false);
+			return;
+		}
+
+		const controller = new AbortController();
+		diffAbortRef.current = controller;
+		setDiffLoading(true);
+		setDiff(null);
+		setDiffTruncated(false);
+
+		void (async () => {
+			try {
+				if (selectedStatus === "untracked") {
+					const params = new URLSearchParams({
+						repo: repoName,
+						path: selectedPath,
+					});
+					const res = await fetch(apiUrl(`/api/files/content?${params}`), {
+						signal: controller.signal,
+					});
+					if (!res.ok) {
+						const body = await res.json().catch(() => null);
+						showError(body?.error?.message ?? `Request failed (${res.status})`);
+						return;
+					}
+
+					setDiff(await res.text());
+					setDiffTruncated(false);
+				} else {
+					const params = new URLSearchParams({
+						repo: repoName,
+						path: selectedPath,
+						staged: selectedStaged,
+					});
+					const res = await fetch(apiUrl(`/api/git/diff?${params}`), {
+						signal: controller.signal,
+					});
+					if (!res.ok) {
+						const body = await res.json().catch(() => null);
+						showError(body?.error?.message ?? `Request failed (${res.status})`);
+						return;
+					}
+
+					const data: DiffResponse = await res.json();
+					setDiff(data.diff);
+					setDiffTruncated(data.truncated);
+				}
+			} catch (err) {
+				if (err instanceof DOMException && err.name === "AbortError") {
+					return;
+				}
+				showError(err instanceof Error ? err.message : "Network error");
+			} finally {
+				if (!controller.signal.aborted) {
+					setDiffLoading(false);
+				}
+			}
+		})();
+
+		return () => {
+			controller.abort();
+		};
+	}, [
+		hasSelectedFile,
+		repoName,
+		selectedPath,
+		selectedStaged,
+		selectedStatus,
+		showError,
+	]);
 
 	// Diff view
 	if (selected) {

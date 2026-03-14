@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, mock, test } from "bun:test";
 import {
-	act,
 	cleanup,
 	fireEvent,
 	render,
@@ -8,6 +7,13 @@ import {
 	waitFor,
 } from "@testing-library/react";
 import { useEffect } from "react";
+import {
+	MemoryRouter,
+	Route,
+	Routes,
+	useLocation,
+	useNavigate,
+} from "react-router-dom";
 import { ErrorBannerProvider } from "../components/ErrorBanner.tsx";
 import { SessionProvider, useSession } from "../contexts/SessionContext.tsx";
 import { ChangesPage } from "../pages/ChangesPage.tsx";
@@ -28,15 +34,41 @@ function TestWrapper({ children }: { children: React.ReactNode }) {
 	return <>{children}</>;
 }
 
-function renderChangesPage() {
+function RouterHarness({ children }: { children: React.ReactNode }) {
+	const location = useLocation();
+	const navigate = useNavigate();
+
+	return (
+		<>
+			<div data-testid="location-search">{location.search}</div>
+			<button type="button" onClick={() => navigate(-1)}>
+				History back
+			</button>
+			{children}
+		</>
+	);
+}
+
+function renderChangesPage(initialEntries = ["/changes"]) {
 	return render(
-		<ErrorBannerProvider>
-			<SessionProvider>
-				<TestWrapper>
-					<ChangesPage />
-				</TestWrapper>
-			</SessionProvider>
-		</ErrorBannerProvider>,
+		<MemoryRouter initialEntries={initialEntries}>
+			<ErrorBannerProvider>
+				<SessionProvider>
+					<Routes>
+						<Route
+							path="/changes"
+							element={
+								<RouterHarness>
+									<TestWrapper>
+										<ChangesPage />
+									</TestWrapper>
+								</RouterHarness>
+							}
+						/>
+					</Routes>
+				</SessionProvider>
+			</ErrorBannerProvider>
+		</MemoryRouter>,
 	);
 }
 
@@ -55,6 +87,7 @@ function mockFetchForChanges(
 	options?: {
 		notGitRepo?: boolean;
 		diff?: { path: string; diff: string; truncated: boolean };
+		fileContent?: { path: string; content: string };
 	},
 ) {
 	globalThis.fetch = mock((input: string | URL | Request) => {
@@ -110,6 +143,19 @@ function mockFetchForChanges(
 					headers: { "Content-Type": "application/json" },
 				}),
 			);
+		}
+
+		if (url.includes("/api/files/content")) {
+			if (options?.fileContent) {
+				return Promise.resolve(
+					new Response(options.fileContent.content, {
+						status: 200,
+						headers: { "Content-Type": "text/plain" },
+					}),
+				);
+			}
+
+			return Promise.resolve(new Response("", { status: 200 }));
 		}
 
 		return Promise.resolve(new Response("Not found", { status: 404 }));
@@ -262,9 +308,7 @@ describe("ChangesPage", () => {
 		});
 
 		const fileEntry = container.querySelector(".changes-file-entry") as Element;
-		await act(async () => {
-			fireEvent.click(fileEntry);
-		});
+		fireEvent.click(fileEntry);
 
 		// Should switch to the diff view
 		await waitFor(() => {
@@ -290,6 +334,36 @@ describe("ChangesPage", () => {
 		expect(hunkLine).not.toBeNull();
 	});
 
+	test("shows untracked file content instead of no diff", async () => {
+		mockFetchForChanges(
+			[{ path: "scratch.txt", status: "untracked", staged: false }],
+			{
+				fileContent: {
+					path: "scratch.txt",
+					content: "- draft line 1\n- draft line 2\n",
+				},
+			},
+		);
+
+		const { container } = renderChangesPage();
+
+		await waitFor(() => {
+			expect(container.querySelectorAll(".changes-file-entry").length).toBe(1);
+		});
+
+		fireEvent.click(container.querySelector(".changes-file-entry") as Element);
+
+		await waitFor(() => {
+			const diffViewer = container.querySelector(".diff-viewer");
+			expect(diffViewer).not.toBeNull();
+			expect(diffViewer?.textContent).toContain("- draft line 1");
+			expect(container.querySelector(".diff-remove")).toBeNull();
+			expect(container.querySelector(".changes-message")?.textContent).not.toBe(
+				"No diff available",
+			);
+		});
+	});
+
 	test("shows filename and staged/unstaged label in diff header", async () => {
 		mockFetchForChanges(
 			[{ path: "src/utils.ts", status: "modified", staged: true }],
@@ -308,11 +382,7 @@ describe("ChangesPage", () => {
 			expect(container.querySelectorAll(".changes-file-entry").length).toBe(1);
 		});
 
-		await act(async () => {
-			fireEvent.click(
-				container.querySelector(".changes-file-entry") as Element,
-			);
-		});
+		fireEvent.click(container.querySelector(".changes-file-entry") as Element);
 
 		await waitFor(() => {
 			const filename = container.querySelector(".changes-diff-filename");
@@ -344,11 +414,7 @@ describe("ChangesPage", () => {
 		});
 
 		// Click file to go to diff view
-		await act(async () => {
-			fireEvent.click(
-				container.querySelector(".changes-file-entry") as Element,
-			);
-		});
+		fireEvent.click(container.querySelector(".changes-file-entry") as Element);
 
 		await waitFor(() => {
 			expect(container.querySelector(".changes-diff-view")).not.toBeNull();
@@ -356,14 +422,104 @@ describe("ChangesPage", () => {
 
 		// Click back button
 		const backButton = screen.getByLabelText("Back to changes list");
-		await act(async () => {
-			fireEvent.click(backButton);
-		});
+		fireEvent.click(backButton);
 
 		// Should be back to the list
 		await waitFor(() => {
 			expect(container.querySelector(".changes-page")).not.toBeNull();
 			expect(container.querySelector(".changes-diff-view")).toBeNull();
+		});
+	});
+
+	test("browser back returns to changes list from diff view", async () => {
+		mockFetchForChanges(
+			[{ path: "app.ts", status: "modified", staged: false }],
+			{
+				diff: {
+					path: "app.ts",
+					diff: "diff content",
+					truncated: false,
+				},
+			},
+		);
+
+		const { container } = renderChangesPage();
+
+		await waitFor(() => {
+			expect(container.querySelectorAll(".changes-file-entry").length).toBe(1);
+		});
+
+		fireEvent.click(container.querySelector(".changes-file-entry") as Element);
+
+		await waitFor(() => {
+			expect(container.querySelector(".changes-diff-view")).not.toBeNull();
+			expect(screen.getByTestId("location-search").textContent).toContain(
+				"path=app.ts",
+			);
+		});
+
+		fireEvent.click(screen.getByText("History back"));
+
+		await waitFor(() => {
+			expect(container.querySelector(".changes-page")).not.toBeNull();
+			expect(container.querySelector(".changes-diff-view")).toBeNull();
+			expect(screen.getByTestId("location-search").textContent).toBe("");
+		});
+	});
+
+	test("status refresh does not reload the open diff", async () => {
+		let diffRequests = 0;
+
+		globalThis.fetch = mock((input: string | URL | Request) => {
+			const url = typeof input === "string" ? input : input.toString();
+
+			if (url.includes("/api/git/status")) {
+				return Promise.resolve(
+					new Response(
+						JSON.stringify({
+							files: [{ path: "app.ts", status: "modified", staged: false }],
+						}),
+						{
+							status: 200,
+							headers: { "Content-Type": "application/json" },
+						},
+					),
+				);
+			}
+
+			if (url.includes("/api/git/diff")) {
+				diffRequests += 1;
+				return Promise.resolve(
+					new Response(
+						JSON.stringify({ diff: "diff content", truncated: false }),
+						{
+							status: 200,
+							headers: { "Content-Type": "application/json" },
+						},
+					),
+				);
+			}
+
+			return Promise.resolve(new Response("Not found", { status: 404 }));
+		}) as typeof fetch;
+
+		const { container } = renderChangesPage();
+
+		await waitFor(() => {
+			expect(container.querySelectorAll(".changes-file-entry").length).toBe(1);
+		});
+
+		fireEvent.click(container.querySelector(".changes-file-entry") as Element);
+
+		await waitFor(() => {
+			expect(container.querySelector(".changes-diff-view")).not.toBeNull();
+			expect(diffRequests).toBe(1);
+		});
+
+		fireEvent(document, new Event("visibilitychange"));
+
+		await waitFor(() => {
+			expect(diffRequests).toBe(1);
 		});
 	});
 
