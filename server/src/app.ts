@@ -16,12 +16,50 @@ export interface AppConfig {
 	basePath: string;
 }
 
+function looksLikeWindowsPath(input: string): boolean {
+	return /^[A-Za-z]:[\\/]/.test(input) || input.includes("\\");
+}
+
+const COMMON_SOURCE_DIR_NAMES = new Set(["src", "source", "repos"]);
+
+export function inferReposRoot(cwd: string, homeDir: string): string {
+	const pathImpl =
+		looksLikeWindowsPath(cwd) || looksLikeWindowsPath(homeDir)
+			? path.win32
+			: path.posix;
+	const resolvedHome = pathImpl.resolve(homeDir);
+	const resolvedCwd = pathImpl.resolve(cwd);
+	const relativeToHome = pathImpl.relative(resolvedHome, resolvedCwd);
+
+	if (
+		relativeToHome &&
+		relativeToHome !== "." &&
+		!relativeToHome.startsWith("..") &&
+		!pathImpl.isAbsolute(relativeToHome)
+	) {
+		const segments = relativeToHome
+			.split(pathImpl.sep)
+			.filter((segment) => segment.length > 0);
+		const sourceRootSegments: string[] = [];
+
+		for (const segment of segments) {
+			sourceRootSegments.push(segment);
+			if (COMMON_SOURCE_DIR_NAMES.has(segment.toLowerCase())) {
+				return pathImpl.join(resolvedHome, ...sourceRootSegments);
+			}
+		}
+	}
+
+	return resolvedHome;
+}
+
 export function getConfig(): AppConfig {
 	const baseName = process.env.BASE_NAME;
+	const homeDir = os.homedir();
 	return {
 		port: Number(process.env.PORT) || 3000,
 		agentCommand: process.env.AGENT_COMMAND || "echo",
-		reposRoot: process.env.REPOS_ROOT || path.join(os.homedir(), "Src"),
+		reposRoot: process.env.REPOS_ROOT || inferReposRoot(process.cwd(), homeDir),
 		basePath: baseName ? `/${baseName}` : "",
 	};
 }
