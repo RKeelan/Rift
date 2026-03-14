@@ -4,38 +4,37 @@ import { SessionProvider, useSession } from "../contexts/SessionContext.tsx";
 
 afterEach(() => {
 	cleanup();
+	globalThis.localStorage.clear();
 });
 
 function TestComponent() {
-	const { sessionId, repoName, setSession, clearSession } = useSession();
+	const { repoName, selectRepo, clearRepo } = useSession();
 
 	return (
 		<div>
-			<div data-testid="sessionId">{sessionId ?? "null"}</div>
 			<div data-testid="repoName">{repoName ?? "null"}</div>
-			<button type="button" onClick={() => setSession("s1", "repo1")}>
-				Set Session
+			<button type="button" onClick={() => selectRepo("repo1")}>
+				Select Repo
 			</button>
-			<button type="button" onClick={() => clearSession()}>
-				Clear Session
+			<button type="button" onClick={() => clearRepo()}>
+				Clear Repo
 			</button>
 		</div>
 	);
 }
 
 describe("SessionContext", () => {
-	test("provides null session and repo by default", () => {
+	test("provides a null repo by default", () => {
 		render(
 			<SessionProvider>
 				<TestComponent />
 			</SessionProvider>,
 		);
 
-		expect(screen.getByTestId("sessionId").textContent).toBe("null");
 		expect(screen.getByTestId("repoName").textContent).toBe("null");
 	});
 
-	test("setSession updates both sessionId and repoName", () => {
+	test("selectRepo updates the selected repo", () => {
 		render(
 			<SessionProvider>
 				<TestComponent />
@@ -43,39 +42,35 @@ describe("SessionContext", () => {
 		);
 
 		act(() => {
-			screen.getByText("Set Session").click();
+			screen.getByText("Select Repo").click();
 		});
 
-		expect(screen.getByTestId("sessionId").textContent).toBe("s1");
 		expect(screen.getByTestId("repoName").textContent).toBe("repo1");
+		expect(globalThis.localStorage.getItem("rift:selected-repo")).toBe("repo1");
 	});
 
-	test("clearSession resets both sessionId and repoName to null", () => {
+	test("clearRepo resets the selected repo to null", () => {
 		render(
 			<SessionProvider>
 				<TestComponent />
 			</SessionProvider>,
 		);
 
-		// First set a session
 		act(() => {
-			screen.getByText("Set Session").click();
+			screen.getByText("Select Repo").click();
 		});
 
-		expect(screen.getByTestId("sessionId").textContent).toBe("s1");
 		expect(screen.getByTestId("repoName").textContent).toBe("repo1");
 
-		// Then clear it
 		act(() => {
-			screen.getByText("Clear Session").click();
+			screen.getByText("Clear Repo").click();
 		});
 
-		expect(screen.getByTestId("sessionId").textContent).toBe("null");
 		expect(screen.getByTestId("repoName").textContent).toBe("null");
+		expect(globalThis.localStorage.getItem("rift:selected-repo")).toBeNull();
 	});
 
 	test("throws error when useSession is used outside SessionProvider", () => {
-		// Suppress console.error for this test
 		const originalError = console.error;
 		console.error = () => {};
 

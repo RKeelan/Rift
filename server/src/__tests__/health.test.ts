@@ -5,7 +5,6 @@ import { type AppConfig, createApp } from "../app.js";
 function makeConfig(overrides?: Partial<AppConfig>): AppConfig {
 	return {
 		port: 3000,
-		agentCommand: "echo",
 		reposRoot: process.cwd(),
 		basePath: "",
 		...overrides,

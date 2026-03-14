@@ -13,7 +13,6 @@ let app: ReturnType<typeof createApp>;
 function makeConfig(overrides?: Partial<AppConfig>): AppConfig {
 	return {
 		port: 3000,
-		agentCommand: "echo",
 		reposRoot,
 		basePath: "",
 		...overrides,

@@ -6,12 +6,9 @@ import { resolveRepo } from "./pathUtils.js";
 import { fileRoutes } from "./routes/files.js";
 import { gitRoutes } from "./routes/git.js";
 import { repoRoutes } from "./routes/repos.js";
-import { sessionRoutes } from "./routes/sessions.js";
-import type { SessionManager } from "./session.js";
 
 export interface AppConfig {
 	port: number;
-	agentCommand: string;
 	reposRoot: string;
 	basePath: string;
 }
@@ -58,16 +55,12 @@ export function getConfig(): AppConfig {
 	const homeDir = os.homedir();
 	return {
 		port: Number(process.env.PORT) || 3000,
-		agentCommand: process.env.AGENT_COMMAND || "echo",
 		reposRoot: process.env.REPOS_ROOT || inferReposRoot(process.cwd(), homeDir),
 		basePath: baseName ? `/${baseName}` : "",
 	};
 }
 
-export function createApp(
-	config: AppConfig,
-	sessionManager?: SessionManager,
-): express.Express {
+export function createApp(config: AppConfig): express.Express {
 	const app = express();
 	const router = express.Router();
 
@@ -104,13 +97,6 @@ export function createApp(
 	router.use("/api/files", fileRoutes(config.reposRoot));
 	router.use("/api/git", gitRoutes(config.reposRoot));
 	router.use("/api/repos", repoRoutes(config.reposRoot));
-
-	if (sessionManager) {
-		router.use(
-			"/api/sessions",
-			sessionRoutes(sessionManager, config.reposRoot),
-		);
-	}
 
 	// Production: serve static files from client/dist
 	const clientDist = path.resolve(

@@ -11,6 +11,8 @@ const globals = [
 	"document",
 	"window",
 	"navigator",
+	"localStorage",
+	"sessionStorage",
 	"HTMLElement",
 	"Element",
 	"Node",
