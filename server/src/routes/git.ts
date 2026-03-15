@@ -337,6 +337,58 @@ export function gitRoutes(reposRoot: string): Router {
 	});
 
 	// GET /api/git/diff?repo=<name>&path=<file>&staged=<bool>
+	router.get("/base-content", async (req, res) => {
+		const filePath = req.query.path as string;
+		if (!filePath) {
+			res.status(400).json({
+				error: {
+					code: "MISSING_PATH",
+					message: "path parameter is required",
+				},
+			});
+			return;
+		}
+
+		const git = await resolveGitRepo(reposRoot, req, res);
+		if (!git) return;
+
+		const isRepo = await git.checkIsRepo();
+		if (!isRepo) {
+			res.status(400).json({
+				error: {
+					code: "NOT_GIT_REPO",
+					message: "The working directory is not a git repository",
+				},
+			});
+			return;
+		}
+
+		const toplevel = (await git.revparse(["--show-toplevel"])).trim();
+		const resolved = resolveSafePath(toplevel, filePath);
+		if (!resolved) {
+			res.status(403).json({
+				error: {
+					code: "PATH_FORBIDDEN",
+					message: "Path escapes the working directory",
+				},
+			});
+			return;
+		}
+
+		try {
+			const relativePath = path.relative(toplevel, resolved);
+			const gitRoot = simpleGit(toplevel);
+			const revision = `HEAD:${relativePath}`;
+			const content = await gitRoot.raw(["show", revision]);
+			res.type("text/plain").send(content);
+		} catch {
+			res.status(404).json({
+				error: { code: "NOT_FOUND", message: "Base file not found" },
+			});
+		}
+	});
+
+	// GET /api/git/diff?repo=<name>&path=<file>&staged=<bool>
 	router.get("/diff", async (req, res) => {
 		const filePath = req.query.path as string;
 		if (!filePath) {
