@@ -6,7 +6,6 @@ function makeConfig(overrides?: Partial<AppConfig>): AppConfig {
 	return {
 		port: 3000,
 		reposRoot: process.cwd(),
-		basePath: "",
 		...overrides,
 	};
 }
