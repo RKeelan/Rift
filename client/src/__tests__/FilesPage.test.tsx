@@ -257,6 +257,9 @@ describe("FilesPage", () => {
 		// Breadcrumbs should show the filename
 		const breadcrumbs = container.querySelector(".breadcrumbs");
 		expect(breadcrumbs?.textContent).toContain("hello.txt");
+
+		const saveButton = screen.getByRole("button", { name: "Save" });
+		expect(saveButton).not.toBeNull();
 	});
 
 	test("renders error message for binary file", async () => {
@@ -284,7 +287,7 @@ describe("FilesPage", () => {
 
 		// Should show error message
 		await waitFor(() => {
-			const error = container.querySelector(".files-error");
+			const error = container.querySelector(".text-file-editor-error");
 			expect(error).not.toBeNull();
 			expect(error?.textContent).toContain("Binary files are not supported");
 		});
@@ -313,7 +316,7 @@ describe("FilesPage", () => {
 		});
 
 		await waitFor(() => {
-			const error = container.querySelector(".files-error");
+			const error = container.querySelector(".text-file-editor-error");
 			expect(error).not.toBeNull();
 			expect(error?.textContent).toContain("File exceeds maximum size");
 		});

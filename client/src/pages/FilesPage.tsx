@@ -6,7 +6,7 @@ import {
 	FolderOpen,
 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { apiUrl } from "../apiUrl.ts";
+import { TextFileEditor } from "../components/TextFileEditor.tsx";
 import { useApi } from "../hooks/useApi.ts";
 import { useSession } from "../contexts/SessionContext.tsx";
 import "./FilesPage.css";
@@ -32,205 +32,11 @@ interface TreeNode {
 	loading: boolean;
 }
 
-type LanguageLoader = () => Promise<
-	import("@codemirror/language").LanguageSupport
->;
-
-function getLanguageLoader(filename: string): LanguageLoader | null {
-	const ext = filename.split(".").pop()?.toLowerCase();
-	switch (ext) {
-		case "js":
-		case "jsx":
-		case "mjs":
-		case "cjs":
-			return async () => {
-				const { javascript } = await import("@codemirror/lang-javascript");
-				return javascript({ jsx: true });
-			};
-		case "ts":
-		case "tsx":
-		case "mts":
-		case "cts":
-			return async () => {
-				const { javascript } = await import("@codemirror/lang-javascript");
-				return javascript({ jsx: true, typescript: true });
-			};
-		case "py":
-			return async () => {
-				const { python } = await import("@codemirror/lang-python");
-				return python();
-			};
-		case "json":
-			return async () => {
-				const { json } = await import("@codemirror/lang-json");
-				return json();
-			};
-		case "md":
-		case "markdown":
-			return async () => {
-				const { markdown } = await import("@codemirror/lang-markdown");
-				return markdown();
-			};
-		case "css":
-		case "scss":
-			return async () => {
-				const { css } = await import("@codemirror/lang-css");
-				return css();
-			};
-		case "html":
-		case "htm":
-			return async () => {
-				const { html } = await import("@codemirror/lang-html");
-				return html();
-			};
-		case "rs":
-			return async () => {
-				const { rust } = await import("@codemirror/lang-rust");
-				return rust();
-			};
-		case "go":
-			return async () => {
-				const { go } = await import("@codemirror/lang-go");
-				return go();
-			};
-		case "sh":
-		case "bash":
-		case "zsh":
-			return async () => {
-				const { StreamLanguage } = await import("@codemirror/language");
-				const { shell } = await import("@codemirror/legacy-modes/mode/shell");
-				return new (await import("@codemirror/language")).LanguageSupport(
-					StreamLanguage.define(shell),
-				);
-			};
-		default:
-			return null;
-	}
-}
-
 function FileViewer({
 	filePath,
 	onNavigate,
 	repo,
 }: { filePath: string; onNavigate: (dir: string) => void; repo: string }) {
-	const editorRef = useRef<HTMLDivElement>(null);
-	const viewRef = useRef<import("@codemirror/view").EditorView | null>(null);
-	const [content, setContent] = useState<string | null>(null);
-	const [error, setError] = useState<string | null>(null);
-	const [loading, setLoading] = useState(true);
-
-	// Fetch file content
-	useEffect(() => {
-		const controller = new AbortController();
-		setLoading(true);
-		setError(null);
-		setContent(null);
-
-		(async () => {
-			try {
-				const response = await fetch(
-					apiUrl(
-						`/api/files/content?repo=${encodeURIComponent(repo)}&path=${encodeURIComponent(filePath)}`,
-					),
-					{ signal: controller.signal },
-				);
-				if (!response.ok) {
-					const body = await response.json().catch(() => null);
-					const msg =
-						body?.error?.message || `Failed to load file (${response.status})`;
-					if (!controller.signal.aborted) setError(msg);
-					return;
-				}
-				const text = await response.text();
-				if (!controller.signal.aborted) setContent(text);
-			} catch (err) {
-				if (err instanceof DOMException && err.name === "AbortError") return;
-				if (!controller.signal.aborted) setError("Failed to load file");
-			} finally {
-				if (!controller.signal.aborted) setLoading(false);
-			}
-		})();
-
-		return () => {
-			controller.abort();
-		};
-	}, [filePath, repo]);
-
-	// Create and manage the CodeMirror editor
-	useEffect(() => {
-		if (content === null || !editorRef.current) return;
-
-		let destroyed = false;
-
-		(async () => {
-			const { EditorView, lineNumbers } = await import("@codemirror/view");
-			const { EditorState } = await import("@codemirror/state");
-			const { syntaxHighlighting, defaultHighlightStyle } = await import(
-				"@codemirror/language"
-			);
-			const { oneDark } = await import("@codemirror/theme-one-dark");
-
-			if (destroyed || !editorRef.current) return;
-
-			const extensions = [
-				EditorView.editable.of(false),
-				EditorState.readOnly.of(true),
-				lineNumbers(),
-				syntaxHighlighting(defaultHighlightStyle),
-				oneDark,
-				EditorView.theme({
-					"&": {
-						fontSize: "13px",
-						height: "100%",
-					},
-					".cm-scroller": {
-						overflow: "auto",
-						fontFamily:
-							"'SF Mono', 'Fira Code', 'Fira Mono', Menlo, Consolas, monospace",
-					},
-					".cm-gutters": {
-						backgroundColor: "var(--color-surface)",
-						borderRight: "1px solid var(--color-border)",
-					},
-				}),
-			];
-
-			const state = EditorState.create({ doc: content, extensions });
-			const view = new EditorView({
-				state,
-				parent: editorRef.current,
-			});
-			viewRef.current = view;
-
-			// Lazy-load language support
-			const loader = getLanguageLoader(filePath);
-			if (loader) {
-				try {
-					const langSupport = await loader();
-					if (!destroyed) {
-						const newState = EditorState.create({
-							doc: content,
-							extensions: [...extensions, langSupport],
-						});
-						view.setState(newState);
-					}
-				} catch {
-					// Language loading failed; plain text is fine
-				}
-			}
-		})();
-
-		return () => {
-			destroyed = true;
-			if (viewRef.current) {
-				viewRef.current.destroy();
-				viewRef.current = null;
-			}
-		};
-	}, [content, filePath]);
-
-	const filename = filePath.split("/").pop() || filePath;
-
 	return (
 		<div className="file-viewer">
 			<header className="files-header">
@@ -250,9 +56,7 @@ function FileViewer({
 				</button>
 				<Breadcrumbs path={filePath} onNavigate={onNavigate} />
 			</header>
-			{loading && <div className="files-message">Loading {filename}...</div>}
-			{error && <div className="files-error">{error}</div>}
-			{content !== null && <div ref={editorRef} className="editor-container" />}
+			<TextFileEditor filePath={filePath} repo={repo} />
 		</div>
 	);
 }

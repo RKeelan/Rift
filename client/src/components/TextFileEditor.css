@@ -1,0 +1,104 @@
+.text-file-editor {
+	display: flex;
+	flex: 1;
+	flex-direction: column;
+	min-height: 0;
+	--editor-syntax-keyword: #8db8ff;
+	--editor-syntax-type: #78d6c6;
+	--editor-syntax-function: #ffd479;
+	--editor-syntax-variable: #f1f4f8;
+	--editor-syntax-string: #8fdc8c;
+	--editor-syntax-number: #ffb86c;
+	--editor-syntax-comment: #7f8ea3;
+	--editor-syntax-operator: #c8d0dc;
+	--editor-syntax-meta: #d8a8ff;
+	--editor-syntax-heading: #ff9f7a;
+	--editor-syntax-link: #7cc9ff;
+}
+
+.text-file-editor-toolbar {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 0.75rem;
+	padding: 0.5rem 0.75rem;
+	border-bottom: 1px solid var(--color-border);
+	background: var(--color-surface);
+	flex-shrink: 0;
+}
+
+.text-file-editor-status {
+	font-size: 0.8125rem;
+	color: var(--color-text-muted);
+}
+
+.text-file-editor-actions {
+	display: flex;
+	align-items: center;
+	gap: 0.5rem;
+}
+
+.text-file-editor-button {
+	border: 1px solid var(--color-border);
+	background: var(--color-surface);
+	color: var(--color-text);
+	border-radius: 6px;
+	padding: 0.375rem 0.75rem;
+	font-size: 0.8125rem;
+	cursor: pointer;
+}
+
+.text-file-editor-button:disabled {
+	opacity: 0.5;
+	cursor: default;
+}
+
+.text-file-editor-button--primary {
+	background: var(--color-primary);
+	border-color: var(--color-primary);
+	color: var(--color-surface);
+}
+
+.text-file-editor-message {
+	padding: 2rem 1rem;
+	text-align: center;
+	color: var(--color-text-muted);
+}
+
+.text-file-editor-error {
+	padding: 1rem 0.75rem;
+	color: var(--color-error);
+	border-bottom: 1px solid var(--color-border);
+}
+
+.text-file-editor-surface {
+	flex: 1;
+	overflow: hidden;
+	background: var(--color-bg);
+}
+
+.text-file-editor-surface .cm-editor {
+	height: 100%;
+	background: var(--color-bg);
+}
+
+.text-file-editor-surface .cm-changedLine--added {
+	background: rgba(46, 160, 67, 0.12);
+	box-shadow: inset 3px 0 0 #7ee787;
+}
+
+.text-file-editor-surface .cm-deletedChunk {
+	margin: 0.125rem 0;
+	padding: 0.125rem 0;
+	background: rgba(248, 81, 73, 0.12);
+	box-shadow: inset 3px 0 0 #ffa198;
+}
+
+.text-file-editor-surface .cm-deletedChunkLine {
+	padding: 0 0.75rem 0 0.875rem;
+	color: #ffa198;
+	white-space: pre;
+	font-family: "SF Mono", "Fira Code", "Fira Mono", Menlo, Consolas, monospace;
+	font-size: 13px;
+	line-height: 1.4;
+}

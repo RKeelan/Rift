@@ -4,6 +4,7 @@ import { useSearchParams } from "react-router-dom";
 import { apiUrl } from "../apiUrl.ts";
 import { DiffViewer } from "../components/DiffViewer.tsx";
 import { useErrorBanner } from "../components/ErrorBanner.tsx";
+import { TextFileEditor } from "../components/TextFileEditor.tsx";
 import { useSession } from "../contexts/SessionContext.tsx";
 import "./ChangesPage.css";
 
@@ -48,6 +49,10 @@ function StatusBadge({ status }: { status: FileStatus }) {
 	);
 }
 
+function canEditEntry(entry: Pick<StatusEntry, "staged" | "status">): boolean {
+	return !entry.staged && entry.status !== "deleted";
+}
+
 export function ChangesPage() {
 	const { showError } = useErrorBanner();
 	const { repoName } = useSession();
@@ -60,15 +65,22 @@ export function ChangesPage() {
 	const [diff, setDiff] = useState<string | null>(null);
 	const [diffTruncated, setDiffTruncated] = useState(false);
 	const [diffLoading, setDiffLoading] = useState(false);
+	const [comparisonContent, setComparisonContent] = useState<
+		string | undefined
+	>(undefined);
 	const abortRef = useRef<AbortController | null>(null);
 	const diffAbortRef = useRef<AbortController | null>(null);
+	const comparisonAbortRef = useRef<AbortController | null>(null);
 	const selectedPath = searchParams.get("path");
 	const selectedStaged = searchParams.get("staged");
 	const hasSelectedFile =
 		selectedPath !== null &&
 		(selectedStaged === "true" || selectedStaged === "false");
 	const selected = hasSelectedFile
-		? { path: selectedPath, staged: selectedStaged === "true" }
+		? {
+				path: selectedPath,
+				staged: selectedStaged === "true",
+			}
 		: null;
 	const selectedStatus = selected
 		? (files.find(
@@ -76,12 +88,23 @@ export function ChangesPage() {
 					file.path === selected.path && file.staged === selected.staged,
 			)?.status ?? null)
 		: null;
+	const selectedEditable =
+		selected !== null && !selected.staged && selectedStatus !== "deleted";
+	const selectedView =
+		selected === null
+			? null
+			: searchParams.get("view") === "diff" && selectedEditable
+				? "diff"
+				: selectedEditable
+					? "edit"
+					: "diff";
 
 	// Abort any in-flight requests on unmount
 	useEffect(() => {
 		return () => {
 			abortRef.current?.abort();
 			diffAbortRef.current?.abort();
+			comparisonAbortRef.current?.abort();
 		};
 	}, []);
 
@@ -143,14 +166,14 @@ export function ChangesPage() {
 	// Poll every 3 seconds while the tab is visible
 	useEffect(() => {
 		function handleVisibilityChange() {
-			if (document.visibilityState === "visible") {
+			if (document.visibilityState === "visible" && selectedView !== "edit") {
 				fetchStatus(true);
 			}
 		}
 
 		document.addEventListener("visibilitychange", handleVisibilityChange);
 		const interval = setInterval(() => {
-			if (document.visibilityState === "visible") {
+			if (document.visibilityState === "visible" && selectedView !== "edit") {
 				fetchStatus(true);
 			}
 		}, 3000);
@@ -159,7 +182,7 @@ export function ChangesPage() {
 			document.removeEventListener("visibilitychange", handleVisibilityChange);
 			clearInterval(interval);
 		};
-	}, [fetchStatus]);
+	}, [fetchStatus, selectedView]);
 
 	const handleRefresh = useCallback(() => {
 		fetchStatus(true);
@@ -175,18 +198,111 @@ export function ChangesPage() {
 		[setSearchParams],
 	);
 
+	const handleShowFile = useCallback(() => {
+		if (!selected || !selectedEditable) return;
+
+		setSearchParams({
+			path: selected.path,
+			staged: String(selected.staged),
+		});
+	}, [selected, selectedEditable, setSearchParams]);
+
+	const handleShowDiff = useCallback(() => {
+		if (!selected || !selectedEditable) return;
+
+		setSearchParams(
+			{
+				path: selected.path,
+				staged: String(selected.staged),
+				view: "diff",
+			},
+			{ replace: true },
+		);
+	}, [selected, selectedEditable, setSearchParams]);
+
+	const handleEditorSaved = useCallback(() => {
+		fetchStatus(true);
+	}, [fetchStatus]);
+
 	const handleBack = useCallback(() => {
 		diffAbortRef.current?.abort();
+		comparisonAbortRef.current?.abort();
 		setDiff(null);
 		setDiffTruncated(false);
 		setDiffLoading(false);
+		setComparisonContent(undefined);
 		setSearchParams({}, { replace: true });
 	}, [setSearchParams]);
 
 	useEffect(() => {
+		comparisonAbortRef.current?.abort();
+
+		if (
+			!hasSelectedFile ||
+			!repoName ||
+			selectedPath === null ||
+			!selectedEditable
+		) {
+			setComparisonContent(undefined);
+			return;
+		}
+
+		if (selectedStatus === "untracked") {
+			setComparisonContent("");
+			return;
+		}
+
+		const controller = new AbortController();
+		comparisonAbortRef.current = controller;
+		setComparisonContent(undefined);
+
+		void (async () => {
+			try {
+				const params = new URLSearchParams({
+					repo: repoName,
+					path: selectedPath,
+					staged: selectedStaged ?? "false",
+				});
+				const res = await fetch(apiUrl(`/api/git/base-content?${params}`), {
+					signal: controller.signal,
+				});
+				if (!res.ok) {
+					const body = await res.json().catch(() => null);
+					showError(body?.error?.message ?? `Request failed (${res.status})`);
+					return;
+				}
+
+				setComparisonContent(await res.text());
+			} catch (err) {
+				if (err instanceof DOMException && err.name === "AbortError") {
+					return;
+				}
+				showError(err instanceof Error ? err.message : "Network error");
+			}
+		})();
+
+		return () => {
+			controller.abort();
+		};
+	}, [
+		hasSelectedFile,
+		repoName,
+		selectedEditable,
+		selectedPath,
+		selectedStaged,
+		selectedStatus,
+		showError,
+	]);
+
+	useEffect(() => {
 		diffAbortRef.current?.abort();
 
-		if (!hasSelectedFile || !repoName || selectedPath === null) {
+		if (
+			!hasSelectedFile ||
+			!repoName ||
+			selectedPath === null ||
+			(selectedView === "edit" && selectedStatus === "untracked")
+		) {
 			setDiff(null);
 			setDiffTruncated(false);
 			setDiffLoading(false);
@@ -257,6 +373,7 @@ export function ChangesPage() {
 		selectedPath,
 		selectedStaged,
 		selectedStatus,
+		selectedView,
 		showError,
 	]);
 
@@ -277,20 +394,59 @@ export function ChangesPage() {
 					<span className="changes-diff-staged-label">
 						{selected.staged ? "staged" : "unstaged"}
 					</span>
+					{selectedEditable && selectedView === "diff" && (
+						<button
+							type="button"
+							className="changes-header-button"
+							onClick={handleShowFile}
+						>
+							Show file
+						</button>
+					)}
+					{selectedEditable && selectedView === "edit" && (
+						<button
+							type="button"
+							className="changes-header-button"
+							onClick={() => {
+								void handleShowDiff();
+							}}
+						>
+							Show diff
+						</button>
+					)}
 				</header>
 				<div className="changes-diff-content">
-					{diffLoading && (
-						<div className="changes-message">Loading diff...</div>
+					{selectedView === "diff" && (
+						<>
+							{diffLoading && (
+								<div className="changes-message">Loading diff...</div>
+							)}
+							{!diffLoading && diff !== null && diff.length === 0 && (
+								<div className="changes-message">No diff available</div>
+							)}
+							{!diffLoading && diff !== null && diff.length > 0 && (
+								<DiffViewer diff={diff} />
+							)}
+							{diffTruncated && (
+								<div className="changes-diff-truncated">
+									Diff truncated (exceeds 1 MB)
+								</div>
+							)}
+						</>
 					)}
-					{!diffLoading && diff !== null && diff.length === 0 && (
-						<div className="changes-message">No diff available</div>
-					)}
-					{!diffLoading && diff !== null && diff.length > 0 && (
-						<DiffViewer diff={diff} />
-					)}
-					{diffTruncated && (
-						<div className="changes-diff-truncated">
-							Diff truncated (exceeds 1 MB)
+					{selectedView === "edit" && selectedEditable && (
+						<div className="changes-editor-view">
+							<div className="changes-editor-note">
+								Editing the working tree file.
+							</div>
+							<TextFileEditor
+								comparisonContent={comparisonContent}
+								changeDiff={selectedStatus === "untracked" ? null : diff}
+								changeType={selectedStatus}
+								filePath={selected.path}
+								repo={repoName as string}
+								onSaved={handleEditorSaved}
+							/>
 						</div>
 					)}
 				</div>

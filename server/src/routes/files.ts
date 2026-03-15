@@ -8,11 +8,17 @@ import { resolveRepo, resolveSafePath } from "../pathUtils.js";
 const MAX_ENTRIES = 1000;
 const MAX_FILE_SIZE = 1024 * 1024; // 1 MB
 const BINARY_CHECK_SIZE = 8192; // 8 KB
+const FILE_MTIME_HEADER = "x-file-mtime-ms";
 
 interface DirEntry {
 	name: string;
 	type: "file" | "directory";
 	size: number;
+}
+
+interface TextFileInfo {
+	content: string;
+	stat: Awaited<ReturnType<typeof fs.stat>>;
 }
 
 async function isGitRepo(dir: string): Promise<boolean> {
@@ -93,6 +99,60 @@ async function requireRepo(
 		return null;
 	}
 	return result.path;
+}
+
+function isNotFoundError(err: unknown): err is NodeJS.ErrnoException {
+	return err instanceof Error && "code" in err && err.code === "ENOENT";
+}
+
+async function readTextFile(
+	resolved: string,
+	res: Response,
+): Promise<TextFileInfo | null> {
+	try {
+		const stat = await fs.stat(resolved);
+
+		if (stat.isDirectory()) {
+			res.status(400).json({
+				error: {
+					code: "IS_DIRECTORY",
+					message: "The specified path is a directory, not a file",
+				},
+			});
+			return null;
+		}
+
+		if (stat.size > MAX_FILE_SIZE) {
+			res.status(413).json({
+				error: {
+					code: "FILE_TOO_LARGE",
+					message: `File exceeds maximum size of ${MAX_FILE_SIZE / (1024 * 1024)} MB`,
+				},
+			});
+			return null;
+		}
+
+		if (await isBinaryFile(resolved)) {
+			res.status(415).json({
+				error: {
+					code: "BINARY_FILE",
+					message: "Binary files are not supported",
+				},
+			});
+			return null;
+		}
+
+		const content = await fs.readFile(resolved, "utf-8");
+		return { content, stat };
+	} catch (err) {
+		if (isNotFoundError(err)) {
+			res.status(404).json({
+				error: { code: "NOT_FOUND", message: "File not found" },
+			});
+			return null;
+		}
+		throw err;
+	}
 }
 
 export function fileRoutes(reposRoot: string): Router {
@@ -219,54 +279,88 @@ export function fileRoutes(reposRoot: string): Router {
 			return;
 		}
 
-		try {
-			const stat = await fs.stat(resolved);
+		const fileInfo = await readTextFile(resolved, res);
+		if (!fileInfo) return;
 
-			if (stat.isDirectory()) {
-				res.status(400).json({
-					error: {
-						code: "IS_DIRECTORY",
-						message: "The specified path is a directory, not a file",
-					},
-				});
-				return;
-			}
+		res.setHeader(FILE_MTIME_HEADER, String(fileInfo.stat.mtimeMs));
+		res.type("text/plain").send(fileInfo.content);
+	});
 
-			if (stat.size > MAX_FILE_SIZE) {
-				res.status(413).json({
-					error: {
-						code: "FILE_TOO_LARGE",
-						message: `File exceeds maximum size of ${MAX_FILE_SIZE / (1024 * 1024)} MB`,
-					},
-				});
-				return;
-			}
+	// PUT /api/files/content?repo=<name>&path=<file>
+	router.put("/content", async (req, res) => {
+		const workingDir = await requireRepo(reposRoot, req, res);
+		if (!workingDir) return;
 
-			if (await isBinaryFile(resolved)) {
-				res.status(415).json({
-					error: {
-						code: "BINARY_FILE",
-						message: "Binary files are not supported",
-					},
-				});
-				return;
-			}
-
-			const content = await fs.readFile(resolved, "utf-8");
-			res.type("text/plain").send(content);
-		} catch (err) {
-			if (
-				err instanceof Error &&
-				"code" in err &&
-				(err as NodeJS.ErrnoException).code === "ENOENT"
-			) {
-				res.status(404).json({
-					error: { code: "NOT_FOUND", message: "File not found" },
-				});
-				return;
-			}
-			throw err;
+		const requestedPath = req.query.path as string;
+		if (!requestedPath) {
+			res.status(400).json({
+				error: { code: "MISSING_PATH", message: "path parameter is required" },
+			});
+			return;
 		}
+
+		const { content, expectedMtimeMs } = req.body ?? {};
+		if (typeof content !== "string") {
+			res.status(400).json({
+				error: {
+					code: "INVALID_CONTENT",
+					message: "content must be a string",
+				},
+			});
+			return;
+		}
+
+		if (
+			typeof expectedMtimeMs !== "number" ||
+			!Number.isFinite(expectedMtimeMs)
+		) {
+			res.status(400).json({
+				error: {
+					code: "INVALID_MTIME",
+					message: "expectedMtimeMs must be a number",
+				},
+			});
+			return;
+		}
+
+		if (Buffer.byteLength(content, "utf-8") > MAX_FILE_SIZE) {
+			res.status(413).json({
+				error: {
+					code: "FILE_TOO_LARGE",
+					message: `File exceeds maximum size of ${MAX_FILE_SIZE / (1024 * 1024)} MB`,
+				},
+			});
+			return;
+		}
+
+		const resolved = resolveSafePath(workingDir, requestedPath);
+
+		if (!resolved) {
+			res.status(403).json({
+				error: {
+					code: "PATH_FORBIDDEN",
+					message: "Path escapes the working directory",
+				},
+			});
+			return;
+		}
+
+		const fileInfo = await readTextFile(resolved, res);
+		if (!fileInfo) return;
+
+		if (fileInfo.stat.mtimeMs !== expectedMtimeMs) {
+			res.status(409).json({
+				error: {
+					code: "FILE_MODIFIED",
+					message: "File changed on disk since it was loaded",
+				},
+			});
+			return;
+		}
+
+		await fs.writeFile(resolved, content, "utf-8");
+		const updatedStat = await fs.stat(resolved);
+		res.json({ mtimeMs: updatedStat.mtimeMs });
 	});
 
 	return router;
