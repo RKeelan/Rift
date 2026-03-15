@@ -5,8 +5,8 @@
   "workspaces": ["shared", "server", "client", "cli"],
   "scripts": {
     "dev": "concurrently -n server,client -c blue,green \"bun run --filter server dev\" \"bun run --filter client dev\"",
-    "prod": "BASE_NAME=rift bun run build && BASE_NAME=rift bun run --filter server dev",
-    "tailscale": "tailscale serve --bg 3000",
+    "prod": "bun run build && bun run --filter server dev",
+    "tailscale": "tailscale serve --bg 13000",
     "build": "bun run --filter shared build && bun run --filter server build && bun run --filter client build && bun run --filter cli build",
     "lint": "biome lint .",
     "format:check": "biome format .",

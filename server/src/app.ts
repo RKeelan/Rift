@@ -10,7 +10,6 @@ import { repoRoutes } from "./routes/repos.js";
 export interface AppConfig {
 	port: number;
 	reposRoot: string;
-	basePath: string;
 }
 
 function looksLikeWindowsPath(input: string): boolean {
@@ -51,12 +50,10 @@ export function inferReposRoot(cwd: string, homeDir: string): string {
 }
 
 export function getConfig(): AppConfig {
-	const baseName = process.env.BASE_NAME;
 	const homeDir = os.homedir();
 	return {
-		port: Number(process.env.PORT) || 3000,
+		port: Number(process.env.PORT) || 13000,
 		reposRoot: process.env.REPOS_ROOT || inferReposRoot(process.cwd(), homeDir),
-		basePath: baseName ? `/${baseName}` : "",
 	};
 }
 
@@ -120,15 +117,7 @@ export function createApp(config: AppConfig): express.Express {
 		res.sendFile(path.join(clientDist, "index.html"));
 	});
 
-	// Mount router at base path (e.g. "/rift" or "/" for dev)
-	app.use(config.basePath || "/", router);
-
-	// Redirect root to base path for convenience
-	if (config.basePath) {
-		app.get("/", (_req, res) => {
-			res.redirect(config.basePath);
-		});
-	}
+	app.use("/", router);
 
 	// Catch-all error handler
 	app.use(
@@ -138,6 +127,16 @@ export function createApp(config: AppConfig): express.Express {
 			res: express.Response,
 			_next: express.NextFunction,
 		) => {
+			if ((err as Error & { type?: string }).type === "entity.too.large") {
+				res.status(413).json({
+					error: {
+						code: "FILE_TOO_LARGE",
+						message: "File exceeds maximum size of 1 MB",
+					},
+				});
+				return;
+			}
+
 			res.status(500).json({
 				error: { code: "INTERNAL_ERROR", message: err.message },
 			});
