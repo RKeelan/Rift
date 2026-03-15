@@ -15,7 +15,6 @@ function makeConfig(reposRoot: string): AppConfig {
 	return {
 		port: 3000,
 		reposRoot,
-		basePath: "",
 	};
 }
 
