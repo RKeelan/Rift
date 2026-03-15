@@ -14,7 +14,6 @@ function makeConfig(overrides?: Partial<AppConfig>): AppConfig {
 	return {
 		port: 3000,
 		reposRoot,
-		basePath: "",
 		...overrides,
 	};
 }
@@ -35,6 +34,7 @@ beforeAll(async () => {
 
 	await fs.writeFile(path.join(repoDir, "alpha.txt"), "Hello, alpha!");
 	await fs.writeFile(path.join(repoDir, "beta.ts"), "const x = 42;");
+	await fs.writeFile(path.join(repoDir, "editable.txt"), "Original text\n");
 	await fs.mkdir(path.join(repoDir, "gamma"));
 	await fs.writeFile(path.join(repoDir, "gamma", "nested.txt"), "Nested file");
 	await fs.mkdir(path.join(repoDir, "delta"));
@@ -266,6 +266,7 @@ describe("GET /api/files/content", () => {
 
 		expect(res.status).toBe(200);
 		expect(res.headers["content-type"]).toMatch(/text\/plain/);
+		expect(Number(res.headers["x-file-mtime-ms"])).toBeGreaterThan(0);
 		expect(res.text).toBe("Hello, alpha!");
 	});
 
@@ -355,6 +356,88 @@ describe("GET /api/files/content (oversized file)", () => {
 		const res = await supertest(bigFileApp).get(
 			"/api/files/content?repo=big-file-repo&path=large.txt",
 		);
+
+		expect(res.status).toBe(413);
+		expect(res.body.error.code).toBe("FILE_TOO_LARGE");
+	});
+});
+
+describe("PUT /api/files/content", () => {
+	test("writes updated text content", async () => {
+		const initialStat = await fs.stat(path.join(repoDir, "editable.txt"));
+
+		const res = await supertest(app)
+			.put(`/api/files/content?repo=${repoName}&path=editable.txt`)
+			.send({
+				content: "Updated text\n",
+				expectedMtimeMs: initialStat.mtimeMs,
+			});
+
+		expect(res.status).toBe(200);
+		expect(typeof res.body.mtimeMs).toBe("number");
+
+		const saved = await fs.readFile(
+			path.join(repoDir, "editable.txt"),
+			"utf-8",
+		);
+		expect(saved).toBe("Updated text\n");
+	});
+
+	test("returns 409 when the file changed after load", async () => {
+		const filePath = path.join(repoDir, "editable.txt");
+		await fs.writeFile(filePath, "Conflict base\n");
+		const initialStat = await fs.stat(filePath);
+
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		await fs.writeFile(filePath, "Newer content\n");
+
+		const res = await supertest(app)
+			.put(`/api/files/content?repo=${repoName}&path=editable.txt`)
+			.send({
+				content: "Stale write\n",
+				expectedMtimeMs: initialStat.mtimeMs,
+			});
+
+		expect(res.status).toBe(409);
+		expect(res.body.error.code).toBe("FILE_MODIFIED");
+
+		const saved = await fs.readFile(filePath, "utf-8");
+		expect(saved).toBe("Newer content\n");
+	});
+
+	test("returns 400 when content is missing", async () => {
+		const initialStat = await fs.stat(path.join(repoDir, "editable.txt"));
+
+		const res = await supertest(app)
+			.put(`/api/files/content?repo=${repoName}&path=editable.txt`)
+			.send({ expectedMtimeMs: initialStat.mtimeMs });
+
+		expect(res.status).toBe(400);
+		expect(res.body.error.code).toBe("INVALID_CONTENT");
+	});
+
+	test("returns 404 for nonexistent file", async () => {
+		const res = await supertest(app)
+			.put(`/api/files/content?repo=${repoName}&path=missing.txt`)
+			.send({
+				content: "Hello\n",
+				expectedMtimeMs: 1,
+			});
+
+		expect(res.status).toBe(404);
+		expect(res.body.error.code).toBe("NOT_FOUND");
+	});
+
+	test("returns 413 when the updated content exceeds 1 MB", async () => {
+		const initialStat = await fs.stat(path.join(repoDir, "editable.txt"));
+		const tooLarge = "x".repeat(1024 * 1024 + 1);
+
+		const res = await supertest(app)
+			.put(`/api/files/content?repo=${repoName}&path=editable.txt`)
+			.send({
+				content: tooLarge,
+				expectedMtimeMs: initialStat.mtimeMs,
+			});
 
 		expect(res.status).toBe(413);
 		expect(res.body.error.code).toBe("FILE_TOO_LARGE");

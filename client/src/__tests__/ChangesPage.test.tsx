@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, mock, test } from "bun:test";
 import {
+	act,
 	cleanup,
 	fireEvent,
 	render,
@@ -87,7 +88,8 @@ function mockFetchForChanges(
 	options?: {
 		notGitRepo?: boolean;
 		diff?: { path: string; diff: string; truncated: boolean };
-		fileContent?: { path: string; content: string };
+		baseContent?: { path: string; content: string; staged?: boolean };
+		fileContent?: { path: string; content: string; mtimeMs?: number };
 	},
 ) {
 	globalThis.fetch = mock((input: string | URL | Request) => {
@@ -145,17 +147,29 @@ function mockFetchForChanges(
 			);
 		}
 
-		if (url.includes("/api/files/content")) {
-			if (options?.fileContent) {
+		if (url.includes("/api/git/base-content")) {
+			if (options?.baseContent) {
 				return Promise.resolve(
-					new Response(options.fileContent.content, {
+					new Response(options.baseContent.content, {
 						status: 200,
 						headers: { "Content-Type": "text/plain" },
 					}),
 				);
 			}
 
-			return Promise.resolve(new Response("", { status: 200 }));
+			return Promise.resolve(new Response("Not found", { status: 404 }));
+		}
+
+		if (url.includes("/api/files/content") && options?.fileContent) {
+			return Promise.resolve(
+				new Response(options.fileContent.content, {
+					status: 200,
+					headers: {
+						"Content-Type": "text/plain",
+						"x-file-mtime-ms": String(options.fileContent.mtimeMs ?? 1),
+					},
+				}),
+			);
 		}
 
 		return Promise.resolve(new Response("Not found", { status: 404 }));
@@ -291,7 +305,7 @@ describe("ChangesPage", () => {
 		const diffContent = "--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new";
 
 		mockFetchForChanges(
-			[{ path: "file.ts", status: "modified", staged: false }],
+			[{ path: "file.ts", status: "modified", staged: true }],
 			{
 				diff: {
 					path: "file.ts",
@@ -354,6 +368,13 @@ describe("ChangesPage", () => {
 		fireEvent.click(container.querySelector(".changes-file-entry") as Element);
 
 		await waitFor(() => {
+			expect(screen.getByRole("button", { name: "Show diff" })).not.toBeNull();
+			expect(screen.getByRole("button", { name: "Save" })).not.toBeNull();
+		});
+
+		fireEvent.click(screen.getByRole("button", { name: "Show diff" }));
+
+		await waitFor(() => {
 			const diffViewer = container.querySelector(".diff-viewer");
 			expect(diffViewer).not.toBeNull();
 			expect(diffViewer?.textContent).toContain("- draft line 1");
@@ -395,10 +416,198 @@ describe("ChangesPage", () => {
 		expect(label?.textContent).toBe("staged");
 	});
 
+	test("opens editable files directly in the editor", async () => {
+		mockFetchForChanges(
+			[{ path: "src/utils.ts", status: "modified", staged: false }],
+			{
+				baseContent: {
+					path: "src/utils.ts",
+					content: "export const value = 0;\n",
+				},
+				diff: {
+					path: "src/utils.ts",
+					diff: "@@ -1 +1 @@\n-export const value = 0;\n+export const value = 1;\n",
+					truncated: false,
+				},
+				fileContent: {
+					path: "src/utils.ts",
+					content: "export const value = 1;\n",
+				},
+			},
+		);
+
+		const { container } = renderChangesPage();
+
+		await waitFor(() => {
+			expect(screen.getByText("src/utils.ts")).not.toBeNull();
+		});
+
+		await act(async () => {
+			fireEvent.click(screen.getByText("src/utils.ts"));
+		});
+
+		await waitFor(() => {
+			expect(screen.getByRole("button", { name: "Show diff" })).not.toBeNull();
+			expect(screen.getByRole("button", { name: "Save" })).not.toBeNull();
+			expect(screen.queryByRole("button", { name: "Show file" })).toBeNull();
+		});
+
+		await waitFor(() => {
+			expect(container.querySelector(".cm-changedLine--added")).not.toBeNull();
+		});
+
+		await waitFor(() => {
+			const deletedLines = Array.from(
+				container.querySelectorAll(".cm-deletedChunkLine"),
+			).map((element) => element.textContent ?? "");
+			expect(
+				deletedLines.some((line) => line.includes("export const value = 0;")),
+			).toBe(true);
+		});
+	});
+
+	test("shows deleted unstaged lines in the editor view", async () => {
+		const deletedLine =
+			"bun run tailscale && REPOS_ROOT=/path/to/repos bun run prod";
+		mockFetchForChanges(
+			[{ path: "README.md", status: "modified", staged: false }],
+			{
+				baseContent: {
+					path: "README.md",
+					content: `Set \`REPOS_ROOT\` explicitly for production in the same way:\n\n${deletedLine}\n\`\`\`\n`,
+				},
+				diff: {
+					path: "README.md",
+					diff: `@@ -1,3 +1,2 @@\n Set \`REPOS_ROOT\` explicitly for production in the same way:\n-\n-${deletedLine}\n \`\`\`\n`,
+					truncated: false,
+				},
+				fileContent: {
+					path: "README.md",
+					content:
+						"Set `REPOS_ROOT` explicitly for production in the same way:\n```\n",
+				},
+			},
+		);
+
+		const { container } = renderChangesPage();
+
+		await waitFor(() => {
+			expect(screen.getByText("README.md")).not.toBeNull();
+		});
+
+		await act(async () => {
+			fireEvent.click(screen.getByText("README.md"));
+		});
+
+		await waitFor(() => {
+			expect(screen.getByRole("button", { name: "Show diff" })).not.toBeNull();
+		});
+
+		await waitFor(() => {
+			const deletedLines = Array.from(
+				container.querySelectorAll(".cm-deletedChunkLine"),
+			).map((element) => element.textContent ?? "");
+			expect(deletedLines.some((line) => line.includes(deletedLine))).toBe(
+				true,
+			);
+		});
+	});
+
+	test("keeps staged files in diff view", async () => {
+		mockFetchForChanges(
+			[{ path: "src/utils.ts", status: "modified", staged: true }],
+			{
+				diff: {
+					path: "src/utils.ts",
+					diff: "some diff",
+					truncated: false,
+				},
+			},
+		);
+
+		renderChangesPage();
+
+		await waitFor(() => {
+			expect(screen.getByText("src/utils.ts")).not.toBeNull();
+		});
+
+		await act(async () => {
+			fireEvent.click(screen.getByText("src/utils.ts"));
+		});
+
+		await waitFor(() => {
+			expect(screen.queryByRole("button", { name: "Show diff" })).toBeNull();
+			expect(screen.queryByRole("button", { name: "Show file" })).toBeNull();
+			expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
+		});
+	});
+
+	test("switches between file and diff views for editable files", async () => {
+		mockFetchForChanges(
+			[{ path: "src/utils.ts", status: "modified", staged: false }],
+			{
+				baseContent: {
+					path: "src/utils.ts",
+					content: "export const value = 0;\n",
+				},
+				diff: {
+					path: "src/utils.ts",
+					diff: "some diff",
+					truncated: false,
+				},
+				fileContent: {
+					path: "src/utils.ts",
+					content: "export const value = 1;\n",
+				},
+			},
+		);
+
+		const { container } = renderChangesPage();
+
+		await waitFor(() => {
+			expect(screen.getByText("src/utils.ts")).not.toBeNull();
+		});
+
+		await act(async () => {
+			fireEvent.click(screen.getByText("src/utils.ts"));
+		});
+
+		await waitFor(() => {
+			expect(screen.getByRole("button", { name: "Show diff" })).not.toBeNull();
+			expect(screen.getByRole("button", { name: "Save" })).not.toBeNull();
+		});
+
+		await act(async () => {
+			fireEvent.click(screen.getByRole("button", { name: "Show diff" }));
+		});
+
+		await waitFor(() => {
+			expect(screen.getByRole("button", { name: "Show file" })).not.toBeNull();
+			expect(container.querySelector(".diff-viewer")).not.toBeNull();
+		});
+
+		await act(async () => {
+			fireEvent.click(screen.getByRole("button", { name: "Show file" }));
+		});
+
+		await waitFor(() => {
+			expect(screen.getByRole("button", { name: "Show diff" })).not.toBeNull();
+			expect(screen.getByRole("button", { name: "Save" })).not.toBeNull();
+		});
+
+		expect(
+			container.querySelector(".changes-editor-note")?.textContent,
+		).toContain("working tree file");
+	});
+
 	test("back button returns to changes list from diff view", async () => {
 		mockFetchForChanges(
 			[{ path: "app.ts", status: "modified", staged: false }],
 			{
+				baseContent: {
+					path: "app.ts",
+					content: "previous\n",
+				},
 				diff: {
 					path: "app.ts",
 					diff: "diff content",
@@ -435,6 +644,10 @@ describe("ChangesPage", () => {
 		mockFetchForChanges(
 			[{ path: "app.ts", status: "modified", staged: false }],
 			{
+				baseContent: {
+					path: "app.ts",
+					content: "previous\n",
+				},
 				diff: {
 					path: "app.ts",
 					diff: "diff content",
@@ -500,6 +713,15 @@ describe("ChangesPage", () => {
 				);
 			}
 
+			if (url.includes("/api/git/base-content")) {
+				return Promise.resolve(
+					new Response("previous\n", {
+						status: 200,
+						headers: { "Content-Type": "text/plain" },
+					}),
+				);
+			}
+
 			return Promise.resolve(new Response("Not found", { status: 404 }));
 		}) as typeof fetch;
 
@@ -512,14 +734,21 @@ describe("ChangesPage", () => {
 		fireEvent.click(container.querySelector(".changes-file-entry") as Element);
 
 		await waitFor(() => {
-			expect(container.querySelector(".changes-diff-view")).not.toBeNull();
+			expect(screen.getByRole("button", { name: "Show diff" })).not.toBeNull();
 			expect(diffRequests).toBe(1);
+		});
+
+		fireEvent.click(screen.getByRole("button", { name: "Show diff" }));
+
+		await waitFor(() => {
+			expect(container.querySelector(".diff-viewer")).not.toBeNull();
+			expect(diffRequests).toBe(2);
 		});
 
 		fireEvent(document, new Event("visibilitychange"));
 
 		await waitFor(() => {
-			expect(diffRequests).toBe(1);
+			expect(diffRequests).toBe(2);
 		});
 	});
 

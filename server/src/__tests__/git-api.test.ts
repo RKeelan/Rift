@@ -12,7 +12,6 @@ function makeConfig(reposRoot: string): AppConfig {
 	return {
 		port: 3000,
 		reposRoot,
-		basePath: "",
 	};
 }
 
@@ -317,6 +316,83 @@ describe("GET /api/git/diff", () => {
 	test("returns 403 for encoded path traversal", async () => {
 		const res = await supertest(app).get(
 			`/api/git/diff?repo=${repoName}&path=subdir/../../secret`,
+		);
+
+		expect(res.status).toBe(403);
+		expect(res.body.error.code).toBe("PATH_FORBIDDEN");
+	});
+});
+
+describe("GET /api/git/base-content", () => {
+	let reposRoot: string;
+	let repoDir: string;
+	let app: ReturnType<typeof createApp>;
+
+	beforeAll(async () => {
+		reposRoot = await fs.mkdtemp(
+			path.join(os.tmpdir(), "rift-git-base-content-"),
+		);
+		repoDir = path.join(reposRoot, repoName);
+		await fs.mkdir(repoDir);
+
+		execSync("git init", { cwd: repoDir });
+		execSync("git config user.email 'test@test.com'", { cwd: repoDir });
+		execSync("git config user.name 'Test'", { cwd: repoDir });
+
+		await fs.writeFile(path.join(repoDir, "file.txt"), "original\n");
+		execSync("git add file.txt", { cwd: repoDir });
+		execSync('git commit -m "initial"', { cwd: repoDir });
+
+		app = createApp(makeConfig(reposRoot));
+	});
+
+	afterAll(async () => {
+		await fs.rm(reposRoot, { recursive: true, force: true });
+	});
+
+	test("returns HEAD content for staged comparisons", async () => {
+		await fs.writeFile(path.join(repoDir, "file.txt"), "staged change\n");
+		execSync("git add file.txt", { cwd: repoDir });
+
+		const res = await supertest(app).get(
+			`/api/git/base-content?repo=${repoName}&path=file.txt&staged=true`,
+		);
+
+		expect(res.status).toBe(200);
+		expect(res.text).toBe("original\n");
+
+		execSync("git reset HEAD file.txt", { cwd: repoDir });
+		execSync("git checkout -- file.txt", { cwd: repoDir });
+	});
+
+	test("returns HEAD content for unstaged comparisons", async () => {
+		await fs.writeFile(path.join(repoDir, "file.txt"), "staged change\n");
+		execSync("git add file.txt", { cwd: repoDir });
+		await fs.writeFile(path.join(repoDir, "file.txt"), "working tree change\n");
+
+		const res = await supertest(app).get(
+			`/api/git/base-content?repo=${repoName}&path=file.txt&staged=false`,
+		);
+
+		expect(res.status).toBe(200);
+		expect(res.text).toBe("original\n");
+
+		execSync("git reset HEAD file.txt", { cwd: repoDir });
+		execSync("git checkout -- file.txt", { cwd: repoDir });
+	});
+
+	test("returns 400 when path parameter is missing", async () => {
+		const res = await supertest(app).get(
+			`/api/git/base-content?repo=${repoName}`,
+		);
+
+		expect(res.status).toBe(400);
+		expect(res.body.error.code).toBe("MISSING_PATH");
+	});
+
+	test("returns 403 for path traversal", async () => {
+		const res = await supertest(app).get(
+			`/api/git/base-content?repo=${repoName}&path=../secret.txt`,
 		);
 
 		expect(res.status).toBe(403);
