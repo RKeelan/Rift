@@ -52,13 +52,13 @@ export default defineConfig({
 						purpose: "any",
 					},
 					{
-						src: `${base}icon-192-maskable.png`,
+						src: "/icon-192-maskable.png",
 						sizes: "192x192",
 						type: "image/png",
 						purpose: "maskable",
 					},
 					{
-						src: `${base}icon-512-maskable.png`,
+						src: "/icon-512-maskable.png",
 						sizes: "512x512",
 						type: "image/png",
 						purpose: "maskable",
