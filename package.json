@@ -13,8 +13,8 @@
     "test": "bun test --cwd server && bun test --cwd client && bun test --cwd cli"
   },
   "devDependencies": {
-    "@biomejs/biome": "^1.9.0",
+    "@biomejs/biome": "^2.4.9",
     "concurrently": "^9.0.0",
-    "typescript": "^5.6.0"
+    "typescript": "^6.0.2"
   }
 }
