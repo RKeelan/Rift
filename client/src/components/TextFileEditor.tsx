@@ -57,10 +57,6 @@ function getDiffDecorations(diff: string): ChangeDecorationsData {
 			return;
 		}
 
-		const modifiedCount = Math.min(
-			pendingDeletedLines.length,
-			pendingInsertedLines.length,
-		);
 		for (let index = 0; index < pendingInsertedLines.length; index += 1) {
 			highlights.set(nextNewLine + index, "added");
 		}

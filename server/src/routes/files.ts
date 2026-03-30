@@ -41,7 +41,9 @@ async function getIgnoredPaths(
 
 	try {
 		const result = await git.checkIgnore(entries);
-		for (const entry of result) {
+		for (const raw of result) {
+			// Normalise to forward slashes so Windows backslashes match
+			const entry = raw.replaceAll("\\", "/");
 			// git may return paths with or without trailing slash;
 			// add both forms so the filter matches regardless
 			ignored.add(entry);
@@ -201,7 +203,10 @@ export function fileRoutes(reposRoot: string): Router {
 				const entryPath = path.join(resolved, dirent.name);
 
 				// Build relative path from working dir for gitignore check
-				const relPath = path.relative(workingDir, entryPath);
+				// Normalise to forward slashes so git check-ignore matches on Windows
+				const relPath = path
+					.relative(workingDir, entryPath)
+					.replaceAll("\\", "/");
 				relativePaths.push(entryType === "directory" ? `${relPath}/` : relPath);
 
 				let size = 0;

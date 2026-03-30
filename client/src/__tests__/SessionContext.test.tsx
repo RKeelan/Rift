@@ -1,6 +1,10 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { act, cleanup, render, screen } from "@testing-library/react";
 import { SessionProvider, useSession } from "../contexts/SessionContext.tsx";
+
+beforeEach(() => {
+	globalThis.localStorage.clear();
+});
 
 afterEach(() => {
 	cleanup();

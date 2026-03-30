@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render } from "@testing-library/react";
 import { DiffViewer, containsUnifiedDiff } from "../components/DiffViewer.tsx";
 
 afterEach(cleanup);
