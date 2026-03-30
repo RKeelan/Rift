@@ -8,7 +8,7 @@ describe("inferReposRoot", () => {
 			"/home/user/src/rkeelan/rift",
 			"/home/user",
 		);
-		expect(reposRoot).toBe(path.join("/home/user", "src"));
+		expect(reposRoot).toBe(path.posix.join("/home/user", "src"));
 	});
 
 	test("infers a Windows src directory", () => {
@@ -24,7 +24,7 @@ describe("inferReposRoot", () => {
 			"/home/user/Source/rkeelan/rift",
 			"/home/user",
 		);
-		expect(reposRoot).toBe(path.join("/home/user", "Source"));
+		expect(reposRoot).toBe(path.posix.join("/home/user", "Source"));
 	});
 
 	test("supports repos directories", () => {
@@ -32,7 +32,7 @@ describe("inferReposRoot", () => {
 			"/home/user/work/repos/rkeelan/rift",
 			"/home/user",
 		);
-		expect(reposRoot).toBe(path.join("/home/user", "work", "repos"));
+		expect(reposRoot).toBe(path.posix.join("/home/user", "work", "repos"));
 	});
 
 	test("uses the first matching source directory name", () => {
@@ -40,7 +40,7 @@ describe("inferReposRoot", () => {
 			"/home/user/src/archive/repos/rkeelan/rift",
 			"/home/user",
 		);
-		expect(reposRoot).toBe(path.join("/home/user", "src"));
+		expect(reposRoot).toBe(path.posix.join("/home/user", "src"));
 	});
 
 	test("falls back to the home directory when cwd is outside home", () => {

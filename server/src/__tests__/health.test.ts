@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import supertest from "supertest";
 import { type AppConfig, createApp } from "../app.js";
 
@@ -25,15 +27,11 @@ describe("GET /api/health", () => {
 	});
 
 	test("reports gitRepo true when repo is a git repository", async () => {
-		// The project root (two levels up from server/) should be a git repo
-		const projectRoot = new URL("../../..", import.meta.url).pathname.replace(
-			/\/$/,
-			"",
-		);
-		// reposRoot is the parent of the repo directory
-		const parts = projectRoot.split("/");
-		const repoName = parts.pop() ?? "";
-		const reposRoot = parts.join("/");
+		// The project root (three levels up from server/src/__tests__/) should be a git repo
+		const thisFile = fileURLToPath(import.meta.url);
+		const projectRoot = path.resolve(thisFile, "../../../..");
+		const repoName = path.basename(projectRoot);
+		const reposRoot = path.dirname(projectRoot);
 		const app = createApp(makeConfig({ reposRoot }));
 		const response = await supertest(app).get(`/api/health?repo=${repoName}`);
 		expect(response.status).toBe(200);

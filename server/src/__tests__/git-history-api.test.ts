@@ -33,8 +33,8 @@ describe("GET /api/git/log", () => {
 		await fs.mkdir(repoDir);
 
 		execSync("git init", { cwd: repoDir });
-		execSync("git config user.email 'test@test.com'", { cwd: repoDir });
-		execSync("git config user.name 'Test Author'", { cwd: repoDir });
+		execSync('git config user.email "test@test.com"', { cwd: repoDir });
+		execSync('git config user.name "Test Author"', { cwd: repoDir });
 
 		// Create 5 commits for pagination testing
 		for (let i = 1; i <= 5; i++) {
@@ -148,8 +148,8 @@ describe("GET /api/git/commit/:hash", () => {
 		await fs.mkdir(repoDir);
 
 		execSync("git init", { cwd: repoDir });
-		execSync("git config user.email 'test@test.com'", { cwd: repoDir });
-		execSync("git config user.name 'Test Author'", { cwd: repoDir });
+		execSync('git config user.email "test@test.com"', { cwd: repoDir });
+		execSync('git config user.name "Test Author"', { cwd: repoDir });
 
 		// First commit: add a file
 		await fs.writeFile(path.join(repoDir, "alpha.txt"), "alpha content\n");

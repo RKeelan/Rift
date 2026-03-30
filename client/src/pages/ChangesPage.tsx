@@ -49,10 +49,6 @@ function StatusBadge({ status }: { status: FileStatus }) {
 	);
 }
 
-function canEditEntry(entry: Pick<StatusEntry, "staged" | "status">): boolean {
-	return !entry.staged && entry.status !== "deleted";
-}
-
 export function ChangesPage() {
 	const { showError } = useErrorBanner();
 	const { repoName } = useSession();

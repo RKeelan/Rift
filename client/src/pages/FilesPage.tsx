@@ -36,7 +36,11 @@ function FileViewer({
 	filePath,
 	onNavigate,
 	repo,
-}: { filePath: string; onNavigate: (dir: string) => void; repo: string }) {
+}: {
+	filePath: string;
+	onNavigate: (dir: string) => void;
+	repo: string;
+}) {
 	return (
 		<div className="file-viewer">
 			<header className="files-header">
@@ -64,7 +68,10 @@ function FileViewer({
 function Breadcrumbs({
 	path,
 	onNavigate,
-}: { path: string; onNavigate: (dir: string) => void }) {
+}: {
+	path: string;
+	onNavigate: (dir: string) => void;
+}) {
 	const parts = path.split("/").filter(Boolean);
 
 	return (

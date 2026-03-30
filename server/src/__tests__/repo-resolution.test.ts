@@ -155,7 +155,7 @@ describe("repo resolution across endpoints", () => {
 	// -----------------------------------------------------------------------
 
 	test("returns 403 for absolute path in repo across all endpoints", async () => {
-		for (const { endpoint, label } of absolutePathEndpoints()) {
+		for (const { endpoint } of absolutePathEndpoints()) {
 			const res = await supertest(app).get(endpoint);
 			expect(res.status).toBe(403);
 			expect(res.body.error.code).toBe("REPO_FORBIDDEN");
@@ -189,7 +189,7 @@ describe("repo resolution across endpoints", () => {
 	}
 
 	test("returns 403 for .. in repo across all endpoints", async () => {
-		for (const { endpoint, label } of traversalEndpoints()) {
+		for (const { endpoint } of traversalEndpoints()) {
 			const res = await supertest(app).get(endpoint);
 			expect(res.status).toBe(403);
 			expect(res.body.error.code).toBe("REPO_FORBIDDEN");
@@ -216,7 +216,7 @@ describe("repo resolution across endpoints", () => {
 	}
 
 	test("returns 400 when repo parameter is missing across git endpoints", async () => {
-		for (const { endpoint, label } of missingRepoEndpoints()) {
+		for (const { endpoint } of missingRepoEndpoints()) {
 			const res = await supertest(app).get(endpoint);
 			expect(res.status).toBe(400);
 			expect(res.body.error.code).toBe("MISSING_REPO");
@@ -257,7 +257,7 @@ describe("repo resolution across endpoints", () => {
 	}
 
 	test("returns 404 for nonexistent repo across all endpoints", async () => {
-		for (const { endpoint, label } of nonexistentRepoEndpoints()) {
+		for (const { endpoint } of nonexistentRepoEndpoints()) {
 			const res = await supertest(app).get(endpoint);
 			expect(res.status).toBe(404);
 			expect(res.body.error.code).toBe("NOT_FOUND");
