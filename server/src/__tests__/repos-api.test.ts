@@ -163,18 +163,27 @@ describe("GET /api/repos", () => {
 			recursive: true,
 		});
 
-		// Create a symlink inside reposRoot pointing to the external repo
-		await fs.symlink(
-			path.join(externalDir, "ext-repo"),
-			path.join(reposRoot, "linked-repo"),
-		);
+		// Create a symlink inside reposRoot pointing to the external repo.
+		// Use "junction" on Windows (works without elevated privileges).
+		const linkPath = path.join(reposRoot, "linked-repo");
+		try {
+			await fs.symlink(
+				path.join(externalDir, "ext-repo"),
+				linkPath,
+				"junction",
+			);
+		} catch {
+			// Symlinks may require elevated privileges; skip gracefully
+			await fs.rm(externalDir, { recursive: true, force: true });
+			return;
+		}
 
 		const res = await supertest(app).get("/api/repos");
 		const names = res.body.repos.map((r: { name: string }) => r.name);
 		expect(names).toContain("linked-repo");
 
-		// Clean up
-		await fs.rm(path.join(reposRoot, "linked-repo"));
+		// Clean up — junctions/symlinks must be unlinked, not rm'd
+		await fs.unlink(linkPath);
 		await fs.rm(externalDir, { recursive: true, force: true });
 	});
 
