@@ -10,12 +10,12 @@
     "start": "bun dist/index.js"
   },
   "dependencies": {
-    "express": "^4.21.0",
-    "simple-git": "^3.27.0"
+    "express": "^5.2.1",
+    "simple-git": "^3.33.0"
   },
   "devDependencies": {
     "@types/express": "^5.0.0",
-    "@types/supertest": "^6.0.0",
+    "@types/supertest": "^7.2.0",
     "supertest": "^7.0.0",
     "tsx": "^4.21.0"
   }
