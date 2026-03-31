@@ -10,6 +10,6 @@
     "build": "tsc -b"
   },
   "dependencies": {
-    "commander": "^13.0.0"
+    "commander": "13.1.0"
   }
 }
