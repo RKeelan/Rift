@@ -9,12 +9,14 @@
     "tailscale": "tailscale serve --bg 13000",
     "build": "bun run --filter shared build && bun run --filter server build && bun run --filter client build && bun run --filter cli build",
     "lint": "biome lint .",
+    "lint:pkg": "npmPkgJsonLint . shared server client cli",
     "format:check": "biome format .",
     "test": "bun test --cwd server && bun test --cwd client && bun test --cwd cli"
   },
   "devDependencies": {
-    "@biomejs/biome": "^2.4.9",
-    "concurrently": "^9.0.0",
-    "typescript": "^5.6.0"
+    "@biomejs/biome": "2.4.9",
+    "concurrently": "9.2.1",
+    "npm-package-json-lint": "10.0.0",
+    "typescript": "5.9.3"
   }
 }
