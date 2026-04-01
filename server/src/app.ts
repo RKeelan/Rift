@@ -106,14 +106,14 @@ export function createApp(config: AppConfig): express.Express {
 	router.use(express.static(clientDist));
 
 	// 404 handler for unmatched API routes
-	router.all("/api/*", (_req, res) => {
+	router.all("/api/*path", (_req, res) => {
 		res.status(404).json({
 			error: { code: "NOT_FOUND", message: "Endpoint not found" },
 		});
 	});
 
 	// SPA fallback: serve index.html for client-side routes
-	router.get("*", (_req, res) => {
+	router.get("*path", (_req, res) => {
 		res.sendFile(path.join(clientDist, "index.html"));
 	});
 
