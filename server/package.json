@@ -11,7 +11,7 @@
   },
   "dependencies": {
     "express": "5.2.1",
-    "simple-git": "3.33.0"
+    "simple-git": "3.35.2"
   },
   "devDependencies": {
     "@types/express": "5.0.6",
