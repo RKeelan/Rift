@@ -43,13 +43,13 @@ describe("inferReposRoot", () => {
 		expect(reposRoot).toBe(path.posix.join("/home/richard", "src"));
 	});
 
-	test("falls back to the home directory when cwd is outside home", () => {
+	test("returns null when cwd is outside home", () => {
 		const reposRoot = inferReposRoot("/work/rift", "/home/richard");
-		expect(reposRoot).toBe("/home/richard");
+		expect(reposRoot).toBeNull();
 	});
 
-	test("falls back to the home directory when cwd is the home directory", () => {
+	test("returns null when cwd is the home directory", () => {
 		const reposRoot = inferReposRoot("/home/richard", "/home/richard");
-		expect(reposRoot).toBe("/home/richard");
+		expect(reposRoot).toBeNull();
 	});
 });
