@@ -166,7 +166,7 @@ export function fileRoutes(reposRoot: string): Router {
 		if (!workingDir) return;
 
 		const requestedPath = (req.query.path as string) || ".";
-		const resolved = resolveSafePath(workingDir, requestedPath);
+		const resolved = await resolveSafePath(workingDir, requestedPath);
 
 		if (!resolved) {
 			res.status(403).json({
@@ -272,7 +272,7 @@ export function fileRoutes(reposRoot: string): Router {
 			return;
 		}
 
-		const resolved = resolveSafePath(workingDir, requestedPath);
+		const resolved = await resolveSafePath(workingDir, requestedPath);
 
 		if (!resolved) {
 			res.status(403).json({
@@ -338,7 +338,7 @@ export function fileRoutes(reposRoot: string): Router {
 			return;
 		}
 
-		const resolved = resolveSafePath(workingDir, requestedPath);
+		const resolved = await resolveSafePath(workingDir, requestedPath);
 
 		if (!resolved) {
 			res.status(403).json({

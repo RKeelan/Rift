@@ -1,11 +1,12 @@
 import { createApp, getConfig } from "./app.js";
 
 const config = getConfig();
+const host = process.env.HOST || "127.0.0.1";
 
 const app = createApp(config);
 
-const server = app.listen(config.port, "0.0.0.0", () => {
-	console.log(`Rift server listening on 0.0.0.0:${config.port}`);
+const server = app.listen(config.port, host, () => {
+	console.log(`Rift server listening on ${host}:${config.port}`);
 	console.log(`Repos root: ${config.reposRoot}`);
 });
 

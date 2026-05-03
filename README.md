@@ -13,7 +13,7 @@ bun run dev
 
 `bun run dev` starts the Express API on port 13000 and the Vite dev server on port 5173. Open the Vite URL (not the Express port) during development.
 
-If `REPOS_ROOT` is unset, Rift infers it from the current working directory. When you run Rift from a checkout under your home directory, it looks for a common source directory name between your home directory and the checkout root, using the first match it finds. The recognised names are `src`, `source`, and `repos`, case-insensitively. If Rift cannot infer a source root that way, it falls back to your home directory.
+If `REPOS_ROOT` is unset, Rift infers it from the current working directory. When you run Rift from a checkout under your home directory, it looks for a common source directory name between your home directory and the checkout root, using the first match it finds. The recognised names are `src`, `source`, and `repos`, case-insensitively. If Rift cannot infer a source root that way, the server refuses to start — set `REPOS_ROOT` explicitly so a misconfigured run does not expose your entire home directory.
 
 Set `REPOS_ROOT` explicitly to override that behaviour:
 
@@ -21,7 +21,13 @@ Set `REPOS_ROOT` explicitly to override that behaviour:
 REPOS_ROOT=/path/to/repos bun run dev
 ```
 
-To serve over Tailscale (e.g. from a desktop to a phone):
+By default the server binds to `127.0.0.1`. To expose it on other interfaces (for example, when fronting it with `tailscale serve`), set `HOST`:
+
+```powershell
+HOST=0.0.0.0 bun run prod
+```
+
+Tailscale's `tailscale serve` command forwards from localhost, so the default `127.0.0.1` binding is sufficient there:
 
 ```powershell
 bun run tailscale && bun run prod

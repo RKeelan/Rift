@@ -18,7 +18,7 @@ function looksLikeWindowsPath(input: string): boolean {
 
 const COMMON_SOURCE_DIR_NAMES = new Set(["src", "source", "repos"]);
 
-export function inferReposRoot(cwd: string, homeDir: string): string {
+export function inferReposRoot(cwd: string, homeDir: string): string | null {
 	const pathImpl =
 		looksLikeWindowsPath(cwd) || looksLikeWindowsPath(homeDir)
 			? path.win32
@@ -46,14 +46,22 @@ export function inferReposRoot(cwd: string, homeDir: string): string {
 		}
 	}
 
-	return resolvedHome;
+	return null;
 }
 
 export function getConfig(): AppConfig {
 	const homeDir = os.homedir();
+	const reposRoot =
+		process.env.REPOS_ROOT || inferReposRoot(process.cwd(), homeDir);
+	if (!reposRoot) {
+		throw new Error(
+			"REPOS_ROOT could not be inferred from the current working directory. " +
+				"Set REPOS_ROOT to the directory that holds your repositories.",
+		);
+	}
 	return {
 		port: Number(process.env.PORT) || 13000,
-		reposRoot: process.env.REPOS_ROOT || inferReposRoot(process.cwd(), homeDir),
+		reposRoot,
 	};
 }
 
@@ -137,8 +145,9 @@ export function createApp(config: AppConfig): express.Express {
 				return;
 			}
 
+			console.error(err);
 			res.status(500).json({
-				error: { code: "INTERNAL_ERROR", message: err.message },
+				error: { code: "INTERNAL_ERROR", message: "Internal server error" },
 			});
 		},
 	);
