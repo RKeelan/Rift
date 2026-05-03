@@ -296,7 +296,7 @@ export function gitRoutes(reposRoot: string): Router {
 		}
 
 		const toplevel = (await git.revparse(["--show-toplevel"])).trim();
-		const resolved = resolveSafePath(toplevel, filePath);
+		const resolved = await resolveSafePath(toplevel, filePath);
 		if (!resolved) {
 			res.status(403).json({
 				error: {
@@ -364,7 +364,7 @@ export function gitRoutes(reposRoot: string): Router {
 		}
 
 		const toplevel = (await git.revparse(["--show-toplevel"])).trim();
-		const resolved = resolveSafePath(toplevel, filePath);
+		const resolved = await resolveSafePath(toplevel, filePath);
 		if (!resolved) {
 			res.status(403).json({
 				error: {
@@ -420,7 +420,7 @@ export function gitRoutes(reposRoot: string): Router {
 		// Validate and resolve against the repo root so git diff finds
 		// the correct file.
 		const toplevel = (await git.revparse(["--show-toplevel"])).trim();
-		const resolved = resolveSafePath(toplevel, filePath);
+		const resolved = await resolveSafePath(toplevel, filePath);
 		if (!resolved) {
 			res.status(403).json({
 				error: {
