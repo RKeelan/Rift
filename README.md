@@ -49,3 +49,30 @@ bun test             # run tests
 bun run lint         # lint with Biome
 bun run format:check # check formatting with Biome
 ```
+
+## Running as a Windows service
+
+The scripts under `scripts\` register the built server as a Windows service via [NSSM](https://nssm.cc). Run the install script as Administrator under your own user account so the API can only touch what you can.
+
+Prerequisites: Bun and NSSM on PATH; (optional) Tailscale signed in.
+
+```powershell
+bun install
+bun run build
+.\scripts\install-windows-service.ps1 -ReposRoot C:\Users\me\Src -LogonUser .\me
+Start-Service Rift
+```
+
+Logs land in `logs\rift.out.log` / `logs\rift.err.log` and rotate at 10 MB. The service binds `127.0.0.1:13000` by default; pass `-BindAddress` and `-Port` to change. Omitting `-LogonUser` falls back to LocalSystem and prints a warning — don't.
+
+To expose it over the tailnet (Tailscale forwards from localhost, so the default bind is fine):
+
+```powershell
+.\scripts\configure-tailscale.ps1
+```
+
+To remove the service:
+
+```powershell
+.\scripts\uninstall-windows-service.ps1
+```

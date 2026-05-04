@@ -4,3 +4,4 @@ dist
 *.tsbuildinfo
 .vscode
 .claude/settings.local.json
+logs
