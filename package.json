@@ -20,7 +20,7 @@
   },
   "devDependencies": {
     "@biomejs/biome": "2.4.16",
-    "concurrently": "10.0.0",
+    "concurrently": "10.0.3",
     "npm-package-json-lint": "10.4.0",
     "typescript": "6.0.3"
   }
