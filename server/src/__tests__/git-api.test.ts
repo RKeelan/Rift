@@ -343,7 +343,12 @@ describe("GET /api/git/base-content", () => {
 		execSync("git config user.name 'Test'", { cwd: repoDir });
 
 		await fs.writeFile(path.join(repoDir, "file.txt"), "original\n");
-		execSync("git add file.txt", { cwd: repoDir });
+		await fs.mkdir(path.join(repoDir, "nested", "deeper"), { recursive: true });
+		await fs.writeFile(
+			path.join(repoDir, "nested", "deeper", "file.txt"),
+			"nested original\n",
+		);
+		execSync("git add file.txt nested", { cwd: repoDir });
 		execSync('git commit -m "initial"', { cwd: repoDir });
 
 		app = createApp(makeConfig(reposRoot));
@@ -368,7 +373,7 @@ describe("GET /api/git/base-content", () => {
 		execSync("git checkout -- file.txt", { cwd: repoDir });
 	});
 
-	test("returns HEAD content for unstaged comparisons", async () => {
+	test("returns index content for unstaged comparisons", async () => {
 		await fs.writeFile(path.join(repoDir, "file.txt"), "staged change\n");
 		execSync("git add file.txt", { cwd: repoDir });
 		await fs.writeFile(path.join(repoDir, "file.txt"), "working tree change\n");
@@ -378,10 +383,53 @@ describe("GET /api/git/base-content", () => {
 		);
 
 		expect(res.status).toBe(200);
-		expect(res.text).toBe("original\n");
+		expect(res.text).toBe("staged change\n");
 
 		execSync("git reset HEAD file.txt", { cwd: repoDir });
 		execSync("git checkout -- file.txt", { cwd: repoDir });
+	});
+
+	test("resolves files inside subdirectories", async () => {
+		const nested = path.join(repoDir, "nested", "deeper", "file.txt");
+		await fs.writeFile(nested, "nested working tree change\n");
+
+		const res = await supertest(app).get(
+			`/api/git/base-content?repo=${repoRef}&path=nested/deeper/file.txt&staged=false`,
+		);
+
+		expect(res.status).toBe(200);
+		expect(res.text).toBe("nested original\n");
+
+		execSync("git checkout -- nested/deeper/file.txt", { cwd: repoDir });
+	});
+
+	test("returns the index version of a file added but not committed", async () => {
+		await fs.writeFile(path.join(repoDir, "added.txt"), "staged addition\n");
+		execSync("git add added.txt", { cwd: repoDir });
+		await fs.writeFile(path.join(repoDir, "added.txt"), "further edits\n");
+
+		const res = await supertest(app).get(
+			`/api/git/base-content?repo=${repoRef}&path=added.txt&staged=false`,
+		);
+
+		expect(res.status).toBe(200);
+		expect(res.text).toBe("staged addition\n");
+
+		execSync("git reset HEAD added.txt", { cwd: repoDir });
+		await fs.rm(path.join(repoDir, "added.txt"));
+	});
+
+	test("returns 404 when the file has no committed or staged version", async () => {
+		await fs.writeFile(path.join(repoDir, "untracked.txt"), "brand new\n");
+
+		const res = await supertest(app).get(
+			`/api/git/base-content?repo=${repoRef}&path=untracked.txt&staged=false`,
+		);
+
+		expect(res.status).toBe(404);
+		expect(res.body.error.code).toBe("NOT_FOUND");
+
+		await fs.rm(path.join(repoDir, "untracked.txt"));
 	});
 
 	test("returns 400 when path parameter is missing", async () => {

@@ -263,6 +263,13 @@ export function ChangesPage() {
 					signal: controller.signal,
 				});
 				if (!res.ok) {
+					// A file with no committed or staged version has no base to
+					// compare against; treat it like an untracked file rather
+					// than failing the edit.
+					if (res.status === 404) {
+						setComparisonContent("");
+						return;
+					}
 					const body = await res.json().catch(() => null);
 					showError(body?.error?.message ?? `Request failed (${res.status})`);
 					return;
