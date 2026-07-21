@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import { Navigate, Route, Routes } from "react-router-dom";
 import { useSession } from "../contexts/SessionContext.tsx";
 import { useGitRepo } from "../hooks/useGitRepo.ts";
@@ -17,7 +18,16 @@ export function SessionShell() {
 }
 
 function SessionRoutes({ repoName }: { repoName: string }) {
-	const { isGitRepo, recheckGitRepo } = useGitRepo(repoName);
+	const { clearRepo } = useSession();
+	const { isGitRepo, repoMissing, recheckGitRepo } = useGitRepo(repoName);
+
+	// A stored repo the server no longer resolves — renamed, deleted, or from an
+	// older name format — would otherwise leave every tab failing to load.
+	useEffect(() => {
+		if (repoMissing) {
+			clearRepo();
+		}
+	}, [repoMissing, clearRepo]);
 
 	const showGitTabs = isGitRepo !== false;
 

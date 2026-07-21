@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import supertest from "supertest";
 import { type AppConfig, createApp } from "../app.js";
-import { resolveRepo } from "../pathUtils.js";
+import { resolveRepo, resolveRepoInRoots } from "../pathUtils.js";
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -14,7 +14,7 @@ import { resolveRepo } from "../pathUtils.js";
 function makeConfig(reposRoot: string): AppConfig {
 	return {
 		port: 3000,
-		reposRoot,
+		roots: [{ label: "root", path: reposRoot }],
 	};
 }
 
@@ -275,7 +275,7 @@ describe("repo resolution across endpoints", () => {
 		await fs.writeFile(path.join(nestedDir, "hello.txt"), "hi");
 
 		const res = await supertest(app).get(
-			"/api/files?repo=org/nested-repo&path=.",
+			"/api/files?repo=root/org/nested-repo&path=.",
 		);
 
 		expect(res.status).toBe(200);
@@ -304,7 +304,7 @@ describe("repo resolution across endpoints", () => {
 	});
 
 	test("health returns gitRepo: true for valid git repo", async () => {
-		const res = await supertest(app).get(`/api/health?repo=${repoName}`);
+		const res = await supertest(app).get(`/api/health?repo=root/${repoName}`);
 		expect(res.status).toBe(200);
 		expect(res.body.status).toBe("ok");
 		expect(res.body.gitRepo).toBe(true);
@@ -312,7 +312,7 @@ describe("repo resolution across endpoints", () => {
 
 	test("health returns gitRepo: false for non-git directory", async () => {
 		await fs.mkdir(path.join(reposRoot, "plain-dir"));
-		const res = await supertest(app).get("/api/health?repo=plain-dir");
+		const res = await supertest(app).get("/api/health?repo=root/plain-dir");
 		expect(res.status).toBe(200);
 		expect(res.body.status).toBe("ok");
 		expect(res.body.gitRepo).toBe(false);
@@ -320,5 +320,74 @@ describe("repo resolution across endpoints", () => {
 			recursive: true,
 			force: true,
 		});
+	});
+});
+
+describe("resolveRepoInRoots", () => {
+	let alphaRoot: string;
+	let betaRoot: string;
+	let roots: { label: string; path: string }[];
+
+	beforeAll(async () => {
+		alphaRoot = await fs.mkdtemp(path.join(os.tmpdir(), "rift-root-alpha-"));
+		betaRoot = await fs.mkdtemp(path.join(os.tmpdir(), "rift-root-beta-"));
+		await fs.mkdir(path.join(alphaRoot, "in-alpha"));
+		await fs.mkdir(path.join(betaRoot, "in-beta"));
+		roots = [
+			{ label: "alpha", path: alphaRoot },
+			{ label: "beta", path: betaRoot },
+		];
+	});
+
+	afterAll(async () => {
+		await fs.rm(alphaRoot, { recursive: true, force: true });
+		await fs.rm(betaRoot, { recursive: true, force: true });
+	});
+
+	test("resolves a repo against the root its label names", async () => {
+		const result = await resolveRepoInRoots(roots, "beta/in-beta");
+		expect(result.ok).toBe(true);
+		if (result.ok) {
+			expect(result.path).toBe(path.join(betaRoot, "in-beta"));
+		}
+	});
+
+	test("accepts backslash-separated names", async () => {
+		const result = await resolveRepoInRoots(roots, "alpha\\in-alpha");
+		expect(result.ok).toBe(true);
+	});
+
+	test("does not find a repo that lives in a different root", async () => {
+		const result = await resolveRepoInRoots(roots, "alpha/in-beta");
+		expect(result).toEqual({ ok: false, reason: "not_found" });
+	});
+
+	test("rejects an unknown root label", async () => {
+		const result = await resolveRepoInRoots(roots, "gamma/in-alpha");
+		expect(result).toEqual({ ok: false, reason: "not_found" });
+	});
+
+	test("rejects traversal out of the named root", async () => {
+		const traversal = `alpha/../${path.basename(betaRoot)}/in-beta`;
+		const result = await resolveRepoInRoots(roots, traversal);
+		expect(result).toEqual({ ok: false, reason: "forbidden" });
+	});
+
+	test("rejects absolute paths", async () => {
+		const result = await resolveRepoInRoots(
+			roots,
+			path.join(betaRoot, "in-beta"),
+		);
+		expect(result.ok).toBe(false);
+	});
+
+	test("rejects an unqualified name", async () => {
+		const result = await resolveRepoInRoots(roots, "in-alpha");
+		expect(result).toEqual({ ok: false, reason: "not_found" });
+	});
+
+	test("rejects a bare root label with no repo", async () => {
+		const result = await resolveRepoInRoots(roots, "alpha/");
+		expect(result).toEqual({ ok: false, reason: "not_found" });
 	});
 });

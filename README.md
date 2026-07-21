@@ -21,6 +21,18 @@ Set `REPOS_ROOT` explicitly to override that behaviour:
 REPOS_ROOT=/path/to/repos bun run dev
 ```
 
+### Multiple roots
+
+`REPOS_ROOT` accepts several directories separated by the platform path delimiter (`;` on Windows, `:` elsewhere):
+
+```powershell
+$env:REPOS_ROOT = "C:\Users\you\Src\you;C:\Users\you\OneDrive\Writing"
+```
+
+Each root is named after its final path segment, and that label qualifies every repo name the API returns — `you/Rift`, `Writing/Coder`. Roots whose last segment collides grow leftward until the labels differ. A repo name always resolves against the single root it names, so one root can never reach into another.
+
+Rift only lists repositories that are immediate children of a root. Point each root directly at a directory of checkouts rather than at a tree containing them; the shallow scan is what keeps large sibling folders, such as photo or archive directories, from being walked on every dashboard load.
+
 By default the server binds to `127.0.0.1`. To expose it on other interfaces (for example, when fronting it with `tailscale serve`), set `HOST`:
 
 ```powershell

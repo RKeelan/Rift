@@ -55,6 +55,38 @@ export type RepoResult =
 	| { ok: true; path: string }
 	| { ok: false; reason: "forbidden" | "not_found" };
 
+export interface RepoRoot {
+	label: string;
+	path: string;
+}
+
+/**
+ * Resolves a root-qualified repo name (`Writing/Coder`) by splitting the
+ * leading root label off and validating the remainder against that root only.
+ * Containment is enforced by `resolveRepo`, so a name can never reach across
+ * roots or escape the one it names.
+ */
+export async function resolveRepoInRoots(
+	roots: RepoRoot[],
+	repoName: string,
+): Promise<RepoResult> {
+	if (!repoName || path.isAbsolute(repoName) || repoName.includes("..")) {
+		return { ok: false, reason: "forbidden" };
+	}
+
+	const separator = repoName.search(/[\\/]/);
+	if (separator === -1) return { ok: false, reason: "not_found" };
+
+	const label = repoName.slice(0, separator);
+	const relative = repoName.slice(separator + 1);
+	if (!relative) return { ok: false, reason: "not_found" };
+
+	const root = roots.find((candidate) => candidate.label === label);
+	if (!root) return { ok: false, reason: "not_found" };
+
+	return resolveRepo(root.path, relative);
+}
+
 /**
  * Resolves a repo name (relative path like "RKeelan/Rift") against `reposRoot`
  * and validates it. Rejects absolute paths, `..` segments, and names that

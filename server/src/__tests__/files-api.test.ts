@@ -8,12 +8,13 @@ import { type AppConfig, createApp } from "../app.js";
 let reposRoot: string;
 let repoDir: string;
 const repoName = "test-repo";
+const repoRef = `root/${repoName}`;
 let app: ReturnType<typeof createApp>;
 
 function makeConfig(overrides?: Partial<AppConfig>): AppConfig {
 	return {
 		port: 3000,
-		reposRoot,
+		roots: [{ label: "root", path: reposRoot }],
 		...overrides,
 	};
 }
@@ -52,7 +53,7 @@ afterAll(async () => {
 
 describe("GET /api/files (directory listing)", () => {
 	test("returns entries sorted: directories first, then alphabetically", async () => {
-		const res = await supertest(app).get(`/api/files?repo=${repoName}`);
+		const res = await supertest(app).get(`/api/files?repo=${repoRef}`);
 
 		expect(res.status).toBe(200);
 		expect(res.body.truncated).toBe(false);
@@ -82,7 +83,7 @@ describe("GET /api/files (directory listing)", () => {
 	});
 
 	test("returns entries with name, type, and size fields", async () => {
-		const res = await supertest(app).get(`/api/files?repo=${repoName}`);
+		const res = await supertest(app).get(`/api/files?repo=${repoRef}`);
 
 		expect(res.status).toBe(200);
 		for (const entry of res.body.entries) {
@@ -94,7 +95,7 @@ describe("GET /api/files (directory listing)", () => {
 
 	test("returns subdirectory contents when path is specified", async () => {
 		const res = await supertest(app).get(
-			`/api/files?repo=${repoName}&path=gamma`,
+			`/api/files?repo=${repoRef}&path=gamma`,
 		);
 
 		expect(res.status).toBe(200);
@@ -105,7 +106,7 @@ describe("GET /api/files (directory listing)", () => {
 
 	test("returns 404 for nonexistent directory", async () => {
 		const res = await supertest(app).get(
-			`/api/files?repo=${repoName}&path=nonexistent`,
+			`/api/files?repo=${repoRef}&path=nonexistent`,
 		);
 
 		expect(res.status).toBe(404);
@@ -114,7 +115,7 @@ describe("GET /api/files (directory listing)", () => {
 
 	test("returns 400 when path points to a file", async () => {
 		const res = await supertest(app).get(
-			`/api/files?repo=${repoName}&path=alpha.txt`,
+			`/api/files?repo=${repoRef}&path=alpha.txt`,
 		);
 
 		expect(res.status).toBe(400);
@@ -122,9 +123,7 @@ describe("GET /api/files (directory listing)", () => {
 	});
 
 	test("returns 403 for path traversal with ../", async () => {
-		const res = await supertest(app).get(
-			`/api/files?repo=${repoName}&path=../`,
-		);
+		const res = await supertest(app).get(`/api/files?repo=${repoRef}&path=../`);
 
 		expect(res.status).toBe(403);
 		expect(res.body.error.code).toBe("PATH_FORBIDDEN");
@@ -132,7 +131,7 @@ describe("GET /api/files (directory listing)", () => {
 
 	test("returns 403 for path traversal with absolute path", async () => {
 		const res = await supertest(app).get(
-			`/api/files?repo=${repoName}&path=/etc`,
+			`/api/files?repo=${repoRef}&path=/etc`,
 		);
 
 		expect(res.status).toBe(403);
@@ -141,7 +140,7 @@ describe("GET /api/files (directory listing)", () => {
 
 	test("returns 403 for encoded path traversal", async () => {
 		const res = await supertest(app).get(
-			`/api/files?repo=${repoName}&path=gamma/../../`,
+			`/api/files?repo=${repoRef}&path=gamma/../../`,
 		);
 
 		expect(res.status).toBe(403);
@@ -187,7 +186,9 @@ describe("GET /api/files (truncation)", () => {
 			promises.push(fs.writeFile(path.join(bigDir, name), `content ${i}`));
 		}
 		await Promise.all(promises);
-		bigApp = createApp(makeConfig({ reposRoot: bigReposRoot }));
+		bigApp = createApp(
+			makeConfig({ roots: [{ label: "root", path: bigReposRoot }] }),
+		);
 	});
 
 	afterAll(async () => {
@@ -195,7 +196,7 @@ describe("GET /api/files (truncation)", () => {
 	});
 
 	test("truncates to 1,000 entries and sets truncated flag", async () => {
-		const res = await supertest(bigApp).get("/api/files?repo=big-repo");
+		const res = await supertest(bigApp).get("/api/files?repo=root/big-repo");
 
 		expect(res.status).toBe(200);
 		expect(res.body.entries).toHaveLength(1000);
@@ -236,7 +237,9 @@ describe("GET /api/files (gitignore filtering)", () => {
 		execSync("git add .gitignore", { cwd: gitDir });
 		execSync('git commit -m "init"', { cwd: gitDir });
 
-		gitApp = createApp(makeConfig({ reposRoot: gitReposRoot }));
+		gitApp = createApp(
+			makeConfig({ roots: [{ label: "root", path: gitReposRoot }] }),
+		);
 	});
 
 	afterAll(async () => {
@@ -244,7 +247,7 @@ describe("GET /api/files (gitignore filtering)", () => {
 	});
 
 	test("excludes gitignored files from directory listing", async () => {
-		const res = await supertest(gitApp).get("/api/files?repo=git-repo");
+		const res = await supertest(gitApp).get("/api/files?repo=root/git-repo");
 
 		expect(res.status).toBe(200);
 
@@ -261,7 +264,7 @@ describe("GET /api/files (gitignore filtering)", () => {
 describe("GET /api/files/content", () => {
 	test("returns file content as plain text", async () => {
 		const res = await supertest(app).get(
-			`/api/files/content?repo=${repoName}&path=alpha.txt`,
+			`/api/files/content?repo=${repoRef}&path=alpha.txt`,
 		);
 
 		expect(res.status).toBe(200);
@@ -271,7 +274,7 @@ describe("GET /api/files/content", () => {
 	});
 
 	test("returns 400 when path parameter is missing", async () => {
-		const res = await supertest(app).get(`/api/files/content?repo=${repoName}`);
+		const res = await supertest(app).get(`/api/files/content?repo=${repoRef}`);
 
 		expect(res.status).toBe(400);
 		expect(res.body.error.code).toBe("MISSING_PATH");
@@ -279,7 +282,7 @@ describe("GET /api/files/content", () => {
 
 	test("returns 404 for nonexistent file", async () => {
 		const res = await supertest(app).get(
-			`/api/files/content?repo=${repoName}&path=nonexistent.txt`,
+			`/api/files/content?repo=${repoRef}&path=nonexistent.txt`,
 		);
 
 		expect(res.status).toBe(404);
@@ -288,7 +291,7 @@ describe("GET /api/files/content", () => {
 
 	test("returns 400 when path is a directory", async () => {
 		const res = await supertest(app).get(
-			`/api/files/content?repo=${repoName}&path=gamma`,
+			`/api/files/content?repo=${repoRef}&path=gamma`,
 		);
 
 		expect(res.status).toBe(400);
@@ -297,7 +300,7 @@ describe("GET /api/files/content", () => {
 
 	test("returns 403 for path traversal with ../", async () => {
 		const res = await supertest(app).get(
-			`/api/files/content?repo=${repoName}&path=../secret.txt`,
+			`/api/files/content?repo=${repoRef}&path=../secret.txt`,
 		);
 
 		expect(res.status).toBe(403);
@@ -306,7 +309,7 @@ describe("GET /api/files/content", () => {
 
 	test("returns 403 for absolute path", async () => {
 		const res = await supertest(app).get(
-			`/api/files/content?repo=${repoName}&path=/etc/passwd`,
+			`/api/files/content?repo=${repoRef}&path=/etc/passwd`,
 		);
 
 		expect(res.status).toBe(403);
@@ -315,7 +318,7 @@ describe("GET /api/files/content", () => {
 
 	test("returns 415 for binary file", async () => {
 		const res = await supertest(app).get(
-			`/api/files/content?repo=${repoName}&path=binary.bin`,
+			`/api/files/content?repo=${repoRef}&path=binary.bin`,
 		);
 
 		expect(res.status).toBe(415);
@@ -345,7 +348,9 @@ describe("GET /api/files/content (oversized file)", () => {
 		const onePointFiveMB = Buffer.alloc(1.5 * 1024 * 1024, "x");
 		await fs.writeFile(path.join(bigDir, "large.txt"), onePointFiveMB);
 
-		bigFileApp = createApp(makeConfig({ reposRoot: bigFileReposRoot }));
+		bigFileApp = createApp(
+			makeConfig({ roots: [{ label: "root", path: bigFileReposRoot }] }),
+		);
 	});
 
 	afterAll(async () => {
@@ -354,7 +359,7 @@ describe("GET /api/files/content (oversized file)", () => {
 
 	test("returns 413 for file exceeding 1 MB", async () => {
 		const res = await supertest(bigFileApp).get(
-			"/api/files/content?repo=big-file-repo&path=large.txt",
+			"/api/files/content?repo=root/big-file-repo&path=large.txt",
 		);
 
 		expect(res.status).toBe(413);
@@ -367,7 +372,7 @@ describe("PUT /api/files/content", () => {
 		const initialStat = await fs.stat(path.join(repoDir, "editable.txt"));
 
 		const res = await supertest(app)
-			.put(`/api/files/content?repo=${repoName}&path=editable.txt`)
+			.put(`/api/files/content?repo=${repoRef}&path=editable.txt`)
 			.send({
 				content: "Updated text\n",
 				expectedMtimeMs: initialStat.mtimeMs,
@@ -392,7 +397,7 @@ describe("PUT /api/files/content", () => {
 		await fs.writeFile(filePath, "Newer content\n");
 
 		const res = await supertest(app)
-			.put(`/api/files/content?repo=${repoName}&path=editable.txt`)
+			.put(`/api/files/content?repo=${repoRef}&path=editable.txt`)
 			.send({
 				content: "Stale write\n",
 				expectedMtimeMs: initialStat.mtimeMs,
@@ -409,7 +414,7 @@ describe("PUT /api/files/content", () => {
 		const initialStat = await fs.stat(path.join(repoDir, "editable.txt"));
 
 		const res = await supertest(app)
-			.put(`/api/files/content?repo=${repoName}&path=editable.txt`)
+			.put(`/api/files/content?repo=${repoRef}&path=editable.txt`)
 			.send({ expectedMtimeMs: initialStat.mtimeMs });
 
 		expect(res.status).toBe(400);
@@ -418,7 +423,7 @@ describe("PUT /api/files/content", () => {
 
 	test("returns 404 for nonexistent file", async () => {
 		const res = await supertest(app)
-			.put(`/api/files/content?repo=${repoName}&path=missing.txt`)
+			.put(`/api/files/content?repo=${repoRef}&path=missing.txt`)
 			.send({
 				content: "Hello\n",
 				expectedMtimeMs: 1,
@@ -433,7 +438,7 @@ describe("PUT /api/files/content", () => {
 		const tooLarge = "x".repeat(1024 * 1024 + 1);
 
 		const res = await supertest(app)
-			.put(`/api/files/content?repo=${repoName}&path=editable.txt`)
+			.put(`/api/files/content?repo=${repoRef}&path=editable.txt`)
 			.send({
 				content: tooLarge,
 				expectedMtimeMs: initialStat.mtimeMs,
