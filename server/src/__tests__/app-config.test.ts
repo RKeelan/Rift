@@ -1,6 +1,59 @@
 import { describe, expect, test } from "bun:test";
 import path from "node:path";
-import { inferReposRoot } from "../app.js";
+import { inferReposRoot, labelRoots, parseReposRoot } from "../app.js";
+
+describe("parseReposRoot", () => {
+	test("splits on the platform delimiter", () => {
+		const roots = parseReposRoot(["/a/src", "/b/writing"].join(path.delimiter));
+		expect(roots).toEqual(["/a/src", "/b/writing"]);
+	});
+
+	test("ignores blank and whitespace-only entries", () => {
+		const roots = parseReposRoot(
+			`  /a/src ${path.delimiter}${path.delimiter}   ${path.delimiter}/b `,
+		);
+		expect(roots).toEqual(["/a/src", "/b"]);
+	});
+
+	test("returns a single root unchanged", () => {
+		expect(parseReposRoot("/a/src")).toEqual(["/a/src"]);
+	});
+});
+
+describe("labelRoots", () => {
+	test("names each root after its final segment", () => {
+		const roots = labelRoots([
+			path.join(path.sep, "home", "r", "Src", "RKeelan"),
+			path.join(path.sep, "home", "r", "OneDrive", "Writing"),
+		]);
+		expect(roots.map((root) => root.label)).toEqual(["RKeelan", "Writing"]);
+	});
+
+	test("grows colliding labels leftward until they differ", () => {
+		const roots = labelRoots([
+			path.join(path.sep, "home", "r", "work", "repos"),
+			path.join(path.sep, "home", "r", "play", "repos"),
+		]);
+		expect(roots.map((root) => root.label)).toEqual([
+			"work-repos",
+			"play-repos",
+		]);
+	});
+
+	test("keeps labels distinct when the same path is listed twice", () => {
+		const roots = labelRoots([
+			path.join(path.sep, "home", "r", "Src"),
+			path.join(path.sep, "home", "r", "Src"),
+		]);
+		expect(new Set(roots.map((root) => root.label)).size).toBe(2);
+	});
+
+	test("resolves each root to an absolute path", () => {
+		for (const root of labelRoots(["."])) {
+			expect(path.isAbsolute(root.path)).toBe(true);
+		}
+	});
+});
 
 describe("inferReposRoot", () => {
 	test("infers a POSIX src directory", () => {

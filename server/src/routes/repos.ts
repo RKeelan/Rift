@@ -1,8 +1,12 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { Router } from "express";
+import type { RepoRoot } from "../pathUtils.js";
 
-const MAX_DEPTH = 4;
+// Roots point directly at a directory of checkouts, so repos are immediate
+// children. Staying at depth 1 keeps the scan off large non-repo trees such as
+// photo or archive folders that may sit alongside them.
+const MAX_DEPTH = 1;
 
 interface RepoEntry {
 	name: string;
@@ -60,12 +64,24 @@ async function scanForRepos(
 	return repos;
 }
 
-export function repoRoutes(reposRoot: string): Router {
+export function repoRoutes(roots: RepoRoot[]): Router {
 	const router = Router();
 
 	// GET /api/repos
 	router.get("/", async (_req, res) => {
-		const repos = await scanForRepos(reposRoot, reposRoot, 1);
+		const perRoot = await Promise.all(
+			roots.map(async (root) => {
+				const found = await scanForRepos(root.path, root.path, 1);
+				// Qualify with the root label and use forward slashes so names are
+				// stable across platforms and safe to put in a URL.
+				return found.map((repo) => ({
+					name: `${root.label}/${repo.name.split(path.sep).join("/")}`,
+					path: repo.path,
+				}));
+			}),
+		);
+
+		const repos = perRoot.flat();
 		repos.sort((a, b) => a.name.localeCompare(b.name));
 		res.json({ repos });
 	});

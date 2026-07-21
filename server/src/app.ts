@@ -2,14 +2,16 @@ import os from "node:os";
 import path from "node:path";
 import express from "express";
 import { simpleGit } from "simple-git";
-import { resolveRepo } from "./pathUtils.js";
+import { type RepoRoot, resolveRepoInRoots } from "./pathUtils.js";
 import { fileRoutes } from "./routes/files.js";
 import { gitRoutes } from "./routes/git.js";
 import { repoRoutes } from "./routes/repos.js";
 
+export type { RepoRoot };
+
 export interface AppConfig {
 	port: number;
-	reposRoot: string;
+	roots: RepoRoot[];
 }
 
 function looksLikeWindowsPath(input: string): boolean {
@@ -49,19 +51,94 @@ export function inferReposRoot(cwd: string, homeDir: string): string | null {
 	return null;
 }
 
+/**
+ * Names each root after its final path segment, which is what repo names are
+ * qualified with (`Writing/Coder`). Roots whose basenames collide grow leftward
+ * one segment at a time until the labels are distinct.
+ */
+export function labelRoots(rootPaths: string[]): RepoRoot[] {
+	const segmentsFor = rootPaths.map((rootPath) =>
+		path
+			.resolve(rootPath)
+			.split(/[\\/]+/)
+			.filter(Boolean),
+	);
+	const depths = rootPaths.map(() => 1);
+
+	const labelAt = (index: number): string => {
+		const segments = segmentsFor[index];
+		return segments
+			.slice(Math.max(0, segments.length - depths[index]))
+			.join("-");
+	};
+
+	// Grow colliding labels until they separate or run out of segments.
+	for (let pass = 0; pass < 16; pass++) {
+		const counts = new Map<string, number[]>();
+		rootPaths.forEach((_, index) => {
+			const label = labelAt(index);
+			const group = counts.get(label);
+			if (group) group.push(index);
+			else counts.set(label, [index]);
+		});
+
+		const collisions = [...counts.values()].filter((group) => group.length > 1);
+		if (collisions.length === 0) break;
+
+		let grew = false;
+		for (const group of collisions) {
+			for (const index of group) {
+				if (depths[index] < segmentsFor[index].length) {
+					depths[index] += 1;
+					grew = true;
+				}
+			}
+		}
+		if (!grew) break;
+	}
+
+	const used = new Set<string>();
+	return rootPaths.map((rootPath, index) => {
+		let label = labelAt(index);
+		// Identical paths (or exhausted segments) still need distinct labels.
+		if (used.has(label)) {
+			let suffix = 2;
+			while (used.has(`${label}-${suffix}`)) suffix++;
+			label = `${label}-${suffix}`;
+		}
+		used.add(label);
+		return { label, path: path.resolve(rootPath) };
+	});
+}
+
+export function parseReposRoot(value: string): string[] {
+	return value
+		.split(path.delimiter)
+		.map((entry) => entry.trim())
+		.filter((entry) => entry.length > 0);
+}
+
 export function getConfig(): AppConfig {
 	const homeDir = os.homedir();
-	const reposRoot =
-		process.env.REPOS_ROOT || inferReposRoot(process.cwd(), homeDir);
-	if (!reposRoot) {
+	const configured = process.env.REPOS_ROOT
+		? parseReposRoot(process.env.REPOS_ROOT)
+		: [];
+	const rootPaths = configured.length
+		? configured
+		: [inferReposRoot(process.cwd(), homeDir)].filter(
+				(root): root is string => root !== null,
+			);
+
+	if (rootPaths.length === 0) {
 		throw new Error(
 			"REPOS_ROOT could not be inferred from the current working directory. " +
 				"Set REPOS_ROOT to the directory that holds your repositories.",
 		);
 	}
+
 	return {
 		port: Number(process.env.PORT) || 13000,
-		reposRoot,
+		roots: labelRoots(rootPaths),
 	};
 }
 
@@ -77,7 +154,7 @@ export function createApp(config: AppConfig): express.Express {
 			res.json({ status: "ok" });
 			return;
 		}
-		const result = await resolveRepo(config.reposRoot, repoName);
+		const result = await resolveRepoInRoots(config.roots, repoName);
 		if (!result.ok) {
 			const status = result.reason === "forbidden" ? 403 : 404;
 			const code =
@@ -99,9 +176,9 @@ export function createApp(config: AppConfig): express.Express {
 		res.json({ status: "ok", gitRepo });
 	});
 
-	router.use("/api/files", fileRoutes(config.reposRoot));
-	router.use("/api/git", gitRoutes(config.reposRoot));
-	router.use("/api/repos", repoRoutes(config.reposRoot));
+	router.use("/api/files", fileRoutes(config.roots));
+	router.use("/api/git", gitRoutes(config.roots));
+	router.use("/api/repos", repoRoutes(config.roots));
 
 	// Production: serve static files from client/dist
 	const clientDist = path.resolve(

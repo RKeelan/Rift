@@ -7,11 +7,12 @@ import supertest from "supertest";
 import { type AppConfig, createApp } from "../app.js";
 
 const repoName = "test-repo";
+const repoRef = `root/${repoName}`;
 
 function makeConfig(reposRoot: string): AppConfig {
 	return {
 		port: 3000,
-		reposRoot,
+		roots: [{ label: "root", path: reposRoot }],
 	};
 }
 
@@ -51,7 +52,7 @@ describe("GET /api/git/log", () => {
 	});
 
 	test("returns all commits with default pagination", async () => {
-		const res = await supertest(app).get(`/api/git/log?repo=${repoName}`);
+		const res = await supertest(app).get(`/api/git/log?repo=${repoRef}`);
 
 		expect(res.status).toBe(200);
 		expect(res.body.commits).toBeArray();
@@ -62,7 +63,7 @@ describe("GET /api/git/log", () => {
 	});
 
 	test("each commit has expected fields", async () => {
-		const res = await supertest(app).get(`/api/git/log?repo=${repoName}`);
+		const res = await supertest(app).get(`/api/git/log?repo=${repoRef}`);
 
 		expect(res.status).toBe(200);
 		const commit = res.body.commits[0];
@@ -74,7 +75,7 @@ describe("GET /api/git/log", () => {
 
 	test("respects limit parameter", async () => {
 		const res = await supertest(app).get(
-			`/api/git/log?repo=${repoName}&limit=2`,
+			`/api/git/log?repo=${repoRef}&limit=2`,
 		);
 
 		expect(res.status).toBe(200);
@@ -85,7 +86,7 @@ describe("GET /api/git/log", () => {
 
 	test("respects offset parameter", async () => {
 		const res = await supertest(app).get(
-			`/api/git/log?repo=${repoName}&limit=2&offset=2`,
+			`/api/git/log?repo=${repoRef}&limit=2&offset=2`,
 		);
 
 		expect(res.status).toBe(200);
@@ -96,7 +97,7 @@ describe("GET /api/git/log", () => {
 
 	test("offset past end returns empty array", async () => {
 		const res = await supertest(app).get(
-			`/api/git/log?repo=${repoName}&offset=100`,
+			`/api/git/log?repo=${repoRef}&offset=100`,
 		);
 
 		expect(res.status).toBe(200);
@@ -105,7 +106,7 @@ describe("GET /api/git/log", () => {
 
 	test("invalid limit defaults gracefully", async () => {
 		const res = await supertest(app).get(
-			`/api/git/log?repo=${repoName}&limit=abc`,
+			`/api/git/log?repo=${repoRef}&limit=abc`,
 		);
 
 		expect(res.status).toBe(200);
@@ -129,7 +130,7 @@ describe("GET /api/git/log (not a git repo)", () => {
 	});
 
 	test("returns NOT_GIT_REPO error with status 400", async () => {
-		const res = await supertest(app).get("/api/git/log?repo=not-a-repo");
+		const res = await supertest(app).get("/api/git/log?repo=root/not-a-repo");
 
 		expect(res.status).toBe(400);
 		expect(res.body.error.code).toBe("NOT_GIT_REPO");
@@ -173,7 +174,7 @@ describe("GET /api/git/commit/:hash", () => {
 
 	test("returns commit metadata and file list", async () => {
 		const res = await supertest(app).get(
-			`/api/git/commit/${commitHash}?repo=${repoName}`,
+			`/api/git/commit/${commitHash}?repo=${repoRef}`,
 		);
 
 		expect(res.status).toBe(200);
@@ -187,7 +188,7 @@ describe("GET /api/git/commit/:hash", () => {
 
 	test("file entries have path, status, additions, deletions", async () => {
 		const res = await supertest(app).get(
-			`/api/git/commit/${commitHash}?repo=${repoName}`,
+			`/api/git/commit/${commitHash}?repo=${repoRef}`,
 		);
 
 		const alpha = res.body.files.find(
@@ -208,7 +209,7 @@ describe("GET /api/git/commit/:hash", () => {
 	test("works with short hash (7 chars)", async () => {
 		const shortHash = commitHash.slice(0, 7);
 		const res = await supertest(app).get(
-			`/api/git/commit/${shortHash}?repo=${repoName}`,
+			`/api/git/commit/${shortHash}?repo=${repoRef}`,
 		);
 
 		expect(res.status).toBe(200);
@@ -217,7 +218,7 @@ describe("GET /api/git/commit/:hash", () => {
 
 	test("returns 400 for malformed hash", async () => {
 		const res = await supertest(app).get(
-			`/api/git/commit/not-a-hash!?repo=${repoName}`,
+			`/api/git/commit/not-a-hash!?repo=${repoRef}`,
 		);
 
 		expect(res.status).toBe(400);
@@ -226,7 +227,7 @@ describe("GET /api/git/commit/:hash", () => {
 
 	test("returns 400 for too-short hash (6 chars)", async () => {
 		const res = await supertest(app).get(
-			`/api/git/commit/abcdef?repo=${repoName}`,
+			`/api/git/commit/abcdef?repo=${repoRef}`,
 		);
 
 		expect(res.status).toBe(400);
@@ -235,7 +236,7 @@ describe("GET /api/git/commit/:hash", () => {
 
 	test("returns 400 for uppercase hex", async () => {
 		const res = await supertest(app).get(
-			`/api/git/commit/ABCDEF1?repo=${repoName}`,
+			`/api/git/commit/ABCDEF1?repo=${repoRef}`,
 		);
 
 		expect(res.status).toBe(400);
@@ -245,7 +246,7 @@ describe("GET /api/git/commit/:hash", () => {
 	test("returns file list for root commit", async () => {
 		const rootHash = getHash(repoDir, "add alpha");
 		const res = await supertest(app).get(
-			`/api/git/commit/${rootHash}?repo=${repoName}`,
+			`/api/git/commit/${rootHash}?repo=${repoRef}`,
 		);
 
 		expect(res.status).toBe(200);
@@ -257,7 +258,7 @@ describe("GET /api/git/commit/:hash", () => {
 
 	test("returns 404 for valid but nonexistent hash", async () => {
 		const res = await supertest(app).get(
-			`/api/git/commit/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa?repo=${repoName}`,
+			`/api/git/commit/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa?repo=${repoRef}`,
 		);
 
 		expect(res.status).toBe(404);
@@ -281,7 +282,7 @@ describe("GET /api/git/commit/:hash (not a git repo)", () => {
 
 	test("returns NOT_GIT_REPO error with status 400", async () => {
 		const res = await supertest(app).get(
-			"/api/git/commit/abcdef1234567890abcdef1234567890abcdef12?repo=not-a-repo",
+			"/api/git/commit/abcdef1234567890abcdef1234567890abcdef12?repo=root/not-a-repo",
 		);
 
 		expect(res.status).toBe(400);
@@ -328,7 +329,7 @@ describe("GET /api/git/commit/:hash/diff", () => {
 
 	test("returns unified diff for a modified file", async () => {
 		const res = await supertest(app).get(
-			`/api/git/commit/${secondHash}/diff?repo=${repoName}&path=hello.txt`,
+			`/api/git/commit/${secondHash}/diff?repo=${repoRef}&path=hello.txt`,
 		);
 
 		expect(res.status).toBe(200);
@@ -339,7 +340,7 @@ describe("GET /api/git/commit/:hash/diff", () => {
 
 	test("returns diff for the first commit (no parent)", async () => {
 		const res = await supertest(app).get(
-			`/api/git/commit/${firstHash}/diff?repo=${repoName}&path=hello.txt`,
+			`/api/git/commit/${firstHash}/diff?repo=${repoRef}&path=hello.txt`,
 		);
 
 		expect(res.status).toBe(200);
@@ -349,7 +350,7 @@ describe("GET /api/git/commit/:hash/diff", () => {
 
 	test("returns 400 for malformed hash", async () => {
 		const res = await supertest(app).get(
-			`/api/git/commit/ZZZZZZZZ/diff?repo=${repoName}&path=hello.txt`,
+			`/api/git/commit/ZZZZZZZZ/diff?repo=${repoRef}&path=hello.txt`,
 		);
 
 		expect(res.status).toBe(400);
@@ -358,7 +359,7 @@ describe("GET /api/git/commit/:hash/diff", () => {
 
 	test("returns 400 when path parameter is missing", async () => {
 		const res = await supertest(app).get(
-			`/api/git/commit/${secondHash}/diff?repo=${repoName}`,
+			`/api/git/commit/${secondHash}/diff?repo=${repoRef}`,
 		);
 
 		expect(res.status).toBe(400);
@@ -367,7 +368,7 @@ describe("GET /api/git/commit/:hash/diff", () => {
 
 	test("returns 403 for path traversal with ../", async () => {
 		const res = await supertest(app).get(
-			`/api/git/commit/${secondHash}/diff?repo=${repoName}&path=../secret.txt`,
+			`/api/git/commit/${secondHash}/diff?repo=${repoRef}&path=../secret.txt`,
 		);
 
 		expect(res.status).toBe(403);
@@ -376,7 +377,7 @@ describe("GET /api/git/commit/:hash/diff", () => {
 
 	test("returns 403 for absolute path", async () => {
 		const res = await supertest(app).get(
-			`/api/git/commit/${secondHash}/diff?repo=${repoName}&path=/etc/passwd`,
+			`/api/git/commit/${secondHash}/diff?repo=${repoRef}&path=/etc/passwd`,
 		);
 
 		expect(res.status).toBe(403);
@@ -385,7 +386,7 @@ describe("GET /api/git/commit/:hash/diff", () => {
 
 	test("returns 403 for encoded path traversal", async () => {
 		const res = await supertest(app).get(
-			`/api/git/commit/${secondHash}/diff?repo=${repoName}&path=sub/../../secret`,
+			`/api/git/commit/${secondHash}/diff?repo=${repoRef}&path=sub/../../secret`,
 		);
 
 		expect(res.status).toBe(403);
@@ -395,7 +396,7 @@ describe("GET /api/git/commit/:hash/diff", () => {
 	test("works with short hash", async () => {
 		const shortHash = secondHash.slice(0, 7);
 		const res = await supertest(app).get(
-			`/api/git/commit/${shortHash}/diff?repo=${repoName}&path=hello.txt`,
+			`/api/git/commit/${shortHash}/diff?repo=${repoRef}&path=hello.txt`,
 		);
 
 		expect(res.status).toBe(200);
@@ -422,7 +423,7 @@ describe("GET /api/git/commit/:hash/diff (not a git repo)", () => {
 
 	test("returns NOT_GIT_REPO error with status 400", async () => {
 		const res = await supertest(app).get(
-			"/api/git/commit/abcdef1234567890abcdef1234567890abcdef12/diff?repo=not-a-repo&path=file.txt",
+			"/api/git/commit/abcdef1234567890abcdef1234567890abcdef12/diff?repo=root/not-a-repo&path=file.txt",
 		);
 
 		expect(res.status).toBe(400);
