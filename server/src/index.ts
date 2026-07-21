@@ -7,7 +7,9 @@ const app = createApp(config);
 
 const server = app.listen(config.port, host, () => {
 	console.log(`Rift server listening on ${host}:${config.port}`);
-	console.log(`Repos root: ${config.reposRoot}`);
+	for (const root of config.roots) {
+		console.log(`Repos root: ${root.label} -> ${root.path}`);
+	}
 });
 
 let shuttingDown = false;

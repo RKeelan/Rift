@@ -3,7 +3,11 @@ import path from "node:path";
 import type { Request, Response } from "express";
 import { Router } from "express";
 import { simpleGit } from "simple-git";
-import { resolveRepo, resolveSafePath } from "../pathUtils.js";
+import {
+	type RepoRoot,
+	resolveRepoInRoots,
+	resolveSafePath,
+} from "../pathUtils.js";
 
 const MAX_ENTRIES = 1000;
 const MAX_FILE_SIZE = 1024 * 1024; // 1 MB
@@ -75,7 +79,7 @@ async function isBinaryFile(filePath: string): Promise<boolean> {
 }
 
 async function requireRepo(
-	reposRoot: string,
+	roots: RepoRoot[],
 	req: Request,
 	res: Response,
 ): Promise<string | null> {
@@ -89,7 +93,7 @@ async function requireRepo(
 		});
 		return null;
 	}
-	const result = await resolveRepo(reposRoot, repoName);
+	const result = await resolveRepoInRoots(roots, repoName);
 	if (!result.ok) {
 		const status = result.reason === "forbidden" ? 403 : 404;
 		const code = result.reason === "forbidden" ? "REPO_FORBIDDEN" : "NOT_FOUND";
@@ -157,12 +161,12 @@ async function readTextFile(
 	}
 }
 
-export function fileRoutes(reposRoot: string): Router {
+export function fileRoutes(roots: RepoRoot[]): Router {
 	const router = Router();
 
 	// GET /api/files?repo=<name>&path=<dir>
 	router.get("/", async (req, res) => {
-		const workingDir = await requireRepo(reposRoot, req, res);
+		const workingDir = await requireRepo(roots, req, res);
 		if (!workingDir) return;
 
 		const requestedPath = (req.query.path as string) || ".";
@@ -261,7 +265,7 @@ export function fileRoutes(reposRoot: string): Router {
 
 	// GET /api/files/content?repo=<name>&path=<file>
 	router.get("/content", async (req, res) => {
-		const workingDir = await requireRepo(reposRoot, req, res);
+		const workingDir = await requireRepo(roots, req, res);
 		if (!workingDir) return;
 
 		const requestedPath = req.query.path as string;
@@ -293,7 +297,7 @@ export function fileRoutes(reposRoot: string): Router {
 
 	// PUT /api/files/content?repo=<name>&path=<file>
 	router.put("/content", async (req, res) => {
-		const workingDir = await requireRepo(reposRoot, req, res);
+		const workingDir = await requireRepo(roots, req, res);
 		if (!workingDir) return;
 
 		const requestedPath = req.query.path as string;

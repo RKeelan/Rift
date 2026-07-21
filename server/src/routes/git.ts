@@ -2,7 +2,11 @@ import path from "node:path";
 import type { Request, Response } from "express";
 import { Router } from "express";
 import { simpleGit } from "simple-git";
-import { resolveRepo, resolveSafePath } from "../pathUtils.js";
+import {
+	type RepoRoot,
+	resolveRepoInRoots,
+	resolveSafePath,
+} from "../pathUtils.js";
 
 const MAX_DIFF_SIZE = 1024 * 1024; // 1 MB
 
@@ -43,7 +47,7 @@ function mapWorkingTreeStatus(code: string): FileStatus | null {
 }
 
 async function resolveGitRepo(
-	reposRoot: string,
+	roots: RepoRoot[],
 	req: Request,
 	res: Response,
 ): Promise<ReturnType<typeof simpleGit> | null> {
@@ -57,7 +61,7 @@ async function resolveGitRepo(
 		});
 		return null;
 	}
-	const result = await resolveRepo(reposRoot, repoName);
+	const result = await resolveRepoInRoots(roots, repoName);
 	if (!result.ok) {
 		const status = result.reason === "forbidden" ? 403 : 404;
 		const code = result.reason === "forbidden" ? "REPO_FORBIDDEN" : "NOT_FOUND";
@@ -71,12 +75,12 @@ async function resolveGitRepo(
 	return simpleGit(result.path);
 }
 
-export function gitRoutes(reposRoot: string): Router {
+export function gitRoutes(roots: RepoRoot[]): Router {
 	const router = Router();
 
 	// GET /api/git/status?repo=<name>
 	router.get("/status", async (req, res) => {
-		const git = await resolveGitRepo(reposRoot, req, res);
+		const git = await resolveGitRepo(roots, req, res);
 		if (!git) return;
 
 		const isRepo = await git.checkIsRepo();
@@ -123,7 +127,7 @@ export function gitRoutes(reposRoot: string): Router {
 
 	// GET /api/git/log?repo=<name>&limit=<n>&offset=<n>
 	router.get("/log", async (req, res) => {
-		const git = await resolveGitRepo(reposRoot, req, res);
+		const git = await resolveGitRepo(roots, req, res);
 		if (!git) return;
 
 		const isRepo = await git.checkIsRepo();
@@ -170,7 +174,7 @@ export function gitRoutes(reposRoot: string): Router {
 			return;
 		}
 
-		const git = await resolveGitRepo(reposRoot, req, res);
+		const git = await resolveGitRepo(roots, req, res);
 		if (!git) return;
 
 		const isRepo = await git.checkIsRepo();
@@ -281,7 +285,7 @@ export function gitRoutes(reposRoot: string): Router {
 			return;
 		}
 
-		const git = await resolveGitRepo(reposRoot, req, res);
+		const git = await resolveGitRepo(roots, req, res);
 		if (!git) return;
 
 		const isRepo = await git.checkIsRepo();
@@ -349,7 +353,7 @@ export function gitRoutes(reposRoot: string): Router {
 			return;
 		}
 
-		const git = await resolveGitRepo(reposRoot, req, res);
+		const git = await resolveGitRepo(roots, req, res);
 		if (!git) return;
 
 		const isRepo = await git.checkIsRepo();
@@ -401,7 +405,7 @@ export function gitRoutes(reposRoot: string): Router {
 			return;
 		}
 
-		const git = await resolveGitRepo(reposRoot, req, res);
+		const git = await resolveGitRepo(roots, req, res);
 		if (!git) return;
 
 		const isRepo = await git.checkIsRepo();

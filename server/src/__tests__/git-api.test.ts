@@ -7,11 +7,12 @@ import supertest from "supertest";
 import { type AppConfig, createApp } from "../app.js";
 
 const repoName = "test-repo";
+const repoRef = `root/${repoName}`;
 
 function makeConfig(reposRoot: string): AppConfig {
 	return {
 		port: 3000,
-		reposRoot,
+		roots: [{ label: "root", path: reposRoot }],
 	};
 }
 
@@ -42,7 +43,7 @@ describe("GET /api/git/status", () => {
 	});
 
 	test("returns empty files array when working tree is clean", async () => {
-		const res = await supertest(app).get(`/api/git/status?repo=${repoName}`);
+		const res = await supertest(app).get(`/api/git/status?repo=${repoRef}`);
 
 		expect(res.status).toBe(200);
 		expect(res.body.files).toEqual([]);
@@ -51,7 +52,7 @@ describe("GET /api/git/status", () => {
 	test("returns untracked file as unstaged", async () => {
 		await fs.writeFile(path.join(repoDir, "new.txt"), "hello");
 
-		const res = await supertest(app).get(`/api/git/status?repo=${repoName}`);
+		const res = await supertest(app).get(`/api/git/status?repo=${repoRef}`);
 
 		expect(res.status).toBe(200);
 		const entries = res.body.files.filter(
@@ -69,7 +70,7 @@ describe("GET /api/git/status", () => {
 		await fs.writeFile(path.join(repoDir, "staged.txt"), "staged content");
 		execSync("git add staged.txt", { cwd: repoDir });
 
-		const res = await supertest(app).get(`/api/git/status?repo=${repoName}`);
+		const res = await supertest(app).get(`/api/git/status?repo=${repoRef}`);
 
 		expect(res.status).toBe(200);
 		const entry = res.body.files.find(
@@ -88,7 +89,7 @@ describe("GET /api/git/status", () => {
 		// Modify an existing committed file
 		await fs.writeFile(path.join(repoDir, "init.txt"), "modified content");
 
-		const res = await supertest(app).get(`/api/git/status?repo=${repoName}`);
+		const res = await supertest(app).get(`/api/git/status?repo=${repoRef}`);
 
 		expect(res.status).toBe(200);
 		const entry = res.body.files.find(
@@ -107,7 +108,7 @@ describe("GET /api/git/status", () => {
 		// Delete a committed file without staging the deletion
 		await fs.unlink(path.join(repoDir, "init.txt"));
 
-		const res = await supertest(app).get(`/api/git/status?repo=${repoName}`);
+		const res = await supertest(app).get(`/api/git/status?repo=${repoRef}`);
 
 		expect(res.status).toBe(200);
 		const entry = res.body.files.find(
@@ -128,7 +129,7 @@ describe("GET /api/git/status", () => {
 		execSync("git add init.txt", { cwd: repoDir });
 		await fs.writeFile(path.join(repoDir, "init.txt"), "second change");
 
-		const res = await supertest(app).get(`/api/git/status?repo=${repoName}`);
+		const res = await supertest(app).get(`/api/git/status?repo=${repoRef}`);
 
 		expect(res.status).toBe(200);
 		const stagedEntry = res.body.files.find(
@@ -166,7 +167,9 @@ describe("GET /api/git/status (not a git repo)", () => {
 	});
 
 	test("returns NOT_GIT_REPO error with status 400", async () => {
-		const res = await supertest(app).get("/api/git/status?repo=not-a-repo");
+		const res = await supertest(app).get(
+			"/api/git/status?repo=root/not-a-repo",
+		);
 
 		expect(res.status).toBe(400);
 		expect(res.body.error.code).toBe("NOT_GIT_REPO");
@@ -248,7 +251,7 @@ describe("GET /api/git/diff", () => {
 		await fs.writeFile(path.join(repoDir, "file.txt"), "modified\n");
 
 		const res = await supertest(app).get(
-			`/api/git/diff?repo=${repoName}&path=file.txt&staged=false`,
+			`/api/git/diff?repo=${repoRef}&path=file.txt&staged=false`,
 		);
 
 		expect(res.status).toBe(200);
@@ -265,7 +268,7 @@ describe("GET /api/git/diff", () => {
 		execSync("git add file.txt", { cwd: repoDir });
 
 		const res = await supertest(app).get(
-			`/api/git/diff?repo=${repoName}&path=file.txt&staged=true`,
+			`/api/git/diff?repo=${repoRef}&path=file.txt&staged=true`,
 		);
 
 		expect(res.status).toBe(200);
@@ -280,7 +283,7 @@ describe("GET /api/git/diff", () => {
 
 	test("returns empty diff when file has no changes", async () => {
 		const res = await supertest(app).get(
-			`/api/git/diff?repo=${repoName}&path=file.txt&staged=false`,
+			`/api/git/diff?repo=${repoRef}&path=file.txt&staged=false`,
 		);
 
 		expect(res.status).toBe(200);
@@ -289,7 +292,7 @@ describe("GET /api/git/diff", () => {
 	});
 
 	test("returns 400 when path parameter is missing", async () => {
-		const res = await supertest(app).get(`/api/git/diff?repo=${repoName}`);
+		const res = await supertest(app).get(`/api/git/diff?repo=${repoRef}`);
 
 		expect(res.status).toBe(400);
 		expect(res.body.error.code).toBe("MISSING_PATH");
@@ -297,7 +300,7 @@ describe("GET /api/git/diff", () => {
 
 	test("returns 403 for path traversal with ../", async () => {
 		const res = await supertest(app).get(
-			`/api/git/diff?repo=${repoName}&path=../secret.txt`,
+			`/api/git/diff?repo=${repoRef}&path=../secret.txt`,
 		);
 
 		expect(res.status).toBe(403);
@@ -306,7 +309,7 @@ describe("GET /api/git/diff", () => {
 
 	test("returns 403 for absolute path", async () => {
 		const res = await supertest(app).get(
-			`/api/git/diff?repo=${repoName}&path=/etc/passwd`,
+			`/api/git/diff?repo=${repoRef}&path=/etc/passwd`,
 		);
 
 		expect(res.status).toBe(403);
@@ -315,7 +318,7 @@ describe("GET /api/git/diff", () => {
 
 	test("returns 403 for encoded path traversal", async () => {
 		const res = await supertest(app).get(
-			`/api/git/diff?repo=${repoName}&path=subdir/../../secret`,
+			`/api/git/diff?repo=${repoRef}&path=subdir/../../secret`,
 		);
 
 		expect(res.status).toBe(403);
@@ -355,7 +358,7 @@ describe("GET /api/git/base-content", () => {
 		execSync("git add file.txt", { cwd: repoDir });
 
 		const res = await supertest(app).get(
-			`/api/git/base-content?repo=${repoName}&path=file.txt&staged=true`,
+			`/api/git/base-content?repo=${repoRef}&path=file.txt&staged=true`,
 		);
 
 		expect(res.status).toBe(200);
@@ -371,7 +374,7 @@ describe("GET /api/git/base-content", () => {
 		await fs.writeFile(path.join(repoDir, "file.txt"), "working tree change\n");
 
 		const res = await supertest(app).get(
-			`/api/git/base-content?repo=${repoName}&path=file.txt&staged=false`,
+			`/api/git/base-content?repo=${repoRef}&path=file.txt&staged=false`,
 		);
 
 		expect(res.status).toBe(200);
@@ -383,7 +386,7 @@ describe("GET /api/git/base-content", () => {
 
 	test("returns 400 when path parameter is missing", async () => {
 		const res = await supertest(app).get(
-			`/api/git/base-content?repo=${repoName}`,
+			`/api/git/base-content?repo=${repoRef}`,
 		);
 
 		expect(res.status).toBe(400);
@@ -392,7 +395,7 @@ describe("GET /api/git/base-content", () => {
 
 	test("returns 403 for path traversal", async () => {
 		const res = await supertest(app).get(
-			`/api/git/base-content?repo=${repoName}&path=../secret.txt`,
+			`/api/git/base-content?repo=${repoRef}&path=../secret.txt`,
 		);
 
 		expect(res.status).toBe(403);
@@ -418,7 +421,7 @@ describe("GET /api/git/diff (not a git repo)", () => {
 
 	test("returns NOT_GIT_REPO error with status 400", async () => {
 		const res = await supertest(app).get(
-			"/api/git/diff?repo=not-a-repo&path=file.txt",
+			"/api/git/diff?repo=root/not-a-repo&path=file.txt",
 		);
 
 		expect(res.status).toBe(400);

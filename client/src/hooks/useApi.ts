@@ -38,9 +38,12 @@ export function useApi() {
 	const request = useCallback(
 		async <T>(
 			url: string,
-			options?: RequestInit & { silent?: boolean },
+			options?: RequestInit & {
+				silent?: boolean;
+				onError?: (error: { status: number; code?: string }) => void;
+			},
 		): Promise<T | null> => {
-			const { silent, ...fetchOptions } = options ?? {};
+			const { silent, onError, ...fetchOptions } = options ?? {};
 			const controller = new AbortController();
 			abortControllers.current.push(controller);
 
@@ -63,6 +66,10 @@ export function useApi() {
 					const errorMessage = isApiErrorEnvelope(body)
 						? body.error.message
 						: `Request failed (${response.status})`;
+					onError?.({
+						status: response.status,
+						code: isApiErrorEnvelope(body) ? body.error.code : undefined,
+					});
 					if (!silent) {
 						showError(errorMessage);
 					}

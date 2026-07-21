@@ -8,7 +8,7 @@ import { type AppConfig, createApp } from "../app.js";
 function makeConfig(reposRoot: string): AppConfig {
 	return {
 		port: 3000,
-		reposRoot,
+		roots: [{ label: "root", path: reposRoot }],
 	};
 }
 
@@ -47,15 +47,51 @@ describe("GET /api/repos", () => {
 		await fs.rm(reposRoot, { recursive: true, force: true });
 	});
 
-	test("returns repos found in nested git-initialised subdirs", async () => {
+	test("returns immediate child repos qualified by root label", async () => {
 		const res = await supertest(app).get("/api/repos");
 		expect(res.status).toBe(200);
 		expect(res.body.repos).toBeArray();
 
 		const names = res.body.repos.map((r: { name: string }) => r.name);
-		expect(names).toContain("alpha");
-		expect(names).toContain(path.join("org", "beta"));
-		expect(names).toContain(path.join("org", "gamma"));
+		expect(names).toContain("root/alpha");
+	});
+
+	test("does not descend past immediate children", async () => {
+		const res = await supertest(app).get("/api/repos");
+		const names = res.body.repos.map((r: { name: string }) => r.name);
+
+		// org/beta and org/gamma sit one level too deep for a depth-1 scan.
+		expect(names).not.toContain("root/org/beta");
+		expect(names).not.toContain("root/org/gamma");
+	});
+
+	test("names use forward slashes on every platform", async () => {
+		const res = await supertest(app).get("/api/repos");
+		for (const repo of res.body.repos) {
+			expect(repo.name).not.toInclude("\\");
+		}
+	});
+
+	test("merges repos from every configured root", async () => {
+		const secondRoot = await fs.mkdtemp(
+			path.join(os.tmpdir(), "rift-repos-second-"),
+		);
+		await fs.mkdir(path.join(secondRoot, "delta", ".git"), { recursive: true });
+
+		const multiApp = createApp({
+			port: 3000,
+			roots: [
+				{ label: "root", path: reposRoot },
+				{ label: "other", path: secondRoot },
+			],
+		});
+
+		const res = await supertest(multiApp).get("/api/repos");
+		const names = res.body.repos.map((r: { name: string }) => r.name);
+		expect(names).toContain("root/alpha");
+		expect(names).toContain("other/delta");
+
+		await fs.rm(secondRoot, { recursive: true, force: true });
 	});
 
 	test("returns repos sorted alphabetically by name", async () => {
@@ -84,13 +120,13 @@ describe("GET /api/repos", () => {
 	test("repo path is the absolute path to the repo directory", async () => {
 		const res = await supertest(app).get("/api/repos");
 		const alpha = res.body.repos.find(
-			(r: { name: string }) => r.name === "alpha",
+			(r: { name: string }) => r.name === "root/alpha",
 		);
 		expect(alpha).toBeDefined();
 		expect(alpha.path).toBe(path.join(reposRoot, "alpha"));
 	});
 
-	test("non-git subdirectories are recursed into but not returned", async () => {
+	test("non-git subdirectories are not returned", async () => {
 		const res = await supertest(app).get("/api/repos");
 		const names = res.body.repos.map((r: { name: string }) => r.name);
 
@@ -110,8 +146,8 @@ describe("GET /api/repos", () => {
 		const names = res.body.repos.map((r: { name: string }) => r.name);
 
 		// alpha should appear but alpha/sub should NOT (recursion stops at alpha)
-		expect(names).toContain("alpha");
-		expect(names).not.toContain(path.join("alpha", "sub"));
+		expect(names).toContain("root/alpha");
+		expect(names).not.toContain("root/alpha/sub");
 
 		// Clean up
 		await fs.rm(path.join(reposRoot, "alpha", "sub"), {
@@ -180,7 +216,7 @@ describe("GET /api/repos", () => {
 
 		const res = await supertest(app).get("/api/repos");
 		const names = res.body.repos.map((r: { name: string }) => r.name);
-		expect(names).toContain("linked-repo");
+		expect(names).toContain("root/linked-repo");
 
 		// Clean up — junctions/symlinks must be unlinked, not rm'd
 		await fs.unlink(linkPath);
@@ -198,48 +234,24 @@ describe("GET /api/repos", () => {
 
 		const res = await supertest(app).get("/api/repos");
 		const names = res.body.repos.map((r: { name: string }) => r.name);
-		expect(names).toContain("worktree-repo");
+		expect(names).toContain("root/worktree-repo");
 
 		// Clean up
 		await fs.rm(worktreeDir, { recursive: true, force: true });
 	});
 
 	test("respects max depth limit", async () => {
-		// Create a repo at depth 5 (beyond the MAX_DEPTH of 4)
-		// Root = depth 1, so level1/level2/level3/level4/deep-repo = depth 5
-		const deepPath = path.join(
-			reposRoot,
-			"level1",
-			"level2",
-			"level3",
-			"level4",
-			"deep-repo",
-			".git",
-		);
-		await fs.mkdir(deepPath, { recursive: true });
-
-		// Also create a repo exactly at depth 4 (should be found)
-		const atLimitPath = path.join(
-			reposRoot,
-			"level1",
-			"level2",
-			"level3",
-			"at-limit",
-			".git",
-		);
-		await fs.mkdir(atLimitPath, { recursive: true });
+		// A repo one level below the root is already past the depth-1 scan, so a
+		// large non-repo tree beside the checkouts is never walked.
+		await fs.mkdir(path.join(reposRoot, "level1", "deep-repo", ".git"), {
+			recursive: true,
+		});
 
 		const res = await supertest(app).get("/api/repos");
 		const names = res.body.repos.map((r: { name: string }) => r.name);
 
-		// Repo at depth 4 should be found
-		expect(names).toContain(
-			path.join("level1", "level2", "level3", "at-limit"),
-		);
-		// Repo at depth 5 should NOT be found (beyond MAX_DEPTH)
-		expect(names).not.toContain(
-			path.join("level1", "level2", "level3", "level4", "deep-repo"),
-		);
+		expect(names).not.toContain("root/level1/deep-repo");
+		expect(names).not.toContain("root/level1");
 
 		// Clean up
 		await fs.rm(path.join(reposRoot, "level1"), {

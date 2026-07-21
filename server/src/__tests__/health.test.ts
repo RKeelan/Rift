@@ -7,7 +7,7 @@ import { type AppConfig, createApp } from "../app.js";
 function makeConfig(overrides?: Partial<AppConfig>): AppConfig {
 	return {
 		port: 3000,
-		reposRoot: process.cwd(),
+		roots: [{ label: "root", path: process.cwd() }],
 		...overrides,
 	};
 }
@@ -32,14 +32,20 @@ describe("GET /api/health", () => {
 		const projectRoot = path.resolve(thisFile, "../../../..");
 		const repoName = path.basename(projectRoot);
 		const reposRoot = path.dirname(projectRoot);
-		const app = createApp(makeConfig({ reposRoot }));
-		const response = await supertest(app).get(`/api/health?repo=${repoName}`);
+		const app = createApp(
+			makeConfig({ roots: [{ label: "root", path: reposRoot }] }),
+		);
+		const response = await supertest(app).get(
+			`/api/health?repo=root/${repoName}`,
+		);
 		expect(response.status).toBe(200);
 		expect(response.body.gitRepo).toBe(true);
 	});
 
 	test("returns 404 when repo does not exist", async () => {
-		const app = createApp(makeConfig({ reposRoot: "/tmp" }));
+		const app = createApp(
+			makeConfig({ roots: [{ label: "root", path: "/tmp" }] }),
+		);
 		const response = await supertest(app).get(
 			"/api/health?repo=nonexistent-repo",
 		);
