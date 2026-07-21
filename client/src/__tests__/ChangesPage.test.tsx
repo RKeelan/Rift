@@ -466,6 +466,40 @@ describe("ChangesPage", () => {
 		});
 	});
 
+	test("opens the editor with an empty base when no base version exists", async () => {
+		mockFetchForChanges(
+			[{ path: "src/added.ts", status: "modified", staged: false }],
+			{
+				diff: {
+					path: "src/added.ts",
+					diff: "@@ -0,0 +1 @@\n+export const value = 1;\n",
+					truncated: false,
+				},
+				fileContent: {
+					path: "src/added.ts",
+					content: "export const value = 1;\n",
+				},
+			},
+		);
+
+		const { container } = renderChangesPage();
+
+		await waitFor(() => {
+			expect(screen.getByText("src/added.ts")).not.toBeNull();
+		});
+
+		await act(async () => {
+			fireEvent.click(screen.getByText("src/added.ts"));
+		});
+
+		await waitFor(() => {
+			expect(screen.getByRole("button", { name: "Save" })).not.toBeNull();
+		});
+
+		expect(screen.queryByRole("alert")).toBeNull();
+		expect(container.querySelector(".cm-deletedChunkLine")).toBeNull();
+	});
+
 	test("shows deleted unstaged lines in the editor view", async () => {
 		const deletedLine =
 			"bun run tailscale && REPOS_ROOT=/path/to/repos bun run prod";

@@ -18,6 +18,12 @@ interface StatusEntry {
 	staged: boolean;
 }
 
+// Git's `<rev>:<path>` syntax only understands forward slashes, so a Windows
+// path.relative() result has to be converted before it can name a blob.
+function toGitPath(relativePath: string): string {
+	return relativePath.split(path.sep).join("/");
+}
+
 function mapIndexStatus(code: string): FileStatus | null {
 	switch (code) {
 		case "A":
@@ -380,9 +386,13 @@ export function gitRoutes(roots: RepoRoot[]): Router {
 		}
 
 		try {
-			const relativePath = path.relative(toplevel, resolved);
+			const relativePath = toGitPath(path.relative(toplevel, resolved));
 			const gitRoot = simpleGit(toplevel);
-			const revision = `HEAD:${relativePath}`;
+			// Unstaged edits are compared against the index, matching what
+			// `git diff` reports; staged edits are compared against HEAD. A
+			// file added but not yet committed has no HEAD version at all.
+			const staged = req.query.staged === "true";
+			const revision = staged ? `HEAD:${relativePath}` : `:${relativePath}`;
 			const content = await gitRoot.raw(["show", revision]);
 			res.type("text/plain").send(content);
 		} catch {
