@@ -1,8 +1,17 @@
+import { WrapText } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { apiUrl } from "../apiUrl.ts";
 import "./TextFileEditor.css";
 
 const FILE_MTIME_HEADER = "x-file-mtime-ms";
+const LINE_WRAP_STORAGE_KEY = "rift:editor-line-wrap";
+
+function readLineWrapPreference(): boolean {
+	if (typeof window === "undefined") {
+		return true;
+	}
+	return window.localStorage.getItem(LINE_WRAP_STORAGE_KEY) !== "false";
+}
 
 type ChangeType = "added" | "modified" | "deleted" | "renamed" | "untracked";
 type ChangeLineKind = "added";
@@ -468,6 +477,7 @@ export function TextFileEditor({
 	const editorRef = useRef<HTMLDivElement>(null);
 	const viewRef = useRef<import("@codemirror/view").EditorView | null>(null);
 	const refreshDecorationsRef = useRef<(() => void) | null>(null);
+	const applyLineWrapRef = useRef<((wrap: boolean) => void) | null>(null);
 	const originalContentRef = useRef("");
 	const [content, setContent] = useState<string | null>(null);
 	const [error, setError] = useState<string | null>(null);
@@ -476,6 +486,8 @@ export function TextFileEditor({
 	const [dirty, setDirty] = useState(false);
 	const [mtimeMs, setMtimeMs] = useState<number | null>(null);
 	const [reloadToken, setReloadToken] = useState(0);
+	const [lineWrap, setLineWrap] = useState(readLineWrapPreference);
+	const lineWrapRef = useRef(lineWrap);
 
 	useEffect(() => {
 		let active = true;
@@ -532,9 +544,8 @@ export function TextFileEditor({
 		let destroyed = false;
 
 		(async () => {
-			const { EditorState, StateEffect, StateField } = await import(
-				"@codemirror/state"
-			);
+			const { Compartment, EditorState, StateEffect, StateField } =
+				await import("@codemirror/state");
 			const {
 				Decoration,
 				EditorView,
@@ -666,10 +677,14 @@ export function TextFileEditor({
 				},
 			]);
 
+			const lineWrapCompartment = new Compartment();
 			const baseExtensions = [
 				lineNumbers(),
 				drawSelection(),
 				highlightActiveLine(),
+				lineWrapCompartment.of(
+					lineWrapRef.current ? EditorView.lineWrapping : [],
+				),
 				syntaxHighlighting(riftHighlightStyle),
 				StateField.define({
 					create(state) {
@@ -751,6 +766,13 @@ export function TextFileEditor({
 			refreshDecorationsRef.current = () => {
 				view.dispatch({ effects: refreshChangeDecorations.of() });
 			};
+			applyLineWrapRef.current = (wrap: boolean) => {
+				view.dispatch({
+					effects: lineWrapCompartment.reconfigure(
+						wrap ? EditorView.lineWrapping : [],
+					),
+				});
+			};
 
 			const loader = getLanguageLoader(filePath);
 			if (loader) {
@@ -763,6 +785,9 @@ export function TextFileEditor({
 							extensions: [...baseExtensions, langSupport],
 						}),
 					);
+					// The fresh state reverts to the wrap setting captured when the
+					// extensions were built, so re-apply whatever is current now.
+					applyLineWrapRef.current(lineWrapRef.current);
 				} catch {
 					// Plain text is fine if language support fails.
 				}
@@ -772,12 +797,26 @@ export function TextFileEditor({
 		return () => {
 			destroyed = true;
 			refreshDecorationsRef.current = null;
+			applyLineWrapRef.current = null;
 			if (viewRef.current) {
 				viewRef.current.destroy();
 				viewRef.current = null;
 			}
 		};
 	}, [changeDiff, changeType, comparisonContent, content, filePath, readOnly]);
+
+	useEffect(() => {
+		lineWrapRef.current = lineWrap;
+		applyLineWrapRef.current?.(lineWrap);
+	}, [lineWrap]);
+
+	const toggleLineWrap = useCallback(() => {
+		setLineWrap((value) => {
+			const next = !value;
+			window.localStorage.setItem(LINE_WRAP_STORAGE_KEY, String(next));
+			return next;
+		});
+	}, []);
 
 	useEffect(() => {
 		if (!dirty) return;
@@ -857,6 +896,18 @@ export function TextFileEditor({
 				<div className="text-file-editor-actions">
 					<button
 						type="button"
+						className={`text-file-editor-button text-file-editor-button--icon${
+							lineWrap ? " text-file-editor-button--active" : ""
+						}`}
+						onClick={toggleLineWrap}
+						aria-pressed={lineWrap}
+						aria-label={lineWrap ? "Disable line wrapping" : "Wrap lines"}
+						title={lineWrap ? "Disable line wrapping" : "Wrap lines"}
+					>
+						<WrapText size={16} aria-hidden="true" />
+					</button>
+					<button
+						type="button"
 						className="text-file-editor-button"
 						onClick={handleReload}
 						disabled={loading || saving}
@@ -878,7 +929,12 @@ export function TextFileEditor({
 			{loading && <div className="text-file-editor-message">Loading...</div>}
 			{error && <div className="text-file-editor-error">{error}</div>}
 			{content !== null && (
-				<div ref={editorRef} className="text-file-editor-surface" />
+				<div
+					ref={editorRef}
+					className={`text-file-editor-surface${
+						lineWrap ? " text-file-editor-surface--wrap" : ""
+					}`}
+				/>
 			)}
 		</div>
 	);
