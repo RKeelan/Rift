@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "concurrently -n server,client -c blue,green \"bun run --filter server dev\" \"bun run --filter client dev\"",
     "prod": "bun run build && bun run --filter server dev",
-    "tailscale": "tailscale serve --bg 13000",
+    "tailscale": "tailscale serve --bg --set-path=/rift 13000",
     "build": "bun run --filter shared build && bun run --filter server build && bun run --filter client build && bun run --filter cli build",
     "lint": "biome lint .",
     "lint:pkg": "npmPkgJsonLint . shared server client cli",
