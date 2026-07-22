@@ -1,6 +1,7 @@
 import { WrapText } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { apiUrl } from "../apiUrl.ts";
+import { getDiffOps } from "../diff.ts";
 import "./TextFileEditor.css";
 
 const FILE_MTIME_HEADER = "x-file-mtime-ms";
@@ -189,61 +190,6 @@ function getCommonSuffixLength(
 	return suffixLength;
 }
 
-type DiffOp =
-	| { type: "equal"; line: string }
-	| { type: "delete"; line: string }
-	| { type: "insert"; line: string };
-
-function getDiffOps(originalLines: string[], currentLines: string[]): DiffOp[] {
-	const rowCount = originalLines.length;
-	const columnCount = currentLines.length;
-	const table = Array.from({ length: rowCount + 1 }, () =>
-		Array<number>(columnCount + 1).fill(0),
-	);
-
-	for (let row = rowCount - 1; row >= 0; row -= 1) {
-		for (let column = columnCount - 1; column >= 0; column -= 1) {
-			table[row][column] =
-				originalLines[row] === currentLines[column]
-					? table[row + 1][column + 1] + 1
-					: Math.max(table[row + 1][column], table[row][column + 1]);
-		}
-	}
-
-	const ops: DiffOp[] = [];
-	let row = 0;
-	let column = 0;
-	while (row < rowCount && column < columnCount) {
-		if (originalLines[row] === currentLines[column]) {
-			ops.push({ type: "equal", line: originalLines[row] });
-			row += 1;
-			column += 1;
-			continue;
-		}
-
-		if (table[row + 1][column] >= table[row][column + 1]) {
-			ops.push({ type: "delete", line: originalLines[row] });
-			row += 1;
-			continue;
-		}
-
-		ops.push({ type: "insert", line: currentLines[column] });
-		column += 1;
-	}
-
-	while (row < rowCount) {
-		ops.push({ type: "delete", line: originalLines[row] });
-		row += 1;
-	}
-
-	while (column < columnCount) {
-		ops.push({ type: "insert", line: currentLines[column] });
-		column += 1;
-	}
-
-	return ops;
-}
-
 function getLiveChangeDecorations(
 	originalContent: string,
 	currentContent: string,
@@ -273,12 +219,14 @@ function getLiveChangeDecorations(
 		return { lineHighlights: [], deletedChunks: [] };
 	}
 
-	const complexity = originalMiddle.length * currentMiddle.length;
 	const lineHighlights: ChangeLineHighlight[] = [];
 	const deletedChunks: DeletedLineChunk[] = [];
 	let currentIndex = prefixLength;
 
-	if (complexity > 40_000) {
+	const ops = getDiffOps(originalMiddle, currentMiddle);
+	if (!ops) {
+		// Too many edits to line up individually, so say only that the region
+		// was replaced rather than stalling the editor on every keystroke.
 		for (let index = 0; index < currentMiddle.length; index += 1) {
 			lineHighlights.push({
 				kind: "added",
@@ -297,7 +245,6 @@ function getLiveChangeDecorations(
 		return { lineHighlights, deletedChunks };
 	}
 
-	const ops = getDiffOps(originalMiddle, currentMiddle);
 	for (let index = 0; index < ops.length; ) {
 		const op = ops[index];
 		if (op.type === "equal") {
