@@ -14,6 +14,23 @@ function readLineWrapPreference(): boolean {
 	return window.localStorage.getItem(LINE_WRAP_STORAGE_KEY) !== "false";
 }
 
+/**
+ * CodeMirror splits a document on `\r\n`, `\r`, or `\n` and joins it back with
+ * `\n`, so its text never matches a CRLF file on disk or a CRLF git blob. Put
+ * every side of a comparison in the editor's own terms before diffing them.
+ */
+function normalizeLineEndings(text: string): string {
+	return text.replace(/\r\n?/g, "\n");
+}
+
+/**
+ * Reports the line ending a file already uses, so saving it back does not
+ * rewrite every line. The first break in the file decides.
+ */
+function detectLineSeparator(text: string): "\r\n" | "\n" {
+	return /\r\n|\n/.exec(text)?.[0] === "\r\n" ? "\r\n" : "\n";
+}
+
 type ChangeType = "added" | "modified" | "deleted" | "renamed" | "untracked";
 type ChangeLineKind = "added";
 
@@ -295,17 +312,27 @@ export function getEditorChangeDecorations({
 	changeType = null,
 	changeDiff = null,
 }: EditorChangeDecorationsOptions): ChangeDecorationsData {
+	const current = normalizeLineEndings(currentContent);
+
 	if (comparisonContent !== undefined) {
-		return getLiveChangeDecorations(comparisonContent, currentContent);
+		return getLiveChangeDecorations(
+			normalizeLineEndings(comparisonContent),
+			current,
+		);
 	}
 
 	if (!changeType && !changeDiff) {
 		return { lineHighlights: [], deletedChunks: [] };
 	}
 
+	const loaded = normalizeLineEndings(loadedContent);
 	return mergeChangeDecorations(
-		getChangeLineHighlights(loadedContent, changeType, changeDiff),
-		getLiveChangeDecorations(loadedContent, currentContent),
+		getChangeLineHighlights(
+			loaded,
+			changeType,
+			changeDiff === null ? null : normalizeLineEndings(changeDiff),
+		),
+		getLiveChangeDecorations(loaded, current),
 	);
 }
 
@@ -426,6 +453,7 @@ export function TextFileEditor({
 	const refreshDecorationsRef = useRef<(() => void) | null>(null);
 	const applyLineWrapRef = useRef<((wrap: boolean) => void) | null>(null);
 	const originalContentRef = useRef("");
+	const lineSeparatorRef = useRef<"\r\n" | "\n">("\n");
 	const [content, setContent] = useState<string | null>(null);
 	const [error, setError] = useState<string | null>(null);
 	const [loading, setLoading] = useState(true);
@@ -464,9 +492,11 @@ export function TextFileEditor({
 				const text = await response.text();
 				const nextMtimeMs = Number(response.headers.get(FILE_MTIME_HEADER));
 				if (!active) return;
-				setContent(text);
+				const normalized = normalizeLineEndings(text);
+				lineSeparatorRef.current = detectLineSeparator(text);
+				setContent(normalized);
 				setMtimeMs(Number.isFinite(nextMtimeMs) ? nextMtimeMs : null);
-				originalContentRef.current = text;
+				originalContentRef.current = normalized;
 			} catch (err) {
 				if (err instanceof DOMException && err.name === "AbortError") return;
 				if (active) {
@@ -801,6 +831,7 @@ export function TextFileEditor({
 
 		try {
 			const nextContent = viewRef.current.state.doc.toString();
+			const separator = lineSeparatorRef.current;
 			const response = await fetch(
 				apiUrl(
 					`/api/files/content?repo=${encodeURIComponent(repo)}&path=${encodeURIComponent(filePath)}`,
@@ -811,7 +842,10 @@ export function TextFileEditor({
 						"Content-Type": "application/json",
 					},
 					body: JSON.stringify({
-						content: nextContent,
+						content:
+							separator === "\n"
+								? nextContent
+								: nextContent.replaceAll("\n", separator),
 						expectedMtimeMs: mtimeMs,
 					}),
 				},
