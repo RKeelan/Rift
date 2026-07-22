@@ -24,13 +24,6 @@
 	padding: 1.5rem;
 }
 
-.dashboard-intro {
-	margin: 0 0 1.5rem;
-	color: var(--color-text-secondary);
-	line-height: 1.5;
-	max-width: 42rem;
-}
-
 .dashboard-message {
 	text-align: center;
 	padding: 2rem;
@@ -54,6 +47,68 @@
 
 .dashboard-empty-hint {
 	font-size: 0.9375rem;
+}
+
+.dashboard-section {
+	margin-bottom: 1.5rem;
+}
+
+.dashboard-section-title {
+	font-size: 0.8125rem;
+	font-weight: 600;
+	letter-spacing: 0.05em;
+	text-transform: uppercase;
+	color: var(--color-text-secondary);
+	margin: 0 0 0.75rem;
+}
+
+.dashboard-group-header {
+	display: flex;
+	align-items: center;
+	gap: 0.5rem;
+	width: 100%;
+	padding: 0.5rem 0;
+	margin-bottom: 0.25rem;
+	background: none;
+	border: none;
+	border-bottom: 1px solid var(--color-border);
+	color: var(--color-text-secondary);
+	cursor: pointer;
+	text-align: left;
+}
+
+.dashboard-group-header:hover {
+	color: var(--color-text);
+}
+
+.dashboard-group-header:focus-visible {
+	outline: 2px solid var(--color-primary);
+	outline-offset: 2px;
+}
+
+.dashboard-group-label {
+	font-size: 1rem;
+	font-weight: 600;
+	color: var(--color-text);
+}
+
+.dashboard-group-count {
+	font-size: 0.875rem;
+	color: var(--color-text-muted);
+}
+
+.dashboard-more {
+	margin-top: 0.75rem;
+	padding: 0.5rem 0;
+	background: none;
+	border: none;
+	color: var(--color-primary);
+	font-size: 0.9375rem;
+	cursor: pointer;
+}
+
+.dashboard-more:hover {
+	color: var(--color-primary-hover);
 }
 
 .session-list {
@@ -104,7 +159,7 @@
 	word-break: break-word;
 }
 
-.session-card-date {
+.session-card-path {
 	font-size: 0.875rem;
 	color: var(--color-text-secondary);
 	margin: 0;
