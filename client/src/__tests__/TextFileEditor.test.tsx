@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import {
+	act,
 	cleanup,
 	fireEvent,
 	render,
@@ -47,6 +48,32 @@ describe("getEditorChangeDecorations", () => {
 				lines: ["added line"],
 			},
 		]);
+	});
+
+	test("ignores the line endings of the file on disk", () => {
+		const lines = ["line 1", "line 2", "line 3"];
+
+		const decorations = getEditorChangeDecorations({
+			currentContent: lines.join("\n"),
+			loadedContent: lines.join("\r\n"),
+			changeType: "modified",
+		});
+
+		expect(decorations.lineHighlights).toEqual([]);
+		expect(decorations.deletedChunks).toEqual([]);
+	});
+
+	test("ignores the line endings of the git baseline", () => {
+		const lines = ["line 1", "line 2", "line 3"];
+
+		const decorations = getEditorChangeDecorations({
+			currentContent: lines.join("\n"),
+			loadedContent: lines.join("\n"),
+			comparisonContent: lines.join("\r\n"),
+		});
+
+		expect(decorations.lineHighlights).toEqual([]);
+		expect(decorations.deletedChunks).toEqual([]);
 	});
 
 	test("marks only the edited lines when two edits sit far apart", () => {
@@ -131,5 +158,65 @@ describe("line wrapping", () => {
 		const container = await renderEditor();
 
 		expect(isWrapping(container)).toBe(false);
+	});
+});
+
+describe("saving", () => {
+	const originalFetch = globalThis.fetch;
+
+	afterEach(() => {
+		cleanup();
+		globalThis.fetch = originalFetch;
+	});
+
+	async function editAndSave(fileContent: string) {
+		const requests: RequestInit[] = [];
+		globalThis.fetch = (async (_input: string, init?: RequestInit) => {
+			if (init?.method === "PUT") {
+				requests.push(init);
+				return new Response(JSON.stringify({ mtimeMs: 2 }), {
+					headers: { "Content-Type": "application/json" },
+				});
+			}
+			return new Response(fileContent, {
+				headers: { "x-file-mtime-ms": "1" },
+			});
+		}) as unknown as typeof fetch;
+
+		const { container } = render(
+			<TextFileEditor filePath="notes.md" repo="test-repo" />,
+		);
+		await waitFor(() => {
+			expect(container.querySelector(".cm-content")).not.toBeNull();
+		});
+
+		const { EditorView } = await import("@codemirror/view");
+		const view = EditorView.findFromDOM(
+			container.querySelector(".cm-editor") as HTMLElement,
+		);
+		act(() => {
+			view?.dispatch({ changes: { from: 0, insert: "new line\n" } });
+		});
+
+		const save = await screen.findByRole("button", { name: "Save" });
+		await waitFor(() => {
+			expect(save.hasAttribute("disabled")).toBe(false);
+		});
+		fireEvent.click(save);
+
+		await waitFor(() => {
+			expect(requests.length).toBe(1);
+		});
+		return JSON.parse(requests[0].body as string).content as string;
+	}
+
+	test("keeps a CRLF file in CRLF", async () => {
+		expect(await editAndSave("alpha\r\nbeta\r\n")).toBe(
+			"new line\r\nalpha\r\nbeta\r\n",
+		);
+	});
+
+	test("keeps an LF file in LF", async () => {
+		expect(await editAndSave("alpha\nbeta\n")).toBe("new line\nalpha\nbeta\n");
 	});
 });
