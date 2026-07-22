@@ -48,6 +48,28 @@ describe("getEditorChangeDecorations", () => {
 			},
 		]);
 	});
+
+	test("marks only the edited lines when two edits sit far apart", () => {
+		const baseline = Array.from({ length: 2000 }, (_, i) => `line ${i}`);
+		const edited = baseline.slice();
+		edited[100] = "line 100 changed";
+		edited[1500] = "line 1500 changed";
+
+		const decorations = getEditorChangeDecorations({
+			currentContent: edited.join("\n"),
+			loadedContent: baseline.join("\n"),
+			comparisonContent: baseline.join("\n"),
+		});
+
+		expect(decorations.lineHighlights).toEqual([
+			{ kind: "added", lineNumber: 101 },
+			{ kind: "added", lineNumber: 1501 },
+		]);
+		expect(decorations.deletedChunks).toEqual([
+			{ anchorIndex: 100, lines: ["line 100"] },
+			{ anchorIndex: 1500, lines: ["line 1500"] },
+		]);
+	});
 });
 
 describe("line wrapping", () => {
