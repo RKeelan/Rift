@@ -10,6 +10,17 @@
 	border-radius: 4px;
 }
 
+/*
+ * Lines are blocks, so they take the width of their container. Sizing the
+ * container to its widest line rather than to the panel keeps a highlight
+ * running the full width of the scrollable area instead of stopping where the
+ * unscrolled panel ends.
+ */
+.diff-viewer-lines {
+	display: block;
+	min-width: max-content;
+}
+
 .diff-line {
 	display: block;
 	white-space: pre;
