@@ -1,4 +1,4 @@
-import { WrapText } from "lucide-react";
+import { ChevronDown, ChevronUp, WrapText } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { apiUrl } from "../apiUrl.ts";
 import { getDiffOps } from "../diff.ts";
@@ -336,6 +336,37 @@ export function getEditorChangeDecorations({
 	);
 }
 
+/**
+ * Collapses the per-line change decorations into one anchor line per change
+ * region, so Previous/Next can jump between changes the way VS Code's diff
+ * editor does. Adjacent changed lines (and a deletion sitting against them)
+ * count as a single region; a gap of an unchanged line starts a new one.
+ */
+export function getChangeRegionLines(
+	decorations: ChangeDecorationsData,
+	docLines: number,
+): number[] {
+	const markers = new Set<number>();
+	for (const highlight of decorations.lineHighlights) {
+		if (highlight.lineNumber >= 1 && highlight.lineNumber <= docLines) {
+			markers.add(highlight.lineNumber);
+		}
+	}
+	for (const chunk of decorations.deletedChunks) {
+		markers.add(Math.min(Math.max(chunk.anchorIndex + 1, 1), docLines));
+	}
+
+	const regions: number[] = [];
+	let previous = Number.NEGATIVE_INFINITY;
+	for (const line of [...markers].sort((left, right) => left - right)) {
+		if (line - previous > 1) {
+			regions.push(line);
+		}
+		previous = line;
+	}
+	return regions;
+}
+
 type LanguageLoader = () => Promise<
 	import("@codemirror/language").LanguageSupport
 >;
@@ -452,8 +483,15 @@ export function TextFileEditor({
 	const viewRef = useRef<import("@codemirror/view").EditorView | null>(null);
 	const refreshDecorationsRef = useRef<(() => void) | null>(null);
 	const applyLineWrapRef = useRef<((wrap: boolean) => void) | null>(null);
+	const scrollToLineRef = useRef<((lineNumber: number) => void) | null>(null);
 	const originalContentRef = useRef("");
 	const lineSeparatorRef = useRef<"\r\n" | "\n">("\n");
+	// Anchor lines of the current change regions and the last one we jumped to,
+	// so Previous/Next can cycle through them and wrap around.
+	const changeRegionsRef = useRef<number[]>([]);
+	const changeCountRef = useRef(0);
+	const lastNavLineRef = useRef(0);
+	const [changeCount, setChangeCount] = useState(0);
 	const [content, setContent] = useState<string | null>(null);
 	const [error, setError] = useState<string | null>(null);
 	const [loading, setLoading] = useState(true);
@@ -474,6 +512,10 @@ export function TextFileEditor({
 		setDirty(false);
 		setMtimeMs(null);
 		originalContentRef.current = "";
+		changeRegionsRef.current = [];
+		changeCountRef.current = 0;
+		lastNavLineRef.current = 0;
+		setChangeCount(0);
 
 		(async () => {
 			try {
@@ -565,6 +607,16 @@ export function TextFileEditor({
 					changeType,
 					changeDiff,
 				});
+
+				changeRegionsRef.current = getChangeRegionLines(
+					changeDecorations,
+					doc.lines,
+				);
+				if (changeRegionsRef.current.length !== changeCountRef.current) {
+					changeCountRef.current = changeRegionsRef.current.length;
+					setChangeCount(changeRegionsRef.current.length);
+				}
+
 				const ranges = [];
 				for (const highlight of changeDecorations.lineHighlights.sort(
 					(left, right) => left.lineNumber - right.lineNumber,
@@ -750,6 +802,17 @@ export function TextFileEditor({
 					),
 				});
 			};
+			scrollToLineRef.current = (lineNumber: number) => {
+				const clamped = Math.min(Math.max(lineNumber, 1), view.state.doc.lines);
+				const pos = view.state.doc.line(clamped).from;
+				// Move the selection (without stealing focus, which would pop up the
+				// mobile keyboard) so the active-line highlight marks the change, then
+				// centre it in the viewport.
+				view.dispatch({
+					selection: { anchor: pos },
+					effects: EditorView.scrollIntoView(pos, { y: "center" }),
+				});
+			};
 
 			const loader = getLanguageLoader(filePath);
 			if (loader) {
@@ -782,6 +845,7 @@ export function TextFileEditor({
 			destroyed = true;
 			refreshDecorationsRef.current = null;
 			applyLineWrapRef.current = null;
+			scrollToLineRef.current = null;
 			if (viewRef.current) {
 				viewRef.current.destroy();
 				viewRef.current = null;
@@ -800,6 +864,26 @@ export function TextFileEditor({
 			window.localStorage.setItem(LINE_WRAP_STORAGE_KEY, String(next));
 			return next;
 		});
+	}, []);
+
+	const goToChange = useCallback((direction: 1 | -1) => {
+		const regions = changeRegionsRef.current;
+		if (regions.length === 0) return;
+
+		const reference = lastNavLineRef.current;
+		let target: number;
+		if (direction === 1) {
+			target = regions.find((line) => line > reference) ?? regions[0];
+		} else {
+			target = regions[regions.length - 1];
+			for (const line of regions) {
+				if (line >= reference) break;
+				target = line;
+			}
+		}
+
+		lastNavLineRef.current = target;
+		scrollToLineRef.current?.(target);
 	}, []);
 
 	useEffect(() => {
@@ -882,6 +966,28 @@ export function TextFileEditor({
 							: "No unsaved changes"}
 				</div>
 				<div className="text-file-editor-actions">
+					{changeCount > 0 && (
+						<>
+							<button
+								type="button"
+								className="text-file-editor-button text-file-editor-button--icon"
+								onClick={() => goToChange(-1)}
+								aria-label="Previous change"
+								title="Previous change"
+							>
+								<ChevronUp size={16} aria-hidden="true" />
+							</button>
+							<button
+								type="button"
+								className="text-file-editor-button text-file-editor-button--icon"
+								onClick={() => goToChange(1)}
+								aria-label="Next change"
+								title="Next change"
+							>
+								<ChevronDown size={16} aria-hidden="true" />
+							</button>
+						</>
+					)}
 					<button
 						type="button"
 						className={`text-file-editor-button text-file-editor-button--icon${

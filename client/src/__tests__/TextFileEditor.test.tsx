@@ -9,6 +9,7 @@ import {
 } from "@testing-library/react";
 import {
 	TextFileEditor,
+	getChangeRegionLines,
 	getEditorChangeDecorations,
 } from "../components/TextFileEditor.tsx";
 
@@ -96,6 +97,134 @@ describe("getEditorChangeDecorations", () => {
 			{ anchorIndex: 100, lines: ["line 100"] },
 			{ anchorIndex: 1500, lines: ["line 1500"] },
 		]);
+	});
+});
+
+describe("getChangeRegionLines", () => {
+	test("merges adjacent changed lines and splits on a gap", () => {
+		const regions = getChangeRegionLines(
+			{
+				lineHighlights: [
+					{ kind: "added", lineNumber: 2 },
+					{ kind: "added", lineNumber: 3 },
+					{ kind: "added", lineNumber: 7 },
+				],
+				deletedChunks: [],
+			},
+			10,
+		);
+
+		expect(regions).toEqual([2, 7]);
+	});
+
+	test("treats a deletion beside an addition as one region", () => {
+		const regions = getChangeRegionLines(
+			{
+				lineHighlights: [{ kind: "added", lineNumber: 4 }],
+				deletedChunks: [{ anchorIndex: 3, lines: ["old"] }],
+			},
+			10,
+		);
+
+		expect(regions).toEqual([4]);
+	});
+
+	test("anchors a pure deletion at the following line", () => {
+		const regions = getChangeRegionLines(
+			{
+				lineHighlights: [],
+				deletedChunks: [{ anchorIndex: 4, lines: ["gone"] }],
+			},
+			10,
+		);
+
+		expect(regions).toEqual([5]);
+	});
+});
+
+describe("change navigation", () => {
+	const originalFetch = globalThis.fetch;
+
+	afterEach(() => {
+		cleanup();
+		globalThis.fetch = originalFetch;
+	});
+
+	async function renderWithChanges() {
+		globalThis.fetch = (async () =>
+			new Response("a\nB\nc\nD\ne\n", {
+				headers: { "x-file-mtime-ms": "1" },
+			})) as typeof fetch;
+
+		const { container } = render(
+			<TextFileEditor
+				filePath="notes.txt"
+				repo="test-repo"
+				comparisonContent={"a\nb\nc\nd\ne\n"}
+			/>,
+		);
+		await waitFor(() => {
+			expect(container.querySelector(".cm-content")).not.toBeNull();
+		});
+		await screen.findByRole("button", { name: "Next change" });
+
+		const { EditorView } = await import("@codemirror/view");
+		const view = EditorView.findFromDOM(
+			container.querySelector(".cm-editor") as HTMLElement,
+		);
+		if (!view) throw new Error("editor view not found");
+		return view;
+	}
+
+	function selectedLine(view: import("@codemirror/view").EditorView) {
+		return view.state.doc.lineAt(view.state.selection.main.head).number;
+	}
+
+	test("Next and Previous cycle through the changes and wrap around", async () => {
+		const view = await renderWithChanges();
+
+		const next = screen.getByRole("button", { name: "Next change" });
+		const previous = screen.getByRole("button", { name: "Previous change" });
+
+		fireEvent.click(next);
+		expect(selectedLine(view)).toBe(2);
+
+		fireEvent.click(next);
+		expect(selectedLine(view)).toBe(4);
+
+		// Past the last change, Next wraps to the first.
+		fireEvent.click(next);
+		expect(selectedLine(view)).toBe(2);
+
+		// Before the first, Previous wraps to the last.
+		fireEvent.click(previous);
+		expect(selectedLine(view)).toBe(4);
+
+		fireEvent.click(previous);
+		expect(selectedLine(view)).toBe(2);
+	});
+
+	test("hides the change controls when there are no changes", async () => {
+		globalThis.fetch = (async () =>
+			new Response("a\nb\nc\n", {
+				headers: { "x-file-mtime-ms": "1" },
+			})) as typeof fetch;
+
+		const { container } = render(
+			<TextFileEditor
+				filePath="notes.txt"
+				repo="test-repo"
+				comparisonContent={"a\nb\nc\n"}
+			/>,
+		);
+		await waitFor(() => {
+			expect(container.querySelector(".cm-content")).not.toBeNull();
+		});
+
+		expect(screen.queryByRole("button", { name: "Next change" })).toBeNull();
+		expect(
+			screen.queryByRole("button", { name: "Previous change" }),
+		).toBeNull();
 	});
 });
 
