@@ -792,7 +792,14 @@ export function TextFileEditor({
 					// Plain text is fine if language support fails.
 				}
 			}
-		})();
+		})().catch((cause: unknown) => {
+			// CodeMirror arrives through dynamic imports, so a chunk that fails
+			// to load leaves an empty pane with nothing to explain it. Say so
+			// rather than rendering nothing.
+			if (destroyed) return;
+			const detail = cause instanceof Error ? `: ${cause.message}` : "";
+			setError(`Failed to load the editor${detail}`);
+		});
 
 		return () => {
 			destroyed = true;

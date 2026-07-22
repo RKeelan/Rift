@@ -24,27 +24,33 @@ export function DiffViewer({ diff }: DiffViewerProps) {
 
 	return (
 		<pre className="diff-viewer">
-			{lines.map((line, i) => {
-				let className = "diff-line";
-				if (isUnifiedDiff && line.startsWith("+") && !line.startsWith("+++")) {
-					className += " diff-add";
-				} else if (
-					isUnifiedDiff &&
-					line.startsWith("-") &&
-					!line.startsWith("---")
-				) {
-					className += " diff-remove";
-				} else if (isUnifiedDiff && line.startsWith("@@")) {
-					className += " diff-hunk";
-				}
-				return (
-					// biome-ignore lint/suspicious/noArrayIndexKey: diff lines are static and never reordered
-					<span key={`${i}`} className={className}>
-						{line}
-						{"\n"}
-					</span>
-				);
-			})}
+			<span className="diff-viewer-lines">
+				{lines.map((line, i) => {
+					let className = "diff-line";
+					if (
+						isUnifiedDiff &&
+						line.startsWith("+") &&
+						!line.startsWith("+++")
+					) {
+						className += " diff-add";
+					} else if (
+						isUnifiedDiff &&
+						line.startsWith("-") &&
+						!line.startsWith("---")
+					) {
+						className += " diff-remove";
+					} else if (isUnifiedDiff && line.startsWith("@@")) {
+						className += " diff-hunk";
+					}
+					return (
+						// biome-ignore lint/suspicious/noArrayIndexKey: diff lines are static and never reordered
+						<span key={`${i}`} className={className}>
+							{line}
+							{"\n"}
+						</span>
+					);
+				})}
+			</span>
 		</pre>
 	);
 }

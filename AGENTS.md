@@ -10,13 +10,13 @@ Read `README.md` first for the product overview, environment behaviour, and the 
 
 ## Deployment
 
-Rift runs continuously from a prebuilt bundle, so editing source does not change what the running server serves. After any change expected to work, rebuild and redeploy it:
+Rift runs continuously from a prebuilt bundle, so editing source does not change what the running server serves. Rebuild and redeploy as soon as a task is complete, before asking for approval to commit — Richard tests every change on his phone, and a change that is not deployed cannot be tested:
 
 - Run `bun run build`, then restart the `Rift` scheduled task
 - Confirm the restart in `%LOCALAPPDATA%\Rift\rift.out.log`, which is overwritten on each start
 - The task runs a wrapper script kept outside the repo, holding the roots, host, and port for the machine it serves. Change deployment settings there, not here
 
-Build from a committed state. A bundle built from uncommitted work reproduces no branch, which makes a later rebuild silently change what is deployed.
+Deploying uncommitted work is expected, so the running bundle often reproduces no commit. Rebuild after every later change, including anything that comes out of review, so the deployment never lags the working tree.
 
 ## Dependency Management
 
