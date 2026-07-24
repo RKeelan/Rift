@@ -451,6 +451,215 @@ describe("GET /api/git/base-content", () => {
 	});
 });
 
+describe("POST /api/git/stage and /api/git/unstage", () => {
+	let reposRoot: string;
+	let repoDir: string;
+	let app: ReturnType<typeof createApp>;
+
+	beforeAll(async () => {
+		reposRoot = await fs.mkdtemp(path.join(os.tmpdir(), "rift-git-stage-"));
+		repoDir = path.join(reposRoot, repoName);
+		await fs.mkdir(repoDir);
+
+		execSync("git init", { cwd: repoDir });
+		execSync("git config user.email 'test@test.com'", { cwd: repoDir });
+		execSync("git config user.name 'Test'", { cwd: repoDir });
+
+		await fs.writeFile(path.join(repoDir, "file.txt"), "original\n");
+		execSync("git add file.txt", { cwd: repoDir });
+		execSync('git commit -m "initial"', { cwd: repoDir });
+
+		app = createApp(makeConfig(reposRoot));
+	});
+
+	afterAll(async () => {
+		await fs.rm(reposRoot, { recursive: true, force: true });
+	});
+
+	test("stages an untracked file", async () => {
+		await fs.writeFile(path.join(repoDir, "new.txt"), "hello\n");
+
+		const res = await supertest(app)
+			.post(`/api/git/stage?repo=${repoRef}`)
+			.send({ path: "new.txt" });
+
+		expect(res.status).toBe(200);
+		const entry = res.body.files.find(
+			(f: { path: string }) => f.path === "new.txt",
+		);
+		expect(entry).toEqual({ path: "new.txt", status: "added", staged: true });
+
+		execSync("git reset HEAD new.txt", { cwd: repoDir });
+		await fs.unlink(path.join(repoDir, "new.txt"));
+	});
+
+	test("stages a modified file", async () => {
+		await fs.writeFile(path.join(repoDir, "file.txt"), "modified\n");
+
+		const res = await supertest(app)
+			.post(`/api/git/stage?repo=${repoRef}`)
+			.send({ path: "file.txt" });
+
+		expect(res.status).toBe(200);
+		const entry = res.body.files.find(
+			(f: { path: string }) => f.path === "file.txt",
+		);
+		expect(entry).toEqual({
+			path: "file.txt",
+			status: "modified",
+			staged: true,
+		});
+
+		execSync("git reset HEAD file.txt", { cwd: repoDir });
+		execSync("git checkout -- file.txt", { cwd: repoDir });
+	});
+
+	test("unstages a staged modification", async () => {
+		await fs.writeFile(path.join(repoDir, "file.txt"), "modified\n");
+		execSync("git add file.txt", { cwd: repoDir });
+
+		const res = await supertest(app)
+			.post(`/api/git/unstage?repo=${repoRef}`)
+			.send({ path: "file.txt" });
+
+		expect(res.status).toBe(200);
+		const staged = res.body.files.find(
+			(f: { path: string; staged: boolean }) =>
+				f.path === "file.txt" && f.staged,
+		);
+		expect(staged).toBeUndefined();
+		const unstaged = res.body.files.find(
+			(f: { path: string; staged: boolean }) =>
+				f.path === "file.txt" && !f.staged,
+		);
+		expect(unstaged).toEqual({
+			path: "file.txt",
+			status: "modified",
+			staged: false,
+		});
+
+		execSync("git checkout -- file.txt", { cwd: repoDir });
+	});
+
+	test("resolves files inside subdirectories", async () => {
+		await fs.mkdir(path.join(repoDir, "nested"), { recursive: true });
+		await fs.writeFile(path.join(repoDir, "nested", "deep.txt"), "deep\n");
+
+		const res = await supertest(app)
+			.post(`/api/git/stage?repo=${repoRef}`)
+			.send({ path: "nested/deep.txt" });
+
+		expect(res.status).toBe(200);
+		const entry = res.body.files.find(
+			(f: { path: string }) => f.path === "nested/deep.txt",
+		);
+		expect(entry).toEqual({
+			path: "nested/deep.txt",
+			status: "added",
+			staged: true,
+		});
+
+		execSync("git reset HEAD nested/deep.txt", { cwd: repoDir });
+		await fs.rm(path.join(repoDir, "nested"), { recursive: true, force: true });
+	});
+
+	test("returns 400 when path is missing", async () => {
+		const res = await supertest(app)
+			.post(`/api/git/stage?repo=${repoRef}`)
+			.send({});
+
+		expect(res.status).toBe(400);
+		expect(res.body.error.code).toBe("MISSING_PATH");
+	});
+
+	test("returns 403 for path traversal", async () => {
+		const res = await supertest(app)
+			.post(`/api/git/stage?repo=${repoRef}`)
+			.send({ path: "../secret.txt" });
+
+		expect(res.status).toBe(403);
+		expect(res.body.error.code).toBe("PATH_FORBIDDEN");
+	});
+
+	test("returns 400 when repo param is missing", async () => {
+		const res = await supertest(app)
+			.post("/api/git/unstage")
+			.send({ path: "file.txt" });
+
+		expect(res.status).toBe(400);
+		expect(res.body.error.code).toBe("MISSING_REPO");
+	});
+});
+
+describe("POST /api/git/stage (repo with no commits)", () => {
+	let reposRoot: string;
+	let repoDir: string;
+	let app: ReturnType<typeof createApp>;
+
+	beforeAll(async () => {
+		reposRoot = await fs.mkdtemp(
+			path.join(os.tmpdir(), "rift-git-stage-nohead-"),
+		);
+		repoDir = path.join(reposRoot, repoName);
+		await fs.mkdir(repoDir);
+
+		execSync("git init", { cwd: repoDir });
+		execSync("git config user.email 'test@test.com'", { cwd: repoDir });
+		execSync("git config user.name 'Test'", { cwd: repoDir });
+
+		app = createApp(makeConfig(reposRoot));
+	});
+
+	afterAll(async () => {
+		await fs.rm(reposRoot, { recursive: true, force: true });
+	});
+
+	test("unstages a staged addition before the first commit", async () => {
+		await fs.writeFile(path.join(repoDir, "first.txt"), "content\n");
+		execSync("git add first.txt", { cwd: repoDir });
+
+		const res = await supertest(app)
+			.post(`/api/git/unstage?repo=${repoRef}`)
+			.send({ path: "first.txt" });
+
+		expect(res.status).toBe(200);
+		const entry = res.body.files.find(
+			(f: { path: string }) => f.path === "first.txt",
+		);
+		expect(entry).toEqual({
+			path: "first.txt",
+			status: "untracked",
+			staged: false,
+		});
+	});
+});
+
+describe("POST /api/git/stage (not a git repo)", () => {
+	let reposRoot: string;
+	let app: ReturnType<typeof createApp>;
+
+	beforeAll(async () => {
+		reposRoot = await fs.mkdtemp(path.join(os.tmpdir(), "rift-git-stagenr-"));
+		const repoDir = path.join(reposRoot, "not-a-repo");
+		await fs.mkdir(repoDir);
+		await fs.writeFile(path.join(repoDir, "file.txt"), "content");
+		app = createApp(makeConfig(reposRoot));
+	});
+
+	afterAll(async () => {
+		await fs.rm(reposRoot, { recursive: true, force: true });
+	});
+
+	test("returns NOT_GIT_REPO error with status 400", async () => {
+		const res = await supertest(app)
+			.post("/api/git/stage?repo=root/not-a-repo")
+			.send({ path: "file.txt" });
+
+		expect(res.status).toBe(400);
+		expect(res.body.error.code).toBe("NOT_GIT_REPO");
+	});
+});
+
 describe("GET /api/git/diff (not a git repo)", () => {
 	let reposRoot: string;
 	let app: ReturnType<typeof createApp>;

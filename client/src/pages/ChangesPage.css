@@ -121,6 +121,11 @@
 	color: var(--color-text-muted);
 }
 
+.changes-file-row {
+	display: flex;
+	align-items: center;
+}
+
 .changes-file-entry {
 	display: flex;
 	align-items: center;
@@ -136,8 +141,37 @@
 	min-height: 40px;
 }
 
+.changes-file-row .changes-file-entry {
+	flex: 1;
+	min-width: 0;
+	width: auto;
+}
+
 .changes-file-entry:active {
 	background: var(--color-surface-raised);
+}
+
+.changes-file-action {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	flex-shrink: 0;
+	width: 44px;
+	min-height: 40px;
+	padding: 0.25rem;
+	background: none;
+	border: none;
+	color: var(--color-text-muted);
+	cursor: pointer;
+}
+
+.changes-file-action:active {
+	background: var(--color-surface-raised);
+}
+
+.changes-file-action:disabled {
+	opacity: 0.5;
+	cursor: default;
 }
 
 /* Status badges */

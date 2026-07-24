@@ -1,4 +1,4 @@
-import { ArrowLeft, RefreshCw } from "lucide-react";
+import { ArrowLeft, Minus, Plus, RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { apiUrl } from "../apiUrl.ts";
@@ -57,6 +57,7 @@ export function ChangesPage() {
 	const [loading, setLoading] = useState(true);
 	const [refreshing, setRefreshing] = useState(false);
 	const [notGitRepo, setNotGitRepo] = useState(false);
+	const [actionPending, setActionPending] = useState(false);
 	const [lastRefreshed, setLastRefreshed] = useState<Date | null>(null);
 	const [diff, setDiff] = useState<string | null>(null);
 	const [diffTruncated, setDiffTruncated] = useState(false);
@@ -194,6 +195,46 @@ export function ChangesPage() {
 		[setSearchParams],
 	);
 
+	const applyStageAction = useCallback(
+		async (filePath: string, action: "stage" | "unstage"): Promise<boolean> => {
+			setActionPending(true);
+			try {
+				const res = await fetch(
+					apiUrl(
+						`/api/git/${action}?repo=${encodeURIComponent(repoName as string)}`,
+					),
+					{
+						method: "POST",
+						headers: { "Content-Type": "application/json" },
+						body: JSON.stringify({ path: filePath }),
+					},
+				);
+				if (!res.ok) {
+					const body = await res.json().catch(() => null);
+					showError(body?.error?.message ?? `Request failed (${res.status})`);
+					return false;
+				}
+				const data: StatusResponse = await res.json();
+				setFiles(data.files);
+				setLastRefreshed(new Date());
+				return true;
+			} catch (err) {
+				showError(err instanceof Error ? err.message : "Network error");
+				return false;
+			} finally {
+				setActionPending(false);
+			}
+		},
+		[repoName, showError],
+	);
+
+	const handleToggleStage = useCallback(
+		(entry: StatusEntry) => {
+			void applyStageAction(entry.path, entry.staged ? "unstage" : "stage");
+		},
+		[applyStageAction],
+	);
+
 	const handleShowFile = useCallback(() => {
 		if (!selected || !selectedEditable) return;
 
@@ -229,6 +270,17 @@ export function ChangesPage() {
 		setComparisonContent(undefined);
 		setSearchParams({}, { replace: true });
 	}, [setSearchParams]);
+
+	const handleDetailStageToggle = useCallback(async () => {
+		if (!selected) return;
+		// Staging can move the file between sections, so the current selection may
+		// no longer exist afterwards; return to the list showing the new state.
+		const ok = await applyStageAction(
+			selected.path,
+			selected.staged ? "unstage" : "stage",
+		);
+		if (ok) handleBack();
+	}, [applyStageAction, handleBack, selected]);
 
 	useEffect(() => {
 		comparisonAbortRef.current?.abort();
@@ -397,6 +449,16 @@ export function ChangesPage() {
 					<span className="changes-diff-staged-label">
 						{selected.staged ? "staged" : "unstaged"}
 					</span>
+					<button
+						type="button"
+						className="changes-header-button"
+						onClick={() => {
+							void handleDetailStageToggle();
+						}}
+						disabled={actionPending}
+					>
+						{selected.staged ? "Unstage" : "Stage"}
+					</button>
 					{selectedEditable && selectedView === "diff" && (
 						<button
 							type="button"
@@ -504,15 +566,29 @@ export function ChangesPage() {
 									<span className="changes-section-count">{staged.length}</span>
 								</div>
 								{staged.map((entry) => (
-									<button
-										type="button"
+									<div
+										className="changes-file-row"
 										key={`staged-${entry.path}`}
-										className="changes-file-entry"
-										onClick={() => handleSelectFile(entry)}
 									>
-										<StatusBadge status={entry.status} />
-										<span className="changes-file-path">{entry.path}</span>
-									</button>
+										<button
+											type="button"
+											className="changes-file-entry"
+											onClick={() => handleSelectFile(entry)}
+										>
+											<StatusBadge status={entry.status} />
+											<span className="changes-file-path">{entry.path}</span>
+										</button>
+										<button
+											type="button"
+											className="changes-file-action"
+											onClick={() => handleToggleStage(entry)}
+											disabled={actionPending}
+											aria-label={`Unstage ${entry.path}`}
+											title="Unstage"
+										>
+											<Minus size={18} />
+										</button>
+									</div>
 								))}
 							</>
 						)}
@@ -526,15 +602,29 @@ export function ChangesPage() {
 									</span>
 								</div>
 								{unstaged.map((entry) => (
-									<button
-										type="button"
+									<div
+										className="changes-file-row"
 										key={`unstaged-${entry.path}`}
-										className="changes-file-entry"
-										onClick={() => handleSelectFile(entry)}
 									>
-										<StatusBadge status={entry.status} />
-										<span className="changes-file-path">{entry.path}</span>
-									</button>
+										<button
+											type="button"
+											className="changes-file-entry"
+											onClick={() => handleSelectFile(entry)}
+										>
+											<StatusBadge status={entry.status} />
+											<span className="changes-file-path">{entry.path}</span>
+										</button>
+										<button
+											type="button"
+											className="changes-file-action"
+											onClick={() => handleToggleStage(entry)}
+											disabled={actionPending}
+											aria-label={`Stage ${entry.path}`}
+											title="Stage"
+										>
+											<Plus size={18} />
+										</button>
+									</div>
 								))}
 							</>
 						)}

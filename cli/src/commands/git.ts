@@ -38,6 +38,36 @@ export function registerGit(
 		);
 
 	git
+		.command("stage")
+		.description("Stage a file's changes")
+		.argument("<path>", "File path")
+		.option("--repo <name>", "Repository name")
+		.action(async (filePath: string, opts: { repo?: string }) => {
+			const params = new URLSearchParams();
+			if (opts.repo) params.set("repo", opts.repo);
+			const qs = params.toString();
+			const data = await api.post(`/api/git/stage${qs ? `?${qs}` : ""}`, {
+				path: filePath,
+			});
+			output(data, getFormat());
+		});
+
+	git
+		.command("unstage")
+		.description("Unstage a file's changes")
+		.argument("<path>", "File path")
+		.option("--repo <name>", "Repository name")
+		.action(async (filePath: string, opts: { repo?: string }) => {
+			const params = new URLSearchParams();
+			if (opts.repo) params.set("repo", opts.repo);
+			const qs = params.toString();
+			const data = await api.post(`/api/git/unstage${qs ? `?${qs}` : ""}`, {
+				path: filePath,
+			});
+			output(data, getFormat());
+		});
+
+	git
 		.command("log")
 		.description("Show recent commits")
 		.option("--limit <n>", "Number of commits", "25")
