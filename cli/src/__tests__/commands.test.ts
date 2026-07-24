@@ -284,6 +284,42 @@ describe("git show-diff", () => {
 	});
 });
 
+describe("git stage", () => {
+	test("POST /api/git/stage with repo param", async () => {
+		const status = { files: [{ path: "a.ts", status: "added", staged: true }] };
+		mockFetch(status);
+		const data = await api.post("/api/git/stage?repo=Rift", { path: "a.ts" });
+		expect(data).toEqual(status);
+		expect(globalThis.fetch).toHaveBeenCalledWith(
+			"http://localhost:3000/api/git/stage?repo=Rift",
+			{
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ path: "a.ts" }),
+			},
+		);
+	});
+});
+
+describe("git unstage", () => {
+	test("POST /api/git/unstage with repo param", async () => {
+		const status = {
+			files: [{ path: "a.ts", status: "modified", staged: false }],
+		};
+		mockFetch(status);
+		const data = await api.post("/api/git/unstage?repo=Rift", { path: "a.ts" });
+		expect(data).toEqual(status);
+		expect(globalThis.fetch).toHaveBeenCalledWith(
+			"http://localhost:3000/api/git/unstage?repo=Rift",
+			{
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ path: "a.ts" }),
+			},
+		);
+	});
+});
+
 // --- Format ---
 
 describe("format", () => {

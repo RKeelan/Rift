@@ -808,4 +808,126 @@ describe("ChangesPage", () => {
 			expect(timestamp?.textContent).toContain("Last refreshed");
 		});
 	});
+
+	test("stages an unstaged file from the list", async () => {
+		const stageBodies: string[] = [];
+		let files: StatusFile[] = [
+			{ path: "app.ts", status: "modified", staged: false },
+		];
+
+		globalThis.fetch = mock(
+			(input: string | URL | Request, init?: RequestInit) => {
+				const url = typeof input === "string" ? input : input.toString();
+
+				if (url.includes("/api/git/stage")) {
+					stageBodies.push(String(init?.body ?? ""));
+					files = [{ path: "app.ts", status: "modified", staged: true }];
+					return Promise.resolve(
+						new Response(JSON.stringify({ files }), {
+							status: 200,
+							headers: { "Content-Type": "application/json" },
+						}),
+					);
+				}
+
+				if (url.includes("/api/git/status")) {
+					return Promise.resolve(
+						new Response(JSON.stringify({ files }), {
+							status: 200,
+							headers: { "Content-Type": "application/json" },
+						}),
+					);
+				}
+
+				return Promise.resolve(new Response("Not found", { status: 404 }));
+			},
+		) as typeof fetch;
+
+		const { container } = renderChangesPage();
+
+		await waitFor(() => {
+			expect(screen.getByLabelText("Stage app.ts")).not.toBeNull();
+		});
+
+		fireEvent.click(screen.getByLabelText("Stage app.ts"));
+
+		await waitFor(() => {
+			expect(stageBodies.length).toBe(1);
+			expect(JSON.parse(stageBodies[0]).path).toBe("app.ts");
+		});
+
+		await waitFor(() => {
+			const headers = container.querySelectorAll(".changes-section-header");
+			expect(headers[0]?.textContent).toContain("Staged");
+			expect(screen.getByLabelText("Unstage app.ts")).not.toBeNull();
+		});
+	});
+
+	test("unstages from the diff detail view and returns to the list", async () => {
+		const unstageBodies: string[] = [];
+		let files: StatusFile[] = [
+			{ path: "app.ts", status: "modified", staged: true },
+		];
+
+		globalThis.fetch = mock(
+			(input: string | URL | Request, init?: RequestInit) => {
+				const url = typeof input === "string" ? input : input.toString();
+
+				if (url.includes("/api/git/unstage")) {
+					unstageBodies.push(String(init?.body ?? ""));
+					files = [{ path: "app.ts", status: "modified", staged: false }];
+					return Promise.resolve(
+						new Response(JSON.stringify({ files }), {
+							status: 200,
+							headers: { "Content-Type": "application/json" },
+						}),
+					);
+				}
+
+				if (url.includes("/api/git/status")) {
+					return Promise.resolve(
+						new Response(JSON.stringify({ files }), {
+							status: 200,
+							headers: { "Content-Type": "application/json" },
+						}),
+					);
+				}
+
+				if (url.includes("/api/git/diff")) {
+					return Promise.resolve(
+						new Response(
+							JSON.stringify({ diff: "some diff", truncated: false }),
+							{
+								status: 200,
+								headers: { "Content-Type": "application/json" },
+							},
+						),
+					);
+				}
+
+				return Promise.resolve(new Response("Not found", { status: 404 }));
+			},
+		) as typeof fetch;
+
+		const { container } = renderChangesPage();
+
+		await waitFor(() => {
+			expect(container.querySelector(".changes-file-entry")).not.toBeNull();
+		});
+
+		fireEvent.click(container.querySelector(".changes-file-entry") as Element);
+
+		await waitFor(() => {
+			expect(container.querySelector(".changes-diff-view")).not.toBeNull();
+		});
+
+		fireEvent.click(screen.getByRole("button", { name: "Unstage" }));
+
+		await waitFor(() => {
+			expect(unstageBodies.length).toBe(1);
+			expect(JSON.parse(unstageBodies[0]).path).toBe("app.ts");
+			expect(container.querySelector(".changes-page")).not.toBeNull();
+			expect(container.querySelector(".changes-diff-view")).toBeNull();
+		});
+	});
 });
