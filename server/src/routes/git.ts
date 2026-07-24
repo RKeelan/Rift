@@ -1,7 +1,7 @@
 import path from "node:path";
 import type { Request, Response } from "express";
 import { Router } from "express";
-import { simpleGit } from "simple-git";
+import { simpleGit, type StatusResult } from "simple-git";
 import {
 	type RepoRoot,
 	resolveRepoInRoots,
@@ -52,6 +52,26 @@ function mapWorkingTreeStatus(code: string): FileStatus | null {
 	}
 }
 
+function buildStatusEntries(status: StatusResult): StatusEntry[] {
+	const entries: StatusEntry[] = [];
+
+	for (const file of status.files) {
+		// Staged change
+		const stagedStatus = mapIndexStatus(file.index);
+		if (stagedStatus) {
+			entries.push({ path: file.path, status: stagedStatus, staged: true });
+		}
+
+		// Unstaged change
+		const unstagedStatus = mapWorkingTreeStatus(file.working_dir);
+		if (unstagedStatus) {
+			entries.push({ path: file.path, status: unstagedStatus, staged: false });
+		}
+	}
+
+	return entries;
+}
+
 async function resolveGitRepo(
 	roots: RepoRoot[],
 	req: Request,
@@ -81,6 +101,74 @@ async function resolveGitRepo(
 	return simpleGit(result.path);
 }
 
+async function handleStageAction(
+	roots: RepoRoot[],
+	req: Request,
+	res: Response,
+	action: "stage" | "unstage",
+): Promise<void> {
+	const git = await resolveGitRepo(roots, req, res);
+	if (!git) return;
+
+	const isRepo = await git.checkIsRepo();
+	if (!isRepo) {
+		res.status(400).json({
+			error: {
+				code: "NOT_GIT_REPO",
+				message: "The working directory is not a git repository",
+			},
+		});
+		return;
+	}
+
+	const filePath = req.body?.path;
+	if (typeof filePath !== "string" || filePath.length === 0) {
+		res.status(400).json({
+			error: { code: "MISSING_PATH", message: "path parameter is required" },
+		});
+		return;
+	}
+
+	// git status reports repo-root-relative paths, so validate and run against
+	// the repo root even when the server was started from a subdirectory.
+	const toplevel = (await git.revparse(["--show-toplevel"])).trim();
+	const resolved = await resolveSafePath(toplevel, filePath);
+	if (!resolved) {
+		res.status(403).json({
+			error: {
+				code: "PATH_FORBIDDEN",
+				message: "Path escapes the working directory",
+			},
+		});
+		return;
+	}
+
+	const gitRoot = simpleGit(toplevel);
+	const relativePath = path.relative(toplevel, resolved);
+	try {
+		if (action === "stage") {
+			// `git add` stages additions, modifications, and deletions alike.
+			await gitRoot.raw(["add", "--", relativePath]);
+		} else {
+			// A plain reset (no explicit HEAD) unstages the path whether or not
+			// the repo has any commits yet; `reset HEAD` would fail before the
+			// first commit.
+			await gitRoot.raw(["reset", "-q", "--", relativePath]);
+		}
+	} catch (err) {
+		res.status(500).json({
+			error: {
+				code: "GIT_ERROR",
+				message: err instanceof Error ? err.message : "Git command failed",
+			},
+		});
+		return;
+	}
+
+	const status = await gitRoot.status();
+	res.json({ files: buildStatusEntries(status) });
+}
+
 export function gitRoutes(roots: RepoRoot[]): Router {
 	const router = Router();
 
@@ -101,34 +189,17 @@ export function gitRoutes(roots: RepoRoot[]): Router {
 		}
 
 		const status = await git.status();
-		const entries: StatusEntry[] = [];
+		res.json({ files: buildStatusEntries(status) });
+	});
 
-		for (const file of status.files) {
-			const index = file.index;
-			const working = file.working_dir;
+	// POST /api/git/stage?repo=<name>  body: { path }
+	router.post("/stage", async (req, res) => {
+		await handleStageAction(roots, req, res, "stage");
+	});
 
-			// Staged change
-			const stagedStatus = mapIndexStatus(index);
-			if (stagedStatus) {
-				entries.push({
-					path: file.path,
-					status: stagedStatus,
-					staged: true,
-				});
-			}
-
-			// Unstaged change
-			const unstagedStatus = mapWorkingTreeStatus(working);
-			if (unstagedStatus) {
-				entries.push({
-					path: file.path,
-					status: unstagedStatus,
-					staged: false,
-				});
-			}
-		}
-
-		res.json({ files: entries });
+	// POST /api/git/unstage?repo=<name>  body: { path }
+	router.post("/unstage", async (req, res) => {
+		await handleStageAction(roots, req, res, "unstage");
 	});
 
 	// GET /api/git/log?repo=<name>&limit=<n>&offset=<n>
