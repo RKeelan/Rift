@@ -305,7 +305,8 @@ describe("ChangesPage", () => {
 		const diffContent = "--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new";
 
 		mockFetchForChanges(
-			[{ path: "file.ts", status: "modified", staged: true }],
+			// A deleted file has no editor view, so it stays in the read-only diff.
+			[{ path: "file.ts", status: "deleted", staged: false }],
 			{
 				diff: {
 					path: "file.ts",
@@ -547,19 +548,23 @@ describe("ChangesPage", () => {
 		});
 	});
 
-	test("keeps staged files in diff view", async () => {
+	test("opens staged files in the unstage editor", async () => {
 		mockFetchForChanges(
 			[{ path: "src/utils.ts", status: "modified", staged: true }],
 			{
+				baseContent: {
+					path: "src/utils.ts",
+					content: "export const value = 0;\n",
+				},
 				diff: {
 					path: "src/utils.ts",
-					diff: "some diff",
+					diff: "@@ -1 +1 @@\n-export const value = 0;\n+export const value = 1;\n",
 					truncated: false,
 				},
 			},
 		);
 
-		renderChangesPage();
+		const { container } = renderChangesPage();
 
 		await waitFor(() => {
 			expect(screen.getByText("src/utils.ts")).not.toBeNull();
@@ -569,10 +574,16 @@ describe("ChangesPage", () => {
 			fireEvent.click(screen.getByText("src/utils.ts"));
 		});
 
+		// A staged file opens read-only against the index: a diff toggle is
+		// offered, but there is no Save button and we start in the editor rather
+		// than the diff view.
 		await waitFor(() => {
-			expect(screen.queryByRole("button", { name: "Show diff" })).toBeNull();
-			expect(screen.queryByRole("button", { name: "Show file" })).toBeNull();
-			expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
+			expect(screen.getByRole("button", { name: "Show diff" })).not.toBeNull();
+		});
+		expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
+		expect(screen.queryByRole("button", { name: "Show file" })).toBeNull();
+		await waitFor(() => {
+			expect(container.querySelector(".cm-content")).not.toBeNull();
 		});
 	});
 
@@ -863,7 +874,7 @@ describe("ChangesPage", () => {
 		});
 	});
 
-	test("unstages from the diff detail view and returns to the list", async () => {
+	test("unstages a whole staged file from the detail header and returns to the list", async () => {
 		const unstageBodies: string[] = [];
 		let files: StatusFile[] = [
 			{ path: "app.ts", status: "modified", staged: true },
@@ -921,7 +932,13 @@ describe("ChangesPage", () => {
 			expect(container.querySelector(".changes-diff-view")).not.toBeNull();
 		});
 
-		fireEvent.click(screen.getByRole("button", { name: "Unstage" }));
+		// The editor also offers a line-level Unstage, so target the header's
+		// whole-file button, which returns to the list.
+		const header = container.querySelector(".changes-diff-header") as Element;
+		const unstageButton = Array.from(header.querySelectorAll("button")).find(
+			(button) => button.textContent === "Unstage",
+		) as HTMLButtonElement;
+		fireEvent.click(unstageButton);
 
 		await waitFor(() => {
 			expect(unstageBodies.length).toBe(1);

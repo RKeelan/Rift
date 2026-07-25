@@ -139,3 +139,84 @@ describe("buildPartialPatch", () => {
 		);
 	});
 });
+
+describe("buildPartialPatch (reverse)", () => {
+	// Reverse mode reads an index→HEAD diff and reconstructs the index (new)
+	// side exactly, so `git apply --cached --reverse` peels the selected lines
+	// back out. It mirrors staging: an unselected `+` becomes context and an
+	// unselected `-` is dropped.
+	test("unstages a modification as a unit, keeping the rest staged", () => {
+		const input = diff(
+			"@@ -1,4 +1,4 @@",
+			" one",
+			"-two",
+			"+TWO",
+			" three",
+			"-four",
+			"+FOUR",
+		);
+
+		expect(buildPartialPatch(input, [[2, 2]], true)).toBe(
+			diff("@@ -1,4 +1,4 @@", " one", "-two", "+TWO", " three", " FOUR"),
+		);
+	});
+
+	test("unstages an addition without the neighbouring modification", () => {
+		const input = diff("@@ -1,2 +1,3 @@", " alpha", "-beta", "+BETA", "+gamma");
+
+		expect(buildPartialPatch(input, [[3, 3]], true)).toBe(
+			diff("@@ -1,2 +1,3 @@", " alpha", " BETA", "+gamma"),
+		);
+	});
+
+	test("unstages a staged deletion when the line below it is selected", () => {
+		const input = diff("@@ -1,3 +1,2 @@", " a", "-b", " c");
+
+		expect(buildPartialPatch(input, [[2, 2]], true)).toBe(
+			diff("@@ -1,3 +1,2 @@", " a", "-b", " c"),
+		);
+	});
+
+	test("returns null when the selection covers no staged change", () => {
+		const input = diff("@@ -1,2 +1,2 @@", "-alpha", "+ALPHA", " beta");
+
+		// Line 2 is unchanged context, so nothing is unstaged.
+		expect(buildPartialPatch(input, [[2, 2]], true)).toBeNull();
+	});
+
+	test("keeps the no-newline marker of a surviving context line", () => {
+		const input = diff(
+			"@@ -1,1 +1,3 @@",
+			" alpha",
+			"+beta",
+			"+gamma",
+			"\\ No newline at end of file",
+		);
+
+		// Unstaging beta leaves gamma staged, so gamma stays as `+` and keeps its
+		// trailing marker.
+		expect(buildPartialPatch(input, [[2, 2]], true)).toBe(
+			diff(
+				"@@ -1,1 +1,3 @@",
+				" alpha",
+				"+beta",
+				" gamma",
+				"\\ No newline at end of file",
+			),
+		);
+	});
+
+	test("preserves carriage returns in a CRLF diff", () => {
+		const input = diff(
+			"@@ -1,3 +1,3 @@",
+			" one\r",
+			"-two\r",
+			"+TWO\r",
+			" three\r",
+		);
+
+		expect(buildPartialPatch(input, [[2, 2]], true)).toBe(
+			diff("@@ -1,3 +1,3 @@", " one\r", "-two\r", "+TWO\r", " three\r"),
+		);
+	});
+});
