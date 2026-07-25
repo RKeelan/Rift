@@ -591,6 +591,137 @@ describe("POST /api/git/stage and /api/git/unstage", () => {
 	});
 });
 
+describe("POST /api/git/stage (line ranges)", () => {
+	let reposRoot: string;
+	let repoDir: string;
+	let app: ReturnType<typeof createApp>;
+
+	beforeAll(async () => {
+		reposRoot = await fs.mkdtemp(
+			path.join(os.tmpdir(), "rift-git-stage-lines-"),
+		);
+		repoDir = path.join(reposRoot, repoName);
+		await fs.mkdir(repoDir);
+
+		execSync("git init", { cwd: repoDir });
+		execSync("git config user.email 'test@test.com'", { cwd: repoDir });
+		execSync("git config user.name 'Test'", { cwd: repoDir });
+		// Store line endings verbatim so the CRLF case is deterministic.
+		execSync("git config core.autocrlf false", { cwd: repoDir });
+
+		app = createApp(makeConfig(reposRoot));
+	});
+
+	afterAll(async () => {
+		await fs.rm(reposRoot, { recursive: true, force: true });
+	});
+
+	async function commitFile(name: string, content: string): Promise<void> {
+		await fs.writeFile(path.join(repoDir, name), content);
+		execSync(`git add ${name}`, { cwd: repoDir });
+		execSync(`git commit -m "add ${name}"`, { cwd: repoDir });
+	}
+
+	function indexContent(name: string): string {
+		return execSync(`git show :${name}`, { cwd: repoDir }).toString();
+	}
+
+	test("stages a single modified line, leaving the rest unstaged", async () => {
+		await commitFile("mod.txt", "one\ntwo\nthree\nfour\n");
+		await fs.writeFile(
+			path.join(repoDir, "mod.txt"),
+			"one\nTWO\nthree\nFOUR\n",
+		);
+
+		const res = await supertest(app)
+			.post(`/api/git/stage?repo=${repoRef}`)
+			.send({ path: "mod.txt", ranges: [[2, 2]] });
+
+		expect(res.status).toBe(200);
+		expect(indexContent("mod.txt")).toBe("one\nTWO\nthree\nfour\n");
+		// The working tree keeps both edits.
+		expect(await fs.readFile(path.join(repoDir, "mod.txt"), "utf8")).toBe(
+			"one\nTWO\nthree\nFOUR\n",
+		);
+
+		const stagedEntry = res.body.files.find(
+			(f: { path: string; staged: boolean }) =>
+				f.path === "mod.txt" && f.staged,
+		);
+		const unstagedEntry = res.body.files.find(
+			(f: { path: string; staged: boolean }) =>
+				f.path === "mod.txt" && !f.staged,
+		);
+		expect(stagedEntry?.status).toBe("modified");
+		expect(unstagedEntry?.status).toBe("modified");
+
+		execSync("git reset HEAD mod.txt", { cwd: repoDir });
+		execSync("git checkout -- mod.txt", { cwd: repoDir });
+	});
+
+	test("stages a pure deletion when the following line is selected", async () => {
+		await commitFile("del.txt", "a\nb\nc\n");
+		await fs.writeFile(path.join(repoDir, "del.txt"), "a\nc\n");
+
+		const res = await supertest(app)
+			.post(`/api/git/stage?repo=${repoRef}`)
+			.send({ path: "del.txt", ranges: [[2, 2]] });
+
+		expect(res.status).toBe(200);
+		expect(indexContent("del.txt")).toBe("a\nc\n");
+
+		execSync("git reset HEAD del.txt", { cwd: repoDir });
+		execSync("git checkout -- del.txt", { cwd: repoDir });
+	});
+
+	test("preserves CRLF line endings when staging", async () => {
+		await commitFile("crlf.txt", "one\r\ntwo\r\nthree\r\n");
+		await fs.writeFile(
+			path.join(repoDir, "crlf.txt"),
+			"one\r\nTWO\r\nthree\r\n",
+		);
+
+		const res = await supertest(app)
+			.post(`/api/git/stage?repo=${repoRef}`)
+			.send({ path: "crlf.txt", ranges: [[2, 2]] });
+
+		expect(res.status).toBe(200);
+		expect(indexContent("crlf.txt")).toBe("one\r\nTWO\r\nthree\r\n");
+
+		execSync("git reset HEAD crlf.txt", { cwd: repoDir });
+		execSync("git checkout -- crlf.txt", { cwd: repoDir });
+	});
+
+	test("a selection covering no change stages nothing", async () => {
+		await commitFile("noop.txt", "alpha\nbeta\n");
+		await fs.writeFile(path.join(repoDir, "noop.txt"), "ALPHA\nbeta\n");
+
+		const res = await supertest(app)
+			.post(`/api/git/stage?repo=${repoRef}`)
+			// Line 2 is unchanged, so the modification of line 1 is untouched.
+			.send({ path: "noop.txt", ranges: [[2, 2]] });
+
+		expect(res.status).toBe(200);
+		expect(indexContent("noop.txt")).toBe("alpha\nbeta\n");
+		const stagedEntry = res.body.files.find(
+			(f: { path: string; staged: boolean }) =>
+				f.path === "noop.txt" && f.staged,
+		);
+		expect(stagedEntry).toBeUndefined();
+
+		execSync("git checkout -- noop.txt", { cwd: repoDir });
+	});
+
+	test("returns INVALID_RANGES for malformed ranges", async () => {
+		const res = await supertest(app)
+			.post(`/api/git/stage?repo=${repoRef}`)
+			.send({ path: "mod.txt", ranges: [[2]] });
+
+		expect(res.status).toBe(400);
+		expect(res.body.error.code).toBe("INVALID_RANGES");
+	});
+});
+
 describe("POST /api/git/stage (repo with no commits)", () => {
 	let reposRoot: string;
 	let repoDir: string;
