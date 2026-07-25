@@ -2,6 +2,26 @@ import type { Command } from "commander";
 import type { ApiClient } from "../api.js";
 import { output } from "../format.js";
 
+function collectLine(value: string, previous: string[]): string[] {
+	previous.push(value);
+	return previous;
+}
+
+// Parses a `--line` value of "a-b" or a single "a" into an inclusive,
+// 1-based [start, end] pair.
+function parseLineRange(value: string): [number, number] {
+	const match = /^(\d+)(?:-(\d+))?$/.exec(value.trim());
+	if (!match) {
+		throw new Error(`Invalid --line value "${value}"; expected N or N-M`);
+	}
+	const start = Number(match[1]);
+	const end = match[2] ? Number(match[2]) : start;
+	if (start < 1 || end < start) {
+		throw new Error(`Invalid --line range "${value}"`);
+	}
+	return [start, end];
+}
+
 export function registerGit(
 	parent: Command,
 	api: ApiClient,
@@ -41,16 +61,31 @@ export function registerGit(
 		.command("stage")
 		.description("Stage a file's changes")
 		.argument("<path>", "File path")
+		.option(
+			"--line <range>",
+			"Stage only these lines, e.g. 12-14 or 40 (repeatable)",
+			collectLine,
+			[],
+		)
 		.option("--repo <name>", "Repository name")
-		.action(async (filePath: string, opts: { repo?: string }) => {
-			const params = new URLSearchParams();
-			if (opts.repo) params.set("repo", opts.repo);
-			const qs = params.toString();
-			const data = await api.post(`/api/git/stage${qs ? `?${qs}` : ""}`, {
-				path: filePath,
-			});
-			output(data, getFormat());
-		});
+		.action(
+			async (filePath: string, opts: { line: string[]; repo?: string }) => {
+				const params = new URLSearchParams();
+				if (opts.repo) params.set("repo", opts.repo);
+				const qs = params.toString();
+				const body: { path: string; ranges?: [number, number][] } = {
+					path: filePath,
+				};
+				if (opts.line.length > 0) {
+					body.ranges = opts.line.map(parseLineRange);
+				}
+				const data = await api.post(
+					`/api/git/stage${qs ? `?${qs}` : ""}`,
+					body,
+				);
+				output(data, getFormat());
+			},
+		);
 
 	git
 		.command("unstage")

@@ -65,6 +65,9 @@ export function ChangesPage() {
 	const [comparisonContent, setComparisonContent] = useState<
 		string | undefined
 	>(undefined);
+	// Bumped after a stage so the base-content and diff effects refetch, shrinking
+	// the editor's change decorations to whatever remains unstaged.
+	const [refreshToken, setRefreshToken] = useState(0);
 	const abortRef = useRef<AbortController | null>(null);
 	const diffAbortRef = useRef<AbortController | null>(null);
 	const comparisonAbortRef = useRef<AbortController | null>(null);
@@ -261,6 +264,11 @@ export function ChangesPage() {
 		fetchStatus(true);
 	}, [fetchStatus]);
 
+	const handleEditorStaged = useCallback(() => {
+		setRefreshToken((value) => value + 1);
+		fetchStatus(true);
+	}, [fetchStatus]);
+
 	const handleBack = useCallback(() => {
 		diffAbortRef.current?.abort();
 		comparisonAbortRef.current?.abort();
@@ -310,6 +318,8 @@ export function ChangesPage() {
 					repo: repoName,
 					path: selectedPath,
 					staged: selectedStaged ?? "false",
+					// Changes after a stage so the index base is refetched fresh.
+					_refresh: String(refreshToken),
 				});
 				const res = await fetch(apiUrl(`/api/git/base-content?${params}`), {
 					signal: controller.signal,
@@ -347,6 +357,7 @@ export function ChangesPage() {
 		selectedStaged,
 		selectedStatus,
 		showError,
+		refreshToken,
 	]);
 
 	useEffect(() => {
@@ -376,6 +387,7 @@ export function ChangesPage() {
 					const params = new URLSearchParams({
 						repo: repoName,
 						path: selectedPath,
+						_refresh: String(refreshToken),
 					});
 					const res = await fetch(apiUrl(`/api/files/content?${params}`), {
 						signal: controller.signal,
@@ -393,6 +405,7 @@ export function ChangesPage() {
 						repo: repoName,
 						path: selectedPath,
 						staged: selectedStaged,
+						_refresh: String(refreshToken),
 					});
 					const res = await fetch(apiUrl(`/api/git/diff?${params}`), {
 						signal: controller.signal,
@@ -430,6 +443,7 @@ export function ChangesPage() {
 		selectedStatus,
 		selectedView,
 		showError,
+		refreshToken,
 	]);
 
 	// Diff view
@@ -511,6 +525,7 @@ export function ChangesPage() {
 								filePath={selected.path}
 								repo={repoName as string}
 								onSaved={handleEditorSaved}
+								onStaged={handleEditorStaged}
 							/>
 						</div>
 					)}

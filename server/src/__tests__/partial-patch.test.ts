@@ -1,0 +1,141 @@
+import { describe, expect, test } from "bun:test";
+import { buildPartialPatch } from "../routes/git.js";
+
+const PREAMBLE = [
+	"diff --git a/file.txt b/file.txt",
+	"index 1111111..2222222 100644",
+	"--- a/file.txt",
+	"+++ b/file.txt",
+].join("\n");
+
+function diff(...body: string[]): string {
+	return `${PREAMBLE}\n${body.join("\n")}\n`;
+}
+
+describe("buildPartialPatch", () => {
+	test("stages a modification as a unit, dropping the rest", () => {
+		const input = diff(
+			"@@ -1,4 +1,4 @@",
+			" one",
+			"-two",
+			"+TWO",
+			" three",
+			"-four",
+			"+FOUR",
+		);
+
+		expect(buildPartialPatch(input, [[2, 2]])).toBe(
+			diff("@@ -1,4 +1,4 @@", " one", "-two", "+TWO", " three", " four"),
+		);
+	});
+
+	test("stages an addition without the neighbouring modification", () => {
+		const input = diff("@@ -1,2 +1,3 @@", " alpha", "-beta", "+BETA", "+gamma");
+
+		expect(buildPartialPatch(input, [[3, 3]])).toBe(
+			diff("@@ -1,2 +1,3 @@", " alpha", " beta", "+gamma"),
+		);
+	});
+
+	test("stages a pure deletion when the line below it is selected", () => {
+		const input = diff("@@ -1,3 +1,2 @@", " a", "-b", " c");
+
+		expect(buildPartialPatch(input, [[2, 2]])).toBe(
+			diff("@@ -1,3 +1,2 @@", " a", "-b", " c"),
+		);
+	});
+
+	test("returns null when the selection covers no change", () => {
+		const input = diff(
+			"@@ -1,4 +1,4 @@",
+			" one",
+			"-two",
+			"+TWO",
+			" three",
+			"-four",
+			"+FOUR",
+		);
+
+		// Line 1 is unchanged context, so nothing is staged.
+		expect(buildPartialPatch(input, [[1, 1]])).toBeNull();
+	});
+
+	test("returns null for an empty diff", () => {
+		expect(buildPartialPatch("", [[1, 1]])).toBeNull();
+	});
+
+	test("preserves carriage returns in a CRLF diff", () => {
+		const input = diff(
+			"@@ -1,3 +1,3 @@",
+			" one\r",
+			"-two\r",
+			"+TWO\r",
+			" three\r",
+		);
+
+		expect(buildPartialPatch(input, [[2, 2]])).toBe(
+			diff("@@ -1,3 +1,3 @@", " one\r", "-two\r", "+TWO\r", " three\r"),
+		);
+	});
+
+	test("drops the no-newline marker of a dropped addition", () => {
+		const input = diff(
+			"@@ -1,1 +1,3 @@",
+			" alpha",
+			"+beta",
+			"+gamma",
+			"\\ No newline at end of file",
+		);
+
+		// Selecting beta keeps it; gamma and its trailing marker are dropped.
+		expect(buildPartialPatch(input, [[2, 2]])).toBe(
+			diff("@@ -1,1 +1,3 @@", " alpha", "+beta"),
+		);
+	});
+
+	test("keeps the no-newline marker of a kept addition", () => {
+		const input = diff(
+			"@@ -1,1 +1,3 @@",
+			" alpha",
+			"+beta",
+			"+gamma",
+			"\\ No newline at end of file",
+		);
+
+		// Selecting gamma drops beta but keeps gamma's trailing marker.
+		expect(buildPartialPatch(input, [[3, 3]])).toBe(
+			diff(
+				"@@ -1,1 +1,3 @@",
+				" alpha",
+				"+gamma",
+				"\\ No newline at end of file",
+			),
+		);
+	});
+
+	test("half-stages a multi-line replacement", () => {
+		const input = diff("@@ -1,3 +1,2 @@", "-x1", "-x2", "-x3", "+y1", "+y2");
+
+		expect(buildPartialPatch(input, [[1, 1]])).toBe(
+			diff("@@ -1,3 +1,2 @@", "-x1", "-x2", "-x3", "+y1"),
+		);
+	});
+
+	test("keeps only the hunks a range touches", () => {
+		const input = diff(
+			"@@ -1,2 +1,2 @@",
+			" a",
+			"-b",
+			"+B",
+			"@@ -10,2 +10,2 @@",
+			" j",
+			"-k",
+			"+K",
+		);
+
+		// Range 2 selects the first hunk's change; the second hunk is dropped.
+		expect(buildPartialPatch(input, [[2, 2]])).toBe(
+			diff("@@ -1,2 +1,2 @@", " a", "-b", "+B"),
+		);
+	});
+});

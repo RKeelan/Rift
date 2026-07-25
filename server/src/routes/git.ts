@@ -1,7 +1,10 @@
+import { randomUUID } from "node:crypto";
+import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import type { Request, Response } from "express";
 import { Router } from "express";
-import { simpleGit, type StatusResult } from "simple-git";
+import { type StatusResult, simpleGit } from "simple-git";
 import {
 	type RepoRoot,
 	resolveRepoInRoots,
@@ -101,6 +104,153 @@ async function resolveGitRepo(
 	return simpleGit(result.path);
 }
 
+// A [start, end] pair of inclusive, 1-based line numbers naming lines in the
+// working-tree file.
+type LineRange = [number, number];
+
+// Validates the optional `ranges` field on a stage request. Returns the parsed
+// ranges, or null when the field is malformed so the caller can reject it.
+function validateRanges(value: unknown): LineRange[] | null {
+	if (!Array.isArray(value)) return null;
+	const ranges: LineRange[] = [];
+	for (const entry of value) {
+		if (!Array.isArray(entry) || entry.length !== 2) return null;
+		const [start, end] = entry;
+		if (!Number.isInteger(start) || !Number.isInteger(end)) return null;
+		if (start < 1 || end < start) return null;
+		ranges.push([start, end]);
+	}
+	return ranges;
+}
+
+function lineSelected(line: number, ranges: LineRange[]): boolean {
+	for (const [start, end] of ranges) {
+		if (line >= start && line <= end) return true;
+	}
+	return false;
+}
+
+/**
+ * Rebuilds a partial patch from a `git diff` (index→worktree) that stages only
+ * the lines the selection covers. Context lines stay context; a selected `+`
+ * stays `+` and an unselected one is dropped; a selected `-` stays `-` and an
+ * unselected one becomes context so it survives in the index. Deletions anchor
+ * to the new-file line they sit in front of, matching the editor's widgets, so
+ * a modification (delete paired with an add) stages as a unit and a pure
+ * deletion stages when the line just below it is selected.
+ *
+ * The old (index) side is reconstructed exactly, so the patch applies cleanly
+ * with `git apply --cached --recount`, which derives the hunk counts from the
+ * rebuilt body. Splitting on `\n` preserves any `\r`, keeping a CRLF working
+ * tree byte-faithful. Returns null when the selection covers no change.
+ */
+export function buildPartialPatch(
+	diff: string,
+	ranges: LineRange[],
+): string | null {
+	if (!diff) return null;
+
+	const hasTrailingNewline = diff.endsWith("\n");
+	const lines = diff.split("\n");
+	if (hasTrailingNewline) lines.pop();
+
+	const out: string[] = [];
+	let index = 0;
+
+	// Preamble: the file headers before the first hunk.
+	while (index < lines.length && !lines[index].startsWith("@@")) {
+		out.push(lines[index]);
+		index += 1;
+	}
+	if (index === lines.length) return null;
+
+	let anyChange = false;
+
+	while (index < lines.length && lines[index].startsWith("@@")) {
+		const header = lines[index];
+		index += 1;
+		const match = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(header);
+		let newLine = match ? Number(match[1]) : 1;
+
+		const body: string[] = [];
+		let hunkChanged = false;
+		let lastDropped = false;
+
+		while (
+			index < lines.length &&
+			!lines[index].startsWith("@@") &&
+			!lines[index].startsWith("diff --git")
+		) {
+			const line = lines[index];
+			index += 1;
+
+			if (line.startsWith("\\")) {
+				// A "\ No newline at end of file" marker follows the fate of the
+				// line it trails: keep it only when that line survived.
+				if (!lastDropped) body.push(line);
+				continue;
+			}
+
+			if (line.startsWith("+") && !line.startsWith("+++")) {
+				if (lineSelected(newLine, ranges)) {
+					body.push(line);
+					hunkChanged = true;
+					lastDropped = false;
+				} else {
+					lastDropped = true;
+				}
+				newLine += 1;
+				continue;
+			}
+
+			if (line.startsWith("-") && !line.startsWith("---")) {
+				if (lineSelected(newLine, ranges)) {
+					body.push(line);
+					hunkChanged = true;
+				} else {
+					body.push(` ${line.slice(1)}`);
+				}
+				lastDropped = false;
+				continue;
+			}
+
+			// Context line (present in both index and working tree).
+			body.push(line);
+			lastDropped = false;
+			newLine += 1;
+		}
+
+		if (hunkChanged) {
+			out.push(header, ...body);
+			anyChange = true;
+		}
+	}
+
+	if (!anyChange) return null;
+	return `${out.join("\n")}\n`;
+}
+
+// Stages the selected lines of a change by rebuilding a partial patch and
+// applying it to the index. A no-op (returning false) when the selection
+// covers no change, so the caller can still return the current status.
+async function applyPartialStage(
+	gitRoot: ReturnType<typeof simpleGit>,
+	relativePath: string,
+	ranges: LineRange[],
+): Promise<void> {
+	const diff = await gitRoot.diff(["--", relativePath]);
+	const patch = buildPartialPatch(diff, ranges);
+	if (patch === null) return;
+
+	const patchFile = path.join(os.tmpdir(), `rift-stage-${randomUUID()}.patch`);
+	await fs.writeFile(patchFile, patch);
+	try {
+		await gitRoot.raw(["apply", "--cached", "--recount", patchFile]);
+	} finally {
+		await fs.rm(patchFile, { force: true });
+	}
+}
+
 async function handleStageAction(
 	roots: RepoRoot[],
 	req: Request,
@@ -129,6 +279,22 @@ async function handleStageAction(
 		return;
 	}
 
+	// An optional `ranges` field opts staging into line granularity; unstaging
+	// stays whole-file for now (a later phase covers line-level unstaging).
+	let ranges: LineRange[] | null = null;
+	if (action === "stage" && req.body?.ranges !== undefined) {
+		ranges = validateRanges(req.body.ranges);
+		if (ranges === null) {
+			res.status(400).json({
+				error: {
+					code: "INVALID_RANGES",
+					message: "ranges must be an array of [start, end] line pairs",
+				},
+			});
+			return;
+		}
+	}
+
 	// git status reports repo-root-relative paths, so validate and run against
 	// the repo root even when the server was started from a subdirectory.
 	const toplevel = (await git.revparse(["--show-toplevel"])).trim();
@@ -147,8 +313,16 @@ async function handleStageAction(
 	const relativePath = path.relative(toplevel, resolved);
 	try {
 		if (action === "stage") {
-			// `git add` stages additions, modifications, and deletions alike.
-			await gitRoot.raw(["add", "--", relativePath]);
+			if (ranges !== null) {
+				// Line-level staging: an empty selection or one that touches no
+				// change stages nothing, falling through to the current status.
+				if (ranges.length > 0) {
+					await applyPartialStage(gitRoot, relativePath, ranges);
+				}
+			} else {
+				// `git add` stages additions, modifications, and deletions alike.
+				await gitRoot.raw(["add", "--", relativePath]);
+			}
 		} else {
 			// A plain reset (no explicit HEAD) unstages the path whether or not
 			// the repo has any commits yet; `reset HEAD` would fail before the
@@ -192,7 +366,7 @@ export function gitRoutes(roots: RepoRoot[]): Router {
 		res.json({ files: buildStatusEntries(status) });
 	});
 
-	// POST /api/git/stage?repo=<name>  body: { path }
+	// POST /api/git/stage?repo=<name>  body: { path, ranges? }
 	router.post("/stage", async (req, res) => {
 		await handleStageAction(roots, req, res, "stage");
 	});
