@@ -367,6 +367,27 @@ export function getChangeRegionLines(
 	return regions;
 }
 
+/**
+ * Turns the editor's selection into inclusive, 1-based line ranges for staging.
+ * A collapsed selection yields the cursor's line. A selection that ends at the
+ * very start of a line (a full-line drag) does not claim that trailing line,
+ * matching how editors show such a selection.
+ */
+function selectionToRanges(
+	state: import("@codemirror/state").EditorState,
+): [number, number][] {
+	const ranges: [number, number][] = [];
+	for (const range of state.selection.ranges) {
+		const startLine = state.doc.lineAt(range.from).number;
+		let endLine = state.doc.lineAt(range.to).number;
+		if (range.to > range.from && state.doc.lineAt(range.to).from === range.to) {
+			endLine = Math.max(startLine, endLine - 1);
+		}
+		ranges.push([startLine, endLine]);
+	}
+	return ranges;
+}
+
 type LanguageLoader = () => Promise<
 	import("@codemirror/language").LanguageSupport
 >;
@@ -467,6 +488,7 @@ export interface TextFileEditorProps {
 	changeDiff?: string | null;
 	changeType?: ChangeType | null;
 	onSaved?: () => void;
+	onStaged?: () => void;
 }
 
 export function TextFileEditor({
@@ -478,6 +500,7 @@ export function TextFileEditor({
 	changeDiff = null,
 	changeType = null,
 	onSaved,
+	onStaged,
 }: TextFileEditorProps) {
 	const editorRef = useRef<HTMLDivElement>(null);
 	const viewRef = useRef<import("@codemirror/view").EditorView | null>(null);
@@ -496,6 +519,7 @@ export function TextFileEditor({
 	const [error, setError] = useState<string | null>(null);
 	const [loading, setLoading] = useState(true);
 	const [saving, setSaving] = useState(false);
+	const [staging, setStaging] = useState(false);
 	const [dirty, setDirty] = useState(false);
 	const [mtimeMs, setMtimeMs] = useState<number | null>(null);
 	const [reloadToken, setReloadToken] = useState(0);
@@ -955,6 +979,44 @@ export function TextFileEditor({
 		}
 	}, [filePath, mtimeMs, onSaved, readOnly, repo]);
 
+	const handleStage = useCallback(async () => {
+		if (readOnly || !viewRef.current || dirty) return;
+
+		setStaging(true);
+		setError(null);
+
+		try {
+			const body: { path: string; ranges?: [number, number][] } = {
+				path: filePath,
+			};
+			// A brand-new file has no diff to slice, so stage it whole; a tracked
+			// change stages exactly the selected lines.
+			if (changeType !== "untracked") {
+				body.ranges = selectionToRanges(viewRef.current.state);
+			}
+
+			const response = await fetch(
+				apiUrl(`/api/git/stage?repo=${encodeURIComponent(repo)}`),
+				{
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify(body),
+				},
+			);
+
+			if (!response.ok) {
+				const errorBody = await response.json().catch(() => null);
+				throw new Error(getErrorMessage(errorBody, response.status));
+			}
+
+			onStaged?.();
+		} catch (err) {
+			setError(err instanceof Error ? err.message : "Failed to stage changes");
+		} finally {
+			setStaging(false);
+		}
+	}, [changeType, dirty, filePath, onStaged, readOnly, repo]);
+
 	return (
 		<div className="text-file-editor">
 			<div className="text-file-editor-toolbar">
@@ -1008,6 +1070,19 @@ export function TextFileEditor({
 					>
 						Reload
 					</button>
+					{!readOnly && onStaged && (
+						<button
+							type="button"
+							className="text-file-editor-button"
+							onClick={handleStage}
+							disabled={
+								loading || saving || staging || dirty || changeCount === 0
+							}
+							title={dirty ? "Save before staging" : "Stage the selected lines"}
+						>
+							{staging ? "Staging..." : "Stage"}
+						</button>
+					)}
 					{!readOnly && (
 						<button
 							type="button"

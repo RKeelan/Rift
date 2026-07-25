@@ -8,9 +8,9 @@ import {
 	waitFor,
 } from "@testing-library/react";
 import {
-	TextFileEditor,
 	getChangeRegionLines,
 	getEditorChangeDecorations,
+	TextFileEditor,
 } from "../components/TextFileEditor.tsx";
 
 describe("getEditorChangeDecorations", () => {
@@ -225,6 +225,120 @@ describe("change navigation", () => {
 		expect(
 			screen.queryByRole("button", { name: "Previous change" }),
 		).toBeNull();
+	});
+});
+
+describe("staging", () => {
+	const originalFetch = globalThis.fetch;
+
+	afterEach(() => {
+		cleanup();
+		globalThis.fetch = originalFetch;
+	});
+
+	async function renderForStaging(
+		props: Partial<Parameters<typeof TextFileEditor>[0]> = {},
+		fileContent = "a\nB\nc\n",
+	) {
+		const requests: RequestInit[] = [];
+		globalThis.fetch = (async (_input: string, init?: RequestInit) => {
+			if (init?.method === "POST") {
+				requests.push(init);
+				return new Response(JSON.stringify({ files: [] }), {
+					headers: { "Content-Type": "application/json" },
+				});
+			}
+			return new Response(fileContent, {
+				headers: { "x-file-mtime-ms": "1" },
+			});
+		}) as unknown as typeof fetch;
+
+		const { container } = render(
+			<TextFileEditor
+				filePath="notes.txt"
+				repo="test-repo"
+				comparisonContent={"a\nb\nc\n"}
+				changeType="modified"
+				onStaged={() => {}}
+				{...props}
+			/>,
+		);
+		await waitFor(() => {
+			expect(container.querySelector(".cm-content")).not.toBeNull();
+		});
+
+		const { EditorView } = await import("@codemirror/view");
+		const view = EditorView.findFromDOM(
+			container.querySelector(".cm-editor") as HTMLElement,
+		);
+		if (!view) throw new Error("editor view not found");
+		return { view, requests };
+	}
+
+	test("sends the selected lines as ranges", async () => {
+		const { view, requests } = await renderForStaging();
+
+		const line2 = view.state.doc.line(2);
+		act(() => {
+			view.dispatch({ selection: { anchor: line2.from, head: line2.to } });
+		});
+
+		const stage = await screen.findByRole("button", { name: "Stage" });
+		await waitFor(() => {
+			expect(stage.hasAttribute("disabled")).toBe(false);
+		});
+		fireEvent.click(stage);
+
+		await waitFor(() => {
+			expect(requests.length).toBe(1);
+		});
+		expect(JSON.parse(requests[0].body as string)).toEqual({
+			path: "notes.txt",
+			ranges: [[2, 2]],
+		});
+	});
+
+	test("stages an untracked file whole, without ranges", async () => {
+		const { requests } = await renderForStaging({
+			changeType: "untracked",
+			comparisonContent: "",
+		});
+
+		const stage = await screen.findByRole("button", { name: "Stage" });
+		await waitFor(() => {
+			expect(stage.hasAttribute("disabled")).toBe(false);
+		});
+		fireEvent.click(stage);
+
+		await waitFor(() => {
+			expect(requests.length).toBe(1);
+		});
+		expect(JSON.parse(requests[0].body as string)).toEqual({
+			path: "notes.txt",
+		});
+	});
+
+	test("disables staging while the buffer is dirty", async () => {
+		const { view } = await renderForStaging();
+
+		const stage = await screen.findByRole("button", { name: "Stage" });
+		await waitFor(() => {
+			expect(stage.hasAttribute("disabled")).toBe(false);
+		});
+
+		act(() => {
+			view.dispatch({ changes: { from: 0, insert: "x" } });
+		});
+
+		await waitFor(() => {
+			expect(stage.hasAttribute("disabled")).toBe(true);
+		});
+	});
+
+	test("hides the Stage button without an onStaged handler", async () => {
+		await renderForStaging({ onStaged: undefined });
+
+		expect(screen.queryByRole("button", { name: "Stage" })).toBeNull();
 	});
 });
 

@@ -301,6 +301,72 @@ describe("git stage", () => {
 	});
 });
 
+describe("git stage --line", () => {
+	async function runStage(args: string[]): Promise<void> {
+		const { Command } = await import("commander");
+		const { registerGit } = await import("../commands/git.js");
+		const program = new Command();
+		program.exitOverride();
+		registerGit(program, api, () => "json");
+		const origWrite = process.stdout.write;
+		process.stdout.write = (() => true) as typeof process.stdout.write;
+		try {
+			await program.parseAsync(args, { from: "user" });
+		} finally {
+			process.stdout.write = origWrite;
+		}
+	}
+
+	test("sends parsed line ranges", async () => {
+		mockFetch({ files: [] });
+		await runStage([
+			"git",
+			"stage",
+			"file.txt",
+			"--line",
+			"12-14",
+			"--line",
+			"40",
+			"--repo",
+			"Rift",
+		]);
+		expect(globalThis.fetch).toHaveBeenCalledWith(
+			"http://localhost:3000/api/git/stage?repo=Rift",
+			{
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({
+					path: "file.txt",
+					ranges: [
+						[12, 14],
+						[40, 40],
+					],
+				}),
+			},
+		);
+	});
+
+	test("omits ranges when no --line is given", async () => {
+		mockFetch({ files: [] });
+		await runStage(["git", "stage", "file.txt", "--repo", "Rift"]);
+		expect(globalThis.fetch).toHaveBeenCalledWith(
+			"http://localhost:3000/api/git/stage?repo=Rift",
+			{
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ path: "file.txt" }),
+			},
+		);
+	});
+
+	test("rejects a malformed --line value", async () => {
+		mockFetch({ files: [] });
+		await expect(
+			runStage(["git", "stage", "file.txt", "--line", "abc"]),
+		).rejects.toThrow(/Invalid --line/);
+	});
+});
+
 describe("git unstage", () => {
 	test("POST /api/git/unstage with repo param", async () => {
 		const status = {
