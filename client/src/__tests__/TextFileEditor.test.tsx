@@ -77,6 +77,20 @@ describe("getEditorChangeDecorations", () => {
 		expect(decorations.deletedChunks).toEqual([]);
 	});
 
+	test("marks every line of a deleted file as removed", () => {
+		const decorations = getEditorChangeDecorations({
+			currentContent: "line 1\nline 2",
+			loadedContent: "line 1\nline 2",
+			changeType: "deleted",
+		});
+
+		expect(decorations.lineHighlights).toEqual([
+			{ kind: "deleted", lineNumber: 1 },
+			{ kind: "deleted", lineNumber: 2 },
+		]);
+		expect(decorations.deletedChunks).toEqual([]);
+	});
+
 	test("marks only the edited lines when two edits sit far apart", () => {
 		const baseline = Array.from({ length: 2000 }, (_, i) => `line ${i}`);
 		const edited = baseline.slice();
@@ -450,6 +464,71 @@ describe("unstaging", () => {
 		expect(JSON.parse(requests[0].body as string)).toEqual({
 			path: "notes.txt",
 		});
+	});
+});
+
+describe("deleted files", () => {
+	const originalFetch = globalThis.fetch;
+
+	afterEach(() => {
+		cleanup();
+		globalThis.fetch = originalFetch;
+	});
+
+	async function renderDeleted(
+		props: Partial<Parameters<typeof TextFileEditor>[0]> = {},
+	) {
+		const contentUrls: string[] = [];
+		globalThis.fetch = (async (input: string) => {
+			contentUrls.push(input);
+			return new Response("gone line 1\ngone line 2\n", {
+				headers: { "x-file-mtime-ms": "1" },
+			});
+		}) as unknown as typeof fetch;
+
+		const { container } = render(
+			<TextFileEditor
+				filePath="notes.txt"
+				repo="test-repo"
+				changeType="deleted"
+				deleted
+				{...props}
+			/>,
+		);
+		await waitFor(() => {
+			expect(container.querySelector(".cm-content")).not.toBeNull();
+		});
+		return { container, contentUrls };
+	}
+
+	test("loads the index blob for an unstaged deletion and strikes every line", async () => {
+		const { container, contentUrls } = await renderDeleted();
+
+		expect(
+			contentUrls.some(
+				(url) =>
+					url.includes("/api/git/base-content") && url.includes("staged=false"),
+			),
+		).toBe(true);
+		await waitFor(() => {
+			expect(
+				container.querySelector(".cm-changedLine--deleted"),
+			).not.toBeNull();
+		});
+		expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
+		expect(screen.queryByRole("button", { name: "Stage" })).toBeNull();
+		expect(screen.queryByRole("button", { name: "Unstage" })).toBeNull();
+	});
+
+	test("loads the HEAD blob for a staged deletion", async () => {
+		const { contentUrls } = await renderDeleted({ staged: true });
+
+		expect(
+			contentUrls.some(
+				(url) =>
+					url.includes("/api/git/base-content") && url.includes("staged=true"),
+			),
+		).toBe(true);
 	});
 });
 
