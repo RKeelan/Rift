@@ -487,8 +487,14 @@ export interface TextFileEditorProps {
 	comparisonContent?: string;
 	changeDiff?: string | null;
 	changeType?: ChangeType | null;
+	// When set, the editor loads the file's staged (index) content instead of the
+	// working tree and presents it read-only, so a staged change can be viewed and
+	// unstaged line by line. It stays editable in the DOM so selecting lines works
+	// as it does when staging, but every edit is rejected.
+	staged?: boolean;
 	onSaved?: () => void;
 	onStaged?: () => void;
+	onUnstaged?: () => void;
 }
 
 export function TextFileEditor({
@@ -499,8 +505,10 @@ export function TextFileEditor({
 	comparisonContent,
 	changeDiff = null,
 	changeType = null,
+	staged = false,
 	onSaved,
 	onStaged,
+	onUnstaged,
 }: TextFileEditorProps) {
 	const editorRef = useRef<HTMLDivElement>(null);
 	const viewRef = useRef<import("@codemirror/view").EditorView | null>(null);
@@ -520,6 +528,7 @@ export function TextFileEditor({
 	const [loading, setLoading] = useState(true);
 	const [saving, setSaving] = useState(false);
 	const [staging, setStaging] = useState(false);
+	const [unstaging, setUnstaging] = useState(false);
 	const [dirty, setDirty] = useState(false);
 	const [mtimeMs, setMtimeMs] = useState<number | null>(null);
 	const [reloadToken, setReloadToken] = useState(0);
@@ -543,12 +552,19 @@ export function TextFileEditor({
 
 		(async () => {
 			try {
-				const response = await fetch(
-					apiUrl(
-						`/api/files/content?repo=${encodeURIComponent(repo)}&path=${encodeURIComponent(filePath)}&_reload=${reloadToken}`,
-					),
-					{ signal: controller.signal },
-				);
+				// A staged change opens against its index blob (`git show :path`),
+				// exposed by base-content with staged=false, so the lines the user
+				// selects match what `git diff --cached` reports for unstaging.
+				const contentUrl = staged
+					? apiUrl(
+							`/api/git/base-content?repo=${encodeURIComponent(repo)}&path=${encodeURIComponent(filePath)}&staged=false&_reload=${reloadToken}`,
+						)
+					: apiUrl(
+							`/api/files/content?repo=${encodeURIComponent(repo)}&path=${encodeURIComponent(filePath)}&_reload=${reloadToken}`,
+						);
+				const response = await fetch(contentUrl, {
+					signal: controller.signal,
+				});
 
 				if (!response.ok) {
 					const body = await response.json().catch(() => null);
@@ -579,7 +595,7 @@ export function TextFileEditor({
 			active = false;
 			controller.abort();
 		};
-	}, [filePath, repo, reloadToken]);
+	}, [filePath, repo, reloadToken, staged]);
 
 	useEffect(() => {
 		if (content === null || !editorRef.current) return;
@@ -805,6 +821,10 @@ export function TextFileEditor({
 					EditorView.editable.of(false),
 					EditorState.readOnly.of(true),
 				);
+			} else if (staged) {
+				// Staged content is read-only, but the DOM stays editable so line
+				// selection for unstaging behaves exactly as it does when staging.
+				baseExtensions.unshift(EditorState.readOnly.of(true));
 			}
 
 			const state = EditorState.create({
@@ -875,7 +895,15 @@ export function TextFileEditor({
 				viewRef.current = null;
 			}
 		};
-	}, [changeDiff, changeType, comparisonContent, content, filePath, readOnly]);
+	}, [
+		changeDiff,
+		changeType,
+		comparisonContent,
+		content,
+		filePath,
+		readOnly,
+		staged,
+	]);
 
 	useEffect(() => {
 		lineWrapRef.current = lineWrap;
@@ -932,7 +960,7 @@ export function TextFileEditor({
 	}, [dirty]);
 
 	const handleSave = useCallback(async () => {
-		if (readOnly || !viewRef.current || mtimeMs === null) return;
+		if (readOnly || staged || !viewRef.current || mtimeMs === null) return;
 
 		setSaving(true);
 		setError(null);
@@ -977,7 +1005,7 @@ export function TextFileEditor({
 		} finally {
 			setSaving(false);
 		}
-	}, [filePath, mtimeMs, onSaved, readOnly, repo]);
+	}, [filePath, mtimeMs, onSaved, readOnly, repo, staged]);
 
 	const handleStage = useCallback(async () => {
 		if (readOnly || !viewRef.current || dirty) return;
@@ -1017,15 +1045,60 @@ export function TextFileEditor({
 		}
 	}, [changeType, dirty, filePath, onStaged, readOnly, repo]);
 
+	const handleUnstage = useCallback(async () => {
+		if (!staged || !viewRef.current) return;
+
+		setUnstaging(true);
+		setError(null);
+
+		try {
+			const body: { path: string; ranges?: [number, number][] } = {
+				path: filePath,
+			};
+			// A staged new file has no HEAD side to slice, so unstage it whole; a
+			// staged modification unstages exactly the selected lines.
+			if (changeType !== "added") {
+				body.ranges = selectionToRanges(viewRef.current.state);
+			}
+
+			const response = await fetch(
+				apiUrl(`/api/git/unstage?repo=${encodeURIComponent(repo)}`),
+				{
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify(body),
+				},
+			);
+
+			if (!response.ok) {
+				const errorBody = await response.json().catch(() => null);
+				throw new Error(getErrorMessage(errorBody, response.status));
+			}
+
+			// The index just changed, so reload the buffer to the new staged
+			// content; the decorations then shrink to whatever remains staged.
+			setReloadToken((value) => value + 1);
+			onUnstaged?.();
+		} catch (err) {
+			setError(
+				err instanceof Error ? err.message : "Failed to unstage changes",
+			);
+		} finally {
+			setUnstaging(false);
+		}
+	}, [changeType, filePath, onUnstaged, repo, staged]);
+
 	return (
 		<div className="text-file-editor">
 			<div className="text-file-editor-toolbar">
 				<div className="text-file-editor-status">
 					{readOnly
 						? readOnlyLabel
-						: dirty
-							? "Unsaved changes"
-							: "No unsaved changes"}
+						: staged
+							? "Staged changes"
+							: dirty
+								? "Unsaved changes"
+								: "No unsaved changes"}
 				</div>
 				<div className="text-file-editor-actions">
 					{changeCount > 0 && (
@@ -1070,7 +1143,7 @@ export function TextFileEditor({
 					>
 						Reload
 					</button>
-					{!readOnly && onStaged && (
+					{!readOnly && !staged && onStaged && (
 						<button
 							type="button"
 							className="text-file-editor-button"
@@ -1083,7 +1156,18 @@ export function TextFileEditor({
 							{staging ? "Staging..." : "Stage"}
 						</button>
 					)}
-					{!readOnly && (
+					{staged && onUnstaged && (
+						<button
+							type="button"
+							className="text-file-editor-button"
+							onClick={handleUnstage}
+							disabled={loading || unstaging || changeCount === 0}
+							title="Unstage the selected lines"
+						>
+							{unstaging ? "Unstaging..." : "Unstage"}
+						</button>
+					)}
+					{!readOnly && !staged && (
 						<button
 							type="button"
 							className="text-file-editor-button text-file-editor-button--primary"

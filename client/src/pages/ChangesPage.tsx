@@ -88,16 +88,24 @@ export function ChangesPage() {
 					file.path === selected.path && file.staged === selected.staged,
 			)?.status ?? null)
 		: null;
-	const selectedEditable =
-		selected !== null && !selected.staged && selectedStatus !== "deleted";
+	const isDeleted = selectedStatus === "deleted";
+	// An unstaged, non-deleted change opens in the working-tree editor; a staged,
+	// non-deleted change opens read-only against the index for line-level
+	// unstaging. Deleted files stay in the read-only diff view for now.
+	const selectedEditable = selected !== null && !selected.staged && !isDeleted;
+	const selectedUnstageable = selected?.staged === true && !isDeleted;
+	const selectedInEditor = selectedEditable || selectedUnstageable;
+	const showDiffRequested = searchParams.get("view") === "diff";
 	const selectedView =
 		selected === null
 			? null
-			: searchParams.get("view") === "diff" && selectedEditable
+			: showDiffRequested && selectedInEditor
 				? "diff"
 				: selectedEditable
 					? "edit"
-					: "diff";
+					: selectedUnstageable
+						? "unstage"
+						: "diff";
 
 	// Abort any in-flight requests on unmount
 	useEffect(() => {
@@ -165,15 +173,19 @@ export function ChangesPage() {
 
 	// Poll every 3 seconds while the tab is visible
 	useEffect(() => {
+		// Skip the poll while an editor is open (edit or unstage) so a refetch
+		// never disrupts the buffer the user is working in.
+		const inEditor = selectedView === "edit" || selectedView === "unstage";
+
 		function handleVisibilityChange() {
-			if (document.visibilityState === "visible" && selectedView !== "edit") {
+			if (document.visibilityState === "visible" && !inEditor) {
 				fetchStatus(true);
 			}
 		}
 
 		document.addEventListener("visibilitychange", handleVisibilityChange);
 		const interval = setInterval(() => {
-			if (document.visibilityState === "visible" && selectedView !== "edit") {
+			if (document.visibilityState === "visible" && !inEditor) {
 				fetchStatus(true);
 			}
 		}, 3000);
@@ -239,16 +251,16 @@ export function ChangesPage() {
 	);
 
 	const handleShowFile = useCallback(() => {
-		if (!selected || !selectedEditable) return;
+		if (!selected || !selectedInEditor) return;
 
 		setSearchParams({
 			path: selected.path,
 			staged: String(selected.staged),
 		});
-	}, [selected, selectedEditable, setSearchParams]);
+	}, [selected, selectedInEditor, setSearchParams]);
 
 	const handleShowDiff = useCallback(() => {
-		if (!selected || !selectedEditable) return;
+		if (!selected || !selectedInEditor) return;
 
 		setSearchParams(
 			{
@@ -258,13 +270,18 @@ export function ChangesPage() {
 			},
 			{ replace: true },
 		);
-	}, [selected, selectedEditable, setSearchParams]);
+	}, [selected, selectedInEditor, setSearchParams]);
 
 	const handleEditorSaved = useCallback(() => {
 		fetchStatus(true);
 	}, [fetchStatus]);
 
 	const handleEditorStaged = useCallback(() => {
+		setRefreshToken((value) => value + 1);
+		fetchStatus(true);
+	}, [fetchStatus]);
+
+	const handleEditorUnstaged = useCallback(() => {
 		setRefreshToken((value) => value + 1);
 		fetchStatus(true);
 	}, [fetchStatus]);
@@ -297,7 +314,7 @@ export function ChangesPage() {
 			!hasSelectedFile ||
 			!repoName ||
 			selectedPath === null ||
-			!selectedEditable
+			!selectedInEditor
 		) {
 			setComparisonContent(undefined);
 			return;
@@ -352,7 +369,7 @@ export function ChangesPage() {
 	}, [
 		hasSelectedFile,
 		repoName,
-		selectedEditable,
+		selectedInEditor,
 		selectedPath,
 		selectedStaged,
 		selectedStatus,
@@ -473,7 +490,7 @@ export function ChangesPage() {
 					>
 						{selected.staged ? "Unstage" : "Stage"}
 					</button>
-					{selectedEditable && selectedView === "diff" && (
+					{selectedInEditor && selectedView === "diff" && (
 						<button
 							type="button"
 							className="changes-header-button"
@@ -482,17 +499,18 @@ export function ChangesPage() {
 							Show file
 						</button>
 					)}
-					{selectedEditable && selectedView === "edit" && (
-						<button
-							type="button"
-							className="changes-header-button"
-							onClick={() => {
-								void handleShowDiff();
-							}}
-						>
-							Show diff
-						</button>
-					)}
+					{selectedInEditor &&
+						(selectedView === "edit" || selectedView === "unstage") && (
+							<button
+								type="button"
+								className="changes-header-button"
+								onClick={() => {
+									void handleShowDiff();
+								}}
+							>
+								Show diff
+							</button>
+						)}
 				</header>
 				<div className="changes-diff-content">
 					{selectedView === "diff" && (
@@ -526,6 +544,20 @@ export function ChangesPage() {
 								repo={repoName as string}
 								onSaved={handleEditorSaved}
 								onStaged={handleEditorStaged}
+							/>
+						</div>
+					)}
+					{selectedView === "unstage" && selectedUnstageable && (
+						<div className="changes-editor-view">
+							<div className="changes-editor-note">Viewing staged content.</div>
+							<TextFileEditor
+								comparisonContent={comparisonContent}
+								changeDiff={diff}
+								changeType={selectedStatus}
+								filePath={selected.path}
+								repo={repoName as string}
+								staged
+								onUnstaged={handleEditorUnstaged}
 							/>
 						</div>
 					)}

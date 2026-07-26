@@ -386,6 +386,72 @@ describe("git unstage", () => {
 	});
 });
 
+describe("git unstage --line", () => {
+	async function runUnstage(args: string[]): Promise<void> {
+		const { Command } = await import("commander");
+		const { registerGit } = await import("../commands/git.js");
+		const program = new Command();
+		program.exitOverride();
+		registerGit(program, api, () => "json");
+		const origWrite = process.stdout.write;
+		process.stdout.write = (() => true) as typeof process.stdout.write;
+		try {
+			await program.parseAsync(args, { from: "user" });
+		} finally {
+			process.stdout.write = origWrite;
+		}
+	}
+
+	test("sends parsed line ranges", async () => {
+		mockFetch({ files: [] });
+		await runUnstage([
+			"git",
+			"unstage",
+			"file.txt",
+			"--line",
+			"12-14",
+			"--line",
+			"40",
+			"--repo",
+			"Rift",
+		]);
+		expect(globalThis.fetch).toHaveBeenCalledWith(
+			"http://localhost:3000/api/git/unstage?repo=Rift",
+			{
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({
+					path: "file.txt",
+					ranges: [
+						[12, 14],
+						[40, 40],
+					],
+				}),
+			},
+		);
+	});
+
+	test("omits ranges when no --line is given", async () => {
+		mockFetch({ files: [] });
+		await runUnstage(["git", "unstage", "file.txt", "--repo", "Rift"]);
+		expect(globalThis.fetch).toHaveBeenCalledWith(
+			"http://localhost:3000/api/git/unstage?repo=Rift",
+			{
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ path: "file.txt" }),
+			},
+		);
+	});
+
+	test("rejects a malformed --line value", async () => {
+		mockFetch({ files: [] });
+		await expect(
+			runUnstage(["git", "unstage", "file.txt", "--line", "abc"]),
+		).rejects.toThrow(/Invalid --line/);
+	});
+});
+
 // --- Format ---
 
 describe("format", () => {
