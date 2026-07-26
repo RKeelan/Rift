@@ -91,16 +91,31 @@ export function registerGit(
 		.command("unstage")
 		.description("Unstage a file's changes")
 		.argument("<path>", "File path")
+		.option(
+			"--line <range>",
+			"Unstage only these lines, e.g. 12-14 or 40 (repeatable)",
+			collectLine,
+			[],
+		)
 		.option("--repo <name>", "Repository name")
-		.action(async (filePath: string, opts: { repo?: string }) => {
-			const params = new URLSearchParams();
-			if (opts.repo) params.set("repo", opts.repo);
-			const qs = params.toString();
-			const data = await api.post(`/api/git/unstage${qs ? `?${qs}` : ""}`, {
-				path: filePath,
-			});
-			output(data, getFormat());
-		});
+		.action(
+			async (filePath: string, opts: { line: string[]; repo?: string }) => {
+				const params = new URLSearchParams();
+				if (opts.repo) params.set("repo", opts.repo);
+				const qs = params.toString();
+				const body: { path: string; ranges?: [number, number][] } = {
+					path: filePath,
+				};
+				if (opts.line.length > 0) {
+					body.ranges = opts.line.map(parseLineRange);
+				}
+				const data = await api.post(
+					`/api/git/unstage${qs ? `?${qs}` : ""}`,
+					body,
+				);
+				output(data, getFormat());
+			},
+		);
 
 	git
 		.command("log")

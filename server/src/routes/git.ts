@@ -131,22 +131,28 @@ function lineSelected(line: number, ranges: LineRange[]): boolean {
 }
 
 /**
- * Rebuilds a partial patch from a `git diff` (index→worktree) that stages only
- * the lines the selection covers. Context lines stay context; a selected `+`
- * stays `+` and an unselected one is dropped; a selected `-` stays `-` and an
- * unselected one becomes context so it survives in the index. Deletions anchor
- * to the new-file line they sit in front of, matching the editor's widgets, so
- * a modification (delete paired with an add) stages as a unit and a pure
- * deletion stages when the line just below it is selected.
+ * Rebuilds a partial patch from a `git diff` that keeps only the lines the
+ * selection covers. Context lines stay context; a selected `+` stays `+` and a
+ * selected `-` stays `-`. Deletions anchor to the new-file line they sit in
+ * front of, matching the editor's widgets, so a modification (delete paired
+ * with an add) is kept as a unit and a pure deletion is kept when the line
+ * just below it is selected.
  *
- * The old (index) side is reconstructed exactly, so the patch applies cleanly
- * with `git apply --cached --recount`, which derives the hunk counts from the
- * rebuilt body. Splitting on `\n` preserves any `\r`, keeping a CRLF working
- * tree byte-faithful. Returns null when the selection covers no change.
+ * Staging (the default) reads an index→worktree diff and reconstructs the old
+ * (index) side exactly, so the patch applies cleanly with `git apply --cached`:
+ * an unselected `+` is dropped, an unselected `-` becomes context. Unstaging
+ * (`reverse`) reads an index→HEAD diff and reconstructs the new (index) side
+ * exactly, so the patch applies cleanly with `git apply --cached --reverse`:
+ * an unselected `+` becomes context, an unselected `-` is dropped. Both use
+ * `--recount` to derive the hunk counts from the rebuilt body.
+ *
+ * Splitting on `\n` preserves any `\r`, keeping a CRLF working tree
+ * byte-faithful. Returns null when the selection covers no change.
  */
 export function buildPartialPatch(
 	diff: string,
 	ranges: LineRange[],
+	reverse = false,
 ): string | null {
 	if (!diff) return null;
 
@@ -196,6 +202,11 @@ export function buildPartialPatch(
 					body.push(line);
 					hunkChanged = true;
 					lastDropped = false;
+				} else if (reverse) {
+					// Unstaging leaves an unselected staged addition in the index, so
+					// it stays as context to reconstruct the index side exactly.
+					body.push(` ${line.slice(1)}`);
+					lastDropped = false;
 				} else {
 					lastDropped = true;
 				}
@@ -207,10 +218,15 @@ export function buildPartialPatch(
 				if (lineSelected(newLine, ranges)) {
 					body.push(line);
 					hunkChanged = true;
+					lastDropped = false;
+				} else if (reverse) {
+					// The index omits an unselected staged deletion, so drop it to keep
+					// the reconstructed index side matching what git reverses against.
+					lastDropped = true;
 				} else {
 					body.push(` ${line.slice(1)}`);
+					lastDropped = false;
 				}
-				lastDropped = false;
 				continue;
 			}
 
@@ -251,6 +267,37 @@ async function applyPartialStage(
 	}
 }
 
+// Unstages the selected lines of a staged change by rebuilding a partial patch
+// from the index→HEAD diff and reversing it out of the index. Mirrors
+// applyPartialStage. A no-op (returning early) when the selection covers no
+// staged change, so the caller can still return the current status.
+async function applyPartialUnstage(
+	gitRoot: ReturnType<typeof simpleGit>,
+	relativePath: string,
+	ranges: LineRange[],
+): Promise<void> {
+	const diff = await gitRoot.diff(["--cached", "--", relativePath]);
+	const patch = buildPartialPatch(diff, ranges, true);
+	if (patch === null) return;
+
+	const patchFile = path.join(
+		os.tmpdir(),
+		`rift-unstage-${randomUUID()}.patch`,
+	);
+	await fs.writeFile(patchFile, patch);
+	try {
+		await gitRoot.raw([
+			"apply",
+			"--cached",
+			"--reverse",
+			"--recount",
+			patchFile,
+		]);
+	} finally {
+		await fs.rm(patchFile, { force: true });
+	}
+}
+
 async function handleStageAction(
 	roots: RepoRoot[],
 	req: Request,
@@ -279,10 +326,10 @@ async function handleStageAction(
 		return;
 	}
 
-	// An optional `ranges` field opts staging into line granularity; unstaging
-	// stays whole-file for now (a later phase covers line-level unstaging).
+	// An optional `ranges` field opts either action into line granularity;
+	// staging slices the worktree diff, unstaging reverses the index diff.
 	let ranges: LineRange[] | null = null;
-	if (action === "stage" && req.body?.ranges !== undefined) {
+	if (req.body?.ranges !== undefined) {
 		ranges = validateRanges(req.body.ranges);
 		if (ranges === null) {
 			res.status(400).json({
@@ -324,10 +371,19 @@ async function handleStageAction(
 				await gitRoot.raw(["add", "--", relativePath]);
 			}
 		} else {
-			// A plain reset (no explicit HEAD) unstages the path whether or not
-			// the repo has any commits yet; `reset HEAD` would fail before the
-			// first commit.
-			await gitRoot.raw(["reset", "-q", "--", relativePath]);
+			if (ranges !== null) {
+				// Line-level unstaging: an empty selection or one that touches no
+				// staged change unstages nothing, falling through to the current
+				// status.
+				if (ranges.length > 0) {
+					await applyPartialUnstage(gitRoot, relativePath, ranges);
+				}
+			} else {
+				// A plain reset (no explicit HEAD) unstages the path whether or not
+				// the repo has any commits yet; `reset HEAD` would fail before the
+				// first commit.
+				await gitRoot.raw(["reset", "-q", "--", relativePath]);
+			}
 		}
 	} catch (err) {
 		res.status(500).json({
