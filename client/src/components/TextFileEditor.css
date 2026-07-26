@@ -99,6 +99,13 @@
 	box-shadow: inset 3px 0 0 #7ee787;
 }
 
+.text-file-editor-surface .cm-changedLine--deleted {
+	background: rgba(248, 81, 73, 0.12);
+	box-shadow: inset 3px 0 0 #ffa198;
+	text-decoration: line-through;
+	text-decoration-color: rgba(255, 161, 152, 0.7);
+}
+
 .text-file-editor-surface .cm-deletedChunk {
 	margin: 0.125rem 0;
 	padding: 0.125rem 0;

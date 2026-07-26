@@ -301,17 +301,13 @@ describe("ChangesPage", () => {
 		expect(deletedBadge).not.toBeNull();
 	});
 
-	test("displays diff when file is clicked", async () => {
-		const diffContent = "--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new";
-
+	test("opens a deleted file read-only in the editor", async () => {
 		mockFetchForChanges(
-			// A deleted file has no editor view, so it stays in the read-only diff.
 			[{ path: "file.ts", status: "deleted", staged: false }],
 			{
-				diff: {
+				baseContent: {
 					path: "file.ts",
-					diff: diffContent,
-					truncated: false,
+					content: "const gone = true;\n",
 				},
 			},
 		);
@@ -322,40 +318,37 @@ describe("ChangesPage", () => {
 			expect(container.querySelectorAll(".changes-file-entry").length).toBe(1);
 		});
 
-		const fileEntry = container.querySelector(".changes-file-entry") as Element;
-		fireEvent.click(fileEntry);
-
-		// Should switch to the diff view
-		await waitFor(() => {
-			const diffView = container.querySelector(".changes-diff-view");
-			expect(diffView).not.toBeNull();
+		await act(async () => {
+			fireEvent.click(
+				container.querySelector(".changes-file-entry") as Element,
+			);
 		});
 
-		// DiffViewer should render the diff with coloured lines
-		const diffViewer = container.querySelector(".diff-viewer");
-		expect(diffViewer).not.toBeNull();
+		await waitFor(() => {
+			expect(container.querySelector(".changes-diff-view")).not.toBeNull();
+		});
 
-		// Check for add/remove line classes
-		const addLine = container.querySelector(".diff-add");
-		expect(addLine).not.toBeNull();
-		expect(addLine?.textContent).toContain("+new");
-
-		const removeLine = container.querySelector(".diff-remove");
-		expect(removeLine).not.toBeNull();
-		expect(removeLine?.textContent).toContain("-old");
-
-		// Check hunk header styling
-		const hunkLine = container.querySelector(".diff-hunk");
-		expect(hunkLine).not.toBeNull();
+		// The deleted file's former content opens struck through, with no raw diff
+		// viewer and no Save control.
+		await waitFor(() => {
+			expect(
+				container.querySelector(".cm-changedLine--deleted"),
+			).not.toBeNull();
+		});
+		expect(container.querySelector(".cm-content")?.textContent).toContain(
+			"const gone = true;",
+		);
+		expect(container.querySelector(".diff-viewer")).toBeNull();
+		expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
 	});
 
-	test("shows untracked file content instead of no diff", async () => {
+	test("opens an untracked file in the editor with every line added", async () => {
 		mockFetchForChanges(
 			[{ path: "scratch.txt", status: "untracked", staged: false }],
 			{
 				fileContent: {
 					path: "scratch.txt",
-					content: "- draft line 1\n- draft line 2\n",
+					content: "draft line 1\ndraft line 2\n",
 				},
 			},
 		);
@@ -366,24 +359,21 @@ describe("ChangesPage", () => {
 			expect(container.querySelectorAll(".changes-file-entry").length).toBe(1);
 		});
 
-		fireEvent.click(container.querySelector(".changes-file-entry") as Element);
-
-		await waitFor(() => {
-			expect(screen.getByRole("button", { name: "Show diff" })).not.toBeNull();
-			expect(screen.getByRole("button", { name: "Save" })).not.toBeNull();
-		});
-
-		fireEvent.click(screen.getByRole("button", { name: "Show diff" }));
-
-		await waitFor(() => {
-			const diffViewer = container.querySelector(".diff-viewer");
-			expect(diffViewer).not.toBeNull();
-			expect(diffViewer?.textContent).toContain("- draft line 1");
-			expect(container.querySelector(".diff-remove")).toBeNull();
-			expect(container.querySelector(".changes-message")?.textContent).not.toBe(
-				"No diff available",
+		await act(async () => {
+			fireEvent.click(
+				container.querySelector(".changes-file-entry") as Element,
 			);
 		});
+
+		await waitFor(() => {
+			expect(screen.getByRole("button", { name: "Save" })).not.toBeNull();
+		});
+		expect(screen.queryByRole("button", { name: "Show diff" })).toBeNull();
+
+		await waitFor(() => {
+			expect(container.querySelector(".cm-changedLine--added")).not.toBeNull();
+		});
+		expect(container.querySelector(".diff-viewer")).toBeNull();
 	});
 
 	test("shows filename and staged/unstaged label in diff header", async () => {
@@ -448,8 +438,8 @@ describe("ChangesPage", () => {
 		});
 
 		await waitFor(() => {
-			expect(screen.getByRole("button", { name: "Show diff" })).not.toBeNull();
 			expect(screen.getByRole("button", { name: "Save" })).not.toBeNull();
+			expect(screen.queryByRole("button", { name: "Show diff" })).toBeNull();
 			expect(screen.queryByRole("button", { name: "Show file" })).toBeNull();
 		});
 
@@ -535,7 +525,7 @@ describe("ChangesPage", () => {
 		});
 
 		await waitFor(() => {
-			expect(screen.getByRole("button", { name: "Show diff" })).not.toBeNull();
+			expect(screen.getByRole("button", { name: "Save" })).not.toBeNull();
 		});
 
 		await waitFor(() => {
@@ -574,75 +564,14 @@ describe("ChangesPage", () => {
 			fireEvent.click(screen.getByText("src/utils.ts"));
 		});
 
-		// A staged file opens read-only against the index: a diff toggle is
-		// offered, but there is no Save button and we start in the editor rather
-		// than the diff view.
-		await waitFor(() => {
-			expect(screen.getByRole("button", { name: "Show diff" })).not.toBeNull();
-		});
-		expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
-		expect(screen.queryByRole("button", { name: "Show file" })).toBeNull();
+		// A staged file opens read-only against the index: the editor loads, but
+		// there is no Save button.
 		await waitFor(() => {
 			expect(container.querySelector(".cm-content")).not.toBeNull();
 		});
-	});
-
-	test("switches between file and diff views for editable files", async () => {
-		mockFetchForChanges(
-			[{ path: "src/utils.ts", status: "modified", staged: false }],
-			{
-				baseContent: {
-					path: "src/utils.ts",
-					content: "export const value = 0;\n",
-				},
-				diff: {
-					path: "src/utils.ts",
-					diff: "some diff",
-					truncated: false,
-				},
-				fileContent: {
-					path: "src/utils.ts",
-					content: "export const value = 1;\n",
-				},
-			},
-		);
-
-		const { container } = renderChangesPage();
-
-		await waitFor(() => {
-			expect(screen.getByText("src/utils.ts")).not.toBeNull();
-		});
-
-		await act(async () => {
-			fireEvent.click(screen.getByText("src/utils.ts"));
-		});
-
-		await waitFor(() => {
-			expect(screen.getByRole("button", { name: "Show diff" })).not.toBeNull();
-			expect(screen.getByRole("button", { name: "Save" })).not.toBeNull();
-		});
-
-		await act(async () => {
-			fireEvent.click(screen.getByRole("button", { name: "Show diff" }));
-		});
-
-		await waitFor(() => {
-			expect(screen.getByRole("button", { name: "Show file" })).not.toBeNull();
-			expect(container.querySelector(".diff-viewer")).not.toBeNull();
-		});
-
-		await act(async () => {
-			fireEvent.click(screen.getByRole("button", { name: "Show file" }));
-		});
-
-		await waitFor(() => {
-			expect(screen.getByRole("button", { name: "Show diff" })).not.toBeNull();
-			expect(screen.getByRole("button", { name: "Save" })).not.toBeNull();
-		});
-
-		expect(
-			container.querySelector(".changes-editor-note")?.textContent,
-		).toContain("working tree file");
+		expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
+		expect(screen.queryByRole("button", { name: "Show file" })).toBeNull();
+		expect(screen.queryByRole("button", { name: "Show diff" })).toBeNull();
 	});
 
 	test("back button returns to changes list from diff view", async () => {
@@ -725,7 +654,7 @@ describe("ChangesPage", () => {
 		});
 	});
 
-	test("status refresh does not reload the open diff", async () => {
+	test("does not refetch the diff on a status refresh while the editor is open", async () => {
 		let diffRequests = 0;
 
 		globalThis.fetch = mock((input: string | URL | Request) => {
@@ -767,6 +696,18 @@ describe("ChangesPage", () => {
 				);
 			}
 
+			if (url.includes("/api/files/content")) {
+				return Promise.resolve(
+					new Response("current\n", {
+						status: 200,
+						headers: {
+							"Content-Type": "text/plain",
+							"x-file-mtime-ms": "1",
+						},
+					}),
+				);
+			}
+
 			return Promise.resolve(new Response("Not found", { status: 404 }));
 		}) as typeof fetch;
 
@@ -778,22 +719,18 @@ describe("ChangesPage", () => {
 
 		fireEvent.click(container.querySelector(".changes-file-entry") as Element);
 
+		// The editor fetches the diff once to decorate its changes.
 		await waitFor(() => {
-			expect(screen.getByRole("button", { name: "Show diff" })).not.toBeNull();
+			expect(screen.getByRole("button", { name: "Save" })).not.toBeNull();
 			expect(diffRequests).toBe(1);
 		});
 
-		fireEvent.click(screen.getByRole("button", { name: "Show diff" }));
-
-		await waitFor(() => {
-			expect(container.querySelector(".diff-viewer")).not.toBeNull();
-			expect(diffRequests).toBe(2);
-		});
-
+		// A visibility change would normally refresh status, but the poll is
+		// skipped while an editor is open, so the diff is not refetched.
 		fireEvent(document, new Event("visibilitychange"));
 
 		await waitFor(() => {
-			expect(diffRequests).toBe(2);
+			expect(diffRequests).toBe(1);
 		});
 	});
 

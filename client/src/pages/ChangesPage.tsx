@@ -2,7 +2,6 @@ import { ArrowLeft, Minus, Plus, RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { apiUrl } from "../apiUrl.ts";
-import { DiffViewer } from "../components/DiffViewer.tsx";
 import { useErrorBanner } from "../components/ErrorBanner.tsx";
 import { TextFileEditor } from "../components/TextFileEditor.tsx";
 import { useSession } from "../contexts/SessionContext.tsx";
@@ -60,8 +59,6 @@ export function ChangesPage() {
 	const [actionPending, setActionPending] = useState(false);
 	const [lastRefreshed, setLastRefreshed] = useState<Date | null>(null);
 	const [diff, setDiff] = useState<string | null>(null);
-	const [diffTruncated, setDiffTruncated] = useState(false);
-	const [diffLoading, setDiffLoading] = useState(false);
 	const [comparisonContent, setComparisonContent] = useState<
 		string | undefined
 	>(undefined);
@@ -91,21 +88,20 @@ export function ChangesPage() {
 	const isDeleted = selectedStatus === "deleted";
 	// An unstaged, non-deleted change opens in the working-tree editor; a staged,
 	// non-deleted change opens read-only against the index for line-level
-	// unstaging. Deleted files stay in the read-only diff view for now.
+	// unstaging; a deleted file opens read-only against the version being removed.
+	// Every change type now opens in the editor, so there is no separate diff view.
 	const selectedEditable = selected !== null && !selected.staged && !isDeleted;
 	const selectedUnstageable = selected?.staged === true && !isDeleted;
+	const selectedDeleted = selected !== null && isDeleted;
 	const selectedInEditor = selectedEditable || selectedUnstageable;
-	const showDiffRequested = searchParams.get("view") === "diff";
 	const selectedView =
 		selected === null
 			? null
-			: showDiffRequested && selectedInEditor
-				? "diff"
-				: selectedEditable
-					? "edit"
-					: selectedUnstageable
-						? "unstage"
-						: "diff";
+			: selectedEditable
+				? "edit"
+				: selectedUnstageable
+					? "unstage"
+					: "deleted";
 
 	// Abort any in-flight requests on unmount
 	useEffect(() => {
@@ -173,9 +169,10 @@ export function ChangesPage() {
 
 	// Poll every 3 seconds while the tab is visible
 	useEffect(() => {
-		// Skip the poll while an editor is open (edit or unstage) so a refetch
-		// never disrupts the buffer the user is working in.
-		const inEditor = selectedView === "edit" || selectedView === "unstage";
+		// Every selected file now opens in the editor, so skip the poll whenever one
+		// is open: a refetch would disrupt the buffer being edited, or flip a
+		// read-only view out from under the reader.
+		const inEditor = selectedView !== null;
 
 		function handleVisibilityChange() {
 			if (document.visibilityState === "visible" && !inEditor) {
@@ -250,28 +247,6 @@ export function ChangesPage() {
 		[applyStageAction],
 	);
 
-	const handleShowFile = useCallback(() => {
-		if (!selected || !selectedInEditor) return;
-
-		setSearchParams({
-			path: selected.path,
-			staged: String(selected.staged),
-		});
-	}, [selected, selectedInEditor, setSearchParams]);
-
-	const handleShowDiff = useCallback(() => {
-		if (!selected || !selectedInEditor) return;
-
-		setSearchParams(
-			{
-				path: selected.path,
-				staged: String(selected.staged),
-				view: "diff",
-			},
-			{ replace: true },
-		);
-	}, [selected, selectedInEditor, setSearchParams]);
-
 	const handleEditorSaved = useCallback(() => {
 		fetchStatus(true);
 	}, [fetchStatus]);
@@ -290,8 +265,6 @@ export function ChangesPage() {
 		diffAbortRef.current?.abort();
 		comparisonAbortRef.current?.abort();
 		setDiff(null);
-		setDiffTruncated(false);
-		setDiffLoading(false);
 		setComparisonContent(undefined);
 		setSearchParams({}, { replace: true });
 	}, [setSearchParams]);
@@ -380,72 +353,49 @@ export function ChangesPage() {
 	useEffect(() => {
 		diffAbortRef.current?.abort();
 
+		// The editor only needs a diff to decorate a tracked modification it is
+		// editing or unstaging. Untracked and deleted files decorate straight from
+		// their content, so they need no diff.
 		if (
 			!hasSelectedFile ||
 			!repoName ||
 			selectedPath === null ||
-			(selectedView === "edit" && selectedStatus === "untracked")
+			selectedStatus === "untracked" ||
+			selectedStatus === "deleted" ||
+			selectedStatus === null
 		) {
 			setDiff(null);
-			setDiffTruncated(false);
-			setDiffLoading(false);
 			return;
 		}
 
 		const controller = new AbortController();
 		diffAbortRef.current = controller;
-		setDiffLoading(true);
 		setDiff(null);
-		setDiffTruncated(false);
 
 		void (async () => {
 			try {
-				if (selectedStatus === "untracked") {
-					const params = new URLSearchParams({
-						repo: repoName,
-						path: selectedPath,
-						_refresh: String(refreshToken),
-					});
-					const res = await fetch(apiUrl(`/api/files/content?${params}`), {
-						signal: controller.signal,
-					});
-					if (!res.ok) {
-						const body = await res.json().catch(() => null);
-						showError(body?.error?.message ?? `Request failed (${res.status})`);
-						return;
-					}
-
-					setDiff(await res.text());
-					setDiffTruncated(false);
-				} else {
-					const params = new URLSearchParams({
-						repo: repoName,
-						path: selectedPath,
-						staged: selectedStaged,
-						_refresh: String(refreshToken),
-					});
-					const res = await fetch(apiUrl(`/api/git/diff?${params}`), {
-						signal: controller.signal,
-					});
-					if (!res.ok) {
-						const body = await res.json().catch(() => null);
-						showError(body?.error?.message ?? `Request failed (${res.status})`);
-						return;
-					}
-
-					const data: DiffResponse = await res.json();
-					setDiff(data.diff);
-					setDiffTruncated(data.truncated);
+				const params = new URLSearchParams({
+					repo: repoName,
+					path: selectedPath,
+					staged: selectedStaged ?? "false",
+					_refresh: String(refreshToken),
+				});
+				const res = await fetch(apiUrl(`/api/git/diff?${params}`), {
+					signal: controller.signal,
+				});
+				if (!res.ok) {
+					const body = await res.json().catch(() => null);
+					showError(body?.error?.message ?? `Request failed (${res.status})`);
+					return;
 				}
+
+				const data: DiffResponse = await res.json();
+				setDiff(data.diff);
 			} catch (err) {
 				if (err instanceof DOMException && err.name === "AbortError") {
 					return;
 				}
 				showError(err instanceof Error ? err.message : "Network error");
-			} finally {
-				if (!controller.signal.aborted) {
-					setDiffLoading(false);
-				}
 			}
 		})();
 
@@ -458,12 +408,11 @@ export function ChangesPage() {
 		selectedPath,
 		selectedStaged,
 		selectedStatus,
-		selectedView,
 		showError,
 		refreshToken,
 	]);
 
-	// Diff view
+	// Detail view: every change type opens in the editor.
 	if (selected) {
 		return (
 			<div className="changes-diff-view">
@@ -490,47 +439,8 @@ export function ChangesPage() {
 					>
 						{selected.staged ? "Unstage" : "Stage"}
 					</button>
-					{selectedInEditor && selectedView === "diff" && (
-						<button
-							type="button"
-							className="changes-header-button"
-							onClick={handleShowFile}
-						>
-							Show file
-						</button>
-					)}
-					{selectedInEditor &&
-						(selectedView === "edit" || selectedView === "unstage") && (
-							<button
-								type="button"
-								className="changes-header-button"
-								onClick={() => {
-									void handleShowDiff();
-								}}
-							>
-								Show diff
-							</button>
-						)}
 				</header>
 				<div className="changes-diff-content">
-					{selectedView === "diff" && (
-						<>
-							{diffLoading && (
-								<div className="changes-message">Loading diff...</div>
-							)}
-							{!diffLoading && diff !== null && diff.length === 0 && (
-								<div className="changes-message">No diff available</div>
-							)}
-							{!diffLoading && diff !== null && diff.length > 0 && (
-								<DiffViewer diff={diff} />
-							)}
-							{diffTruncated && (
-								<div className="changes-diff-truncated">
-									Diff truncated (exceeds 1 MB)
-								</div>
-							)}
-						</>
-					)}
 					{selectedView === "edit" && selectedEditable && (
 						<div className="changes-editor-view">
 							<div className="changes-editor-note">
@@ -558,6 +468,22 @@ export function ChangesPage() {
 								repo={repoName as string}
 								staged
 								onUnstaged={handleEditorUnstaged}
+							/>
+						</div>
+					)}
+					{selectedView === "deleted" && selectedDeleted && (
+						<div className="changes-editor-view">
+							<div className="changes-editor-note">
+								Viewing the deleted file. Use{" "}
+								{selected.staged ? "Unstage" : "Stage"} above to{" "}
+								{selected.staged ? "restore it" : "stage the deletion"}.
+							</div>
+							<TextFileEditor
+								changeType="deleted"
+								filePath={selected.path}
+								repo={repoName as string}
+								staged={selected.staged}
+								deleted
 							/>
 						</div>
 					)}
