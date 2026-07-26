@@ -32,7 +32,7 @@ function detectLineSeparator(text: string): "\r\n" | "\n" {
 }
 
 type ChangeType = "added" | "modified" | "deleted" | "renamed" | "untracked";
-type ChangeLineKind = "added";
+type ChangeLineKind = "added" | "deleted";
 
 interface ChangeLineHighlight {
 	kind: ChangeLineKind;
@@ -65,6 +65,25 @@ function getUntrackedChangeDecorations(content: string): ChangeDecorationsData {
 	return {
 		lineHighlights: content.split("\n").map((_line, index) => ({
 			kind: "added",
+			lineNumber: index + 1,
+		})),
+		deletedChunks: [],
+	};
+}
+
+/**
+ * A deleted file has no working-tree content left, so the editor shows the
+ * version being removed and marks every line as deleted—the mirror of how an
+ * untracked file marks every line as added.
+ */
+function getDeletedFileDecorations(content: string): ChangeDecorationsData {
+	if (!content) {
+		return { lineHighlights: [], deletedChunks: [] };
+	}
+
+	return {
+		lineHighlights: content.split("\n").map((_line, index) => ({
+			kind: "deleted",
 			lineNumber: index + 1,
 		})),
 		deletedChunks: [],
@@ -150,6 +169,10 @@ function getChangeLineHighlights(
 ): ChangeDecorationsData {
 	if (changeType === "untracked") {
 		return getUntrackedChangeDecorations(content);
+	}
+
+	if (changeType === "deleted") {
+		return getDeletedFileDecorations(content);
 	}
 
 	if (!changeDiff) {
@@ -492,6 +515,12 @@ export interface TextFileEditorProps {
 	// unstaged line by line. It stays editable in the DOM so selecting lines works
 	// as it does when staging, but every edit is rejected.
 	staged?: boolean;
+	// When set, the file has been deleted, so there is no working-tree content to
+	// edit. The editor loads the version being removed—the index blob for an
+	// unstaged deletion, the HEAD blob for a staged one—and shows it read-only with
+	// every line struck through. Staging or unstaging the deletion is whole-file and
+	// handled by the caller's header button, so this mode exposes no edit controls.
+	deleted?: boolean;
 	onSaved?: () => void;
 	onStaged?: () => void;
 	onUnstaged?: () => void;
@@ -506,6 +535,7 @@ export function TextFileEditor({
 	changeDiff = null,
 	changeType = null,
 	staged = false,
+	deleted = false,
 	onSaved,
 	onStaged,
 	onUnstaged,
@@ -552,16 +582,24 @@ export function TextFileEditor({
 
 		(async () => {
 			try {
-				// A staged change opens against its index blob (`git show :path`),
-				// exposed by base-content with staged=false, so the lines the user
-				// selects match what `git diff --cached` reports for unstaging.
-				const contentUrl = staged
+				// A deleted file has no working tree to read, so it opens against the
+				// version being removed: base-content returns the index blob when the
+				// deletion is unstaged (staged=false) and the HEAD blob when it is
+				// staged (staged=true). A staged change opens against its index blob
+				// (`git show :path`), exposed by base-content with staged=false, so the
+				// lines the user selects match what `git diff --cached` reports for
+				// unstaging.
+				const contentUrl = deleted
 					? apiUrl(
-							`/api/git/base-content?repo=${encodeURIComponent(repo)}&path=${encodeURIComponent(filePath)}&staged=false&_reload=${reloadToken}`,
+							`/api/git/base-content?repo=${encodeURIComponent(repo)}&path=${encodeURIComponent(filePath)}&staged=${staged}&_reload=${reloadToken}`,
 						)
-					: apiUrl(
-							`/api/files/content?repo=${encodeURIComponent(repo)}&path=${encodeURIComponent(filePath)}&_reload=${reloadToken}`,
-						);
+					: staged
+						? apiUrl(
+								`/api/git/base-content?repo=${encodeURIComponent(repo)}&path=${encodeURIComponent(filePath)}&staged=false&_reload=${reloadToken}`,
+							)
+						: apiUrl(
+								`/api/files/content?repo=${encodeURIComponent(repo)}&path=${encodeURIComponent(filePath)}&_reload=${reloadToken}`,
+							);
 				const response = await fetch(contentUrl, {
 					signal: controller.signal,
 				});
@@ -595,7 +633,7 @@ export function TextFileEditor({
 			active = false;
 			controller.abort();
 		};
-	}, [filePath, repo, reloadToken, staged]);
+	}, [filePath, repo, reloadToken, staged, deleted]);
 
 	useEffect(() => {
 		if (content === null || !editorRef.current) return;
@@ -816,7 +854,10 @@ export function TextFileEditor({
 				}),
 			];
 
-			if (readOnly) {
+			if (readOnly || deleted) {
+				// A deleted file is display-only: there is nothing to edit and no line
+				// selection to make, so keep the DOM non-editable to spare mobile the
+				// pop-up keyboard.
 				baseExtensions.unshift(
 					EditorView.editable.of(false),
 					EditorState.readOnly.of(true),
@@ -903,6 +944,7 @@ export function TextFileEditor({
 		filePath,
 		readOnly,
 		staged,
+		deleted,
 	]);
 
 	useEffect(() => {
@@ -1017,9 +1059,9 @@ export function TextFileEditor({
 			const body: { path: string; ranges?: [number, number][] } = {
 				path: filePath,
 			};
-			// A brand-new file has no diff to slice, so stage it whole; a tracked
-			// change stages exactly the selected lines.
-			if (changeType !== "untracked") {
+			// A brand-new or deleted file has no diff to slice, so stage it whole; a
+			// tracked change stages exactly the selected lines.
+			if (changeType !== "untracked" && changeType !== "deleted") {
 				body.ranges = selectionToRanges(viewRef.current.state);
 			}
 
@@ -1055,9 +1097,9 @@ export function TextFileEditor({
 			const body: { path: string; ranges?: [number, number][] } = {
 				path: filePath,
 			};
-			// A staged new file has no HEAD side to slice, so unstage it whole; a
-			// staged modification unstages exactly the selected lines.
-			if (changeType !== "added") {
+			// A staged new or deleted file has no partial side to slice, so unstage it
+			// whole; a staged modification unstages exactly the selected lines.
+			if (changeType !== "added" && changeType !== "deleted") {
 				body.ranges = selectionToRanges(viewRef.current.state);
 			}
 
@@ -1094,11 +1136,13 @@ export function TextFileEditor({
 				<div className="text-file-editor-status">
 					{readOnly
 						? readOnlyLabel
-						: staged
-							? "Staged changes"
-							: dirty
-								? "Unsaved changes"
-								: "No unsaved changes"}
+						: deleted
+							? "Deleted file"
+							: staged
+								? "Staged changes"
+								: dirty
+									? "Unsaved changes"
+									: "No unsaved changes"}
 				</div>
 				<div className="text-file-editor-actions">
 					{changeCount > 0 && (
@@ -1167,7 +1211,7 @@ export function TextFileEditor({
 							{unstaging ? "Unstaging..." : "Unstage"}
 						</button>
 					)}
-					{!readOnly && !staged && (
+					{!readOnly && !staged && !deleted && (
 						<button
 							type="button"
 							className="text-file-editor-button text-file-editor-button--primary"
