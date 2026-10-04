@@ -4,7 +4,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import supertest from "supertest";
-import { type AppConfig, createApp } from "../app.js";
+import { type AppConfig, createApp, labelRoots } from "../app.js";
 import { resolveRepo, resolveRepoInRoots } from "../pathUtils.js";
 
 // ---------------------------------------------------------------------------
@@ -389,5 +389,16 @@ describe("resolveRepoInRoots", () => {
 	test("rejects a bare root label with no repo", async () => {
 		const result = await resolveRepoInRoots(roots, "alpha/");
 		expect(result).toEqual({ ok: false, reason: "not_found" });
+	});
+
+	test("resolves a repo under a filesystem root", async () => {
+		const repoDir = path.join(alphaRoot, "in-alpha");
+		const fsRoot = path.parse(repoDir).root;
+		const [root] = labelRoots([fsRoot]);
+		const result = await resolveRepoInRoots(
+			[root],
+			`${root.label}/${path.relative(fsRoot, repoDir)}`,
+		);
+		expect(result).toEqual({ ok: true, path: repoDir });
 	});
 });
