@@ -50,7 +50,10 @@ function RouterHarness({ children }: { children: React.ReactNode }) {
 	);
 }
 
-function renderChangesPage(initialEntries = ["/changes"]) {
+function renderChangesPage(
+	initialEntries = ["/changes"],
+	props: { writesAllowed?: boolean } = {},
+) {
 	return render(
 		<MemoryRouter initialEntries={initialEntries}>
 			<ErrorBannerProvider>
@@ -61,7 +64,7 @@ function renderChangesPage(initialEntries = ["/changes"]) {
 							element={
 								<RouterHarness>
 									<TestWrapper>
-										<ChangesPage />
+										<ChangesPage {...props} />
 									</TestWrapper>
 								</RouterHarness>
 							}
@@ -882,6 +885,97 @@ describe("ChangesPage", () => {
 			expect(JSON.parse(unstageBodies[0]).path).toBe("app.ts");
 			expect(container.querySelector(".changes-page")).not.toBeNull();
 			expect(container.querySelector(".changes-diff-view")).toBeNull();
+		});
+	});
+
+	test("disables staging and editing when the server refuses writes", async () => {
+		mockFetchForChanges(
+			[
+				{ path: "app.ts", status: "modified", staged: false },
+				{ path: "done.ts", status: "modified", staged: true },
+			],
+			{
+				baseContent: { path: "app.ts", content: "const a = 0;\n" },
+				diff: {
+					path: "app.ts",
+					diff: "@@ -1 +1 @@\n-const a = 0;\n+const a = 1;\n",
+					truncated: false,
+				},
+				fileContent: { path: "app.ts", content: "const a = 1;\n" },
+			},
+		);
+
+		const { container } = renderChangesPage(["/changes"], {
+			writesAllowed: false,
+		});
+
+		await waitFor(() => {
+			expect(screen.getByLabelText("Stage app.ts")).not.toBeNull();
+		});
+		expect(
+			(screen.getByLabelText("Stage app.ts") as HTMLButtonElement).disabled,
+		).toBe(true);
+		expect(
+			(screen.getByLabelText("Unstage done.ts") as HTMLButtonElement).disabled,
+		).toBe(true);
+		expect(screen.getByRole("note").textContent).toContain("Read-only");
+
+		await act(async () => {
+			fireEvent.click(screen.getByText("app.ts"));
+		});
+
+		await waitFor(() => {
+			expect(container.querySelector(".cm-content")).not.toBeNull();
+		});
+		expect(screen.getByText("Read-only: writes are disabled")).not.toBeNull();
+		expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
+		const header = container.querySelector(".changes-diff-header") as Element;
+		const stageButtons = Array.from(
+			container.querySelectorAll("button"),
+		).filter((button) => button.textContent === "Stage");
+		// Only the header's whole-file button remains, and it is disabled.
+		expect(stageButtons.length).toBe(1);
+		expect(header.contains(stageButtons[0])).toBe(true);
+		expect((stageButtons[0] as HTMLButtonElement).disabled).toBe(true);
+	});
+
+	test("shows the server's message when it refuses a write", async () => {
+		const files: StatusFile[] = [
+			{ path: "app.ts", status: "modified", staged: false },
+		];
+		const message =
+			"Rift is read-only: the server does not allow changes. Set RIFT_ALLOW_WRITES=1 on the server to allow them.";
+
+		globalThis.fetch = mock((input: string | URL | Request) => {
+			const url = typeof input === "string" ? input : input.toString();
+			if (url.includes("/api/git/stage")) {
+				return Promise.resolve(
+					new Response(
+						JSON.stringify({ error: { code: "WRITES_DISABLED", message } }),
+						{ status: 403, headers: { "Content-Type": "application/json" } },
+					),
+				);
+			}
+			if (url.includes("/api/git/status")) {
+				return Promise.resolve(
+					new Response(JSON.stringify({ files }), {
+						status: 200,
+						headers: { "Content-Type": "application/json" },
+					}),
+				);
+			}
+			return Promise.resolve(new Response("Not found", { status: 404 }));
+		}) as typeof fetch;
+
+		renderChangesPage();
+
+		await waitFor(() => {
+			expect(screen.getByLabelText("Stage app.ts")).not.toBeNull();
+		});
+		fireEvent.click(screen.getByLabelText("Stage app.ts"));
+
+		await waitFor(() => {
+			expect(screen.getByRole("alert").textContent).toContain(message);
 		});
 	});
 });

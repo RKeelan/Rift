@@ -2,6 +2,12 @@ import os from "node:os";
 import path from "node:path";
 import express from "express";
 import { simpleGit } from "simple-git";
+import {
+	identityGate,
+	parseAllowedLogins,
+	parseAllowWrites,
+	writeGate,
+} from "./access.js";
 import { type RepoRoot, resolveRepoInRoots } from "./pathUtils.js";
 import { fileRoutes } from "./routes/files.js";
 import { gitRoutes } from "./routes/git.js";
@@ -12,6 +18,11 @@ export type { RepoRoot };
 export interface AppConfig {
 	port: number;
 	roots: RepoRoot[];
+	// Tailscale logins, lower-cased, that may reach Rift through a proxy. Empty
+	// means no proxied request is allowed.
+	allowedLogins: string[];
+	// Whether requests that change the filesystem or a repo are allowed.
+	allowWrites: boolean;
 }
 
 function looksLikeWindowsPath(input: string): boolean {
@@ -143,6 +154,8 @@ export function getConfig(): AppConfig {
 	return {
 		port: Number(process.env.PORT) || 13000,
 		roots: labelRoots(rootPaths),
+		allowedLogins: parseAllowedLogins(process.env.RIFT_ALLOWED_LOGINS),
+		allowWrites: parseAllowWrites(process.env.RIFT_ALLOW_WRITES),
 	};
 }
 
@@ -150,12 +163,17 @@ export function createApp(config: AppConfig): express.Express {
 	const app = express();
 	const router = express.Router();
 
+	// Both gates cover the whole app, static files included, and run before any
+	// body is parsed.
+	app.use(identityGate(config.allowedLogins));
+	app.use(writeGate(config.allowWrites));
+
 	router.use(express.json({ limit: "1mb" }));
 
 	router.get("/api/health", async (req, res) => {
 		const repoName = req.query.repo as string | undefined;
 		if (!repoName) {
-			res.json({ status: "ok" });
+			res.json({ status: "ok", writesAllowed: config.allowWrites });
 			return;
 		}
 		const result = await resolveRepoInRoots(config.roots, repoName);
@@ -177,7 +195,7 @@ export function createApp(config: AppConfig): express.Express {
 		} catch {
 			// Not a git repo
 		}
-		res.json({ status: "ok", gitRepo });
+		res.json({ status: "ok", gitRepo, writesAllowed: config.allowWrites });
 	});
 
 	router.use("/api/files", fileRoutes(config.roots));

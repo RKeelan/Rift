@@ -35,6 +35,17 @@ describe("useGitRepo", () => {
 		await waitFor(() => expect(result.current.loading).toBe(false));
 		expect(result.current.isGitRepo).toBe(true);
 		expect(result.current.repoMissing).toBe(false);
+		expect(result.current.writesAllowed).toBe(true);
+	});
+
+	test("reports when the server refuses writes", async () => {
+		mockResponse(200, { status: "ok", gitRepo: true, writesAllowed: false });
+		const { result } = renderHook(() => useGitRepo("RKeelan/Rift"), {
+			wrapper,
+		});
+
+		await waitFor(() => expect(result.current.loading).toBe(false));
+		expect(result.current.writesAllowed).toBe(false);
 	});
 
 	test("flags a repo the server cannot resolve", async () => {

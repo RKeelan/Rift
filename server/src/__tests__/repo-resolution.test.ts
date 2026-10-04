@@ -15,6 +15,8 @@ function makeConfig(reposRoot: string): AppConfig {
 	return {
 		port: 3000,
 		roots: [{ label: "root", path: reposRoot }],
+		allowedLogins: [],
+		allowWrites: false,
 	};
 }
 
