@@ -123,13 +123,15 @@ function getDiffDecorations(diff: string): ChangeDecorationsData {
 	for (const line of diff.split("\n")) {
 		if (line.startsWith("@@")) {
 			flushPendingLines();
-			const match = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line);
+			const match = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/.exec(line);
 			if (!match) {
 				inHunk = false;
 				continue;
 			}
 
-			nextNewLine = Number(match[1]);
+			// A hunk with no new lines, as when a file is emptied, names the line
+			// before it, so its deletions sit in front of the line after that.
+			nextNewLine = Number(match[1]) + (match[2] === "0" ? 1 : 0);
 			inHunk = true;
 			continue;
 		}
@@ -138,12 +140,14 @@ function getDiffDecorations(diff: string): ChangeDecorationsData {
 			continue;
 		}
 
-		if (line.startsWith("-") && !line.startsWith("---")) {
+		// The file headers come before the first hunk, so inside one a line
+		// starting "---" or "+++" is a changed line beginning with "--" or "++".
+		if (line.startsWith("-")) {
 			pendingDeletedLines.push(line.slice(1));
 			continue;
 		}
 
-		if (line.startsWith("+") && !line.startsWith("+++")) {
+		if (line.startsWith("+")) {
 			pendingInsertedLines.push(line.slice(1));
 			continue;
 		}
