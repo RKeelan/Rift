@@ -449,4 +449,65 @@ describe("PUT /api/files/content", () => {
 		expect(res.status).toBe(413);
 		expect(res.body.error.code).toBe("FILE_TOO_LARGE");
 	});
+
+	describe("byte order mark", () => {
+		const bom = Buffer.from([0xef, 0xbb, 0xbf]);
+
+		async function putContent(name: string, content: string) {
+			const stat = await fs.stat(path.join(repoDir, name));
+			return supertest(app)
+				.put(`/api/files/content?repo=${repoRef}&path=${name}`)
+				.send({ content, expectedMtimeMs: stat.mtimeMs });
+		}
+
+		test("keeps the BOM when the saved content lacks one", async () => {
+			const filePath = path.join(repoDir, "bom.cs");
+			await fs.writeFile(filePath, Buffer.concat([bom, Buffer.from("old\n")]));
+
+			const res = await putContent("bom.cs", "new\n");
+
+			expect(res.status).toBe(200);
+			const saved = await fs.readFile(filePath);
+			expect(saved.equals(Buffer.concat([bom, Buffer.from("new\n")]))).toBe(
+				true,
+			);
+			const stat = await fs.stat(filePath);
+			expect(res.body.mtimeMs).toBe(stat.mtimeMs);
+		});
+
+		test("does not add a BOM to a file that had none", async () => {
+			const filePath = path.join(repoDir, "nobom.txt");
+			await fs.writeFile(filePath, "old\n");
+
+			const res = await putContent("nobom.txt", "new\n");
+
+			expect(res.status).toBe(200);
+			const saved = await fs.readFile(filePath);
+			expect(saved.equals(Buffer.from("new\n"))).toBe(true);
+		});
+
+		test("does not create a missing file, so none gains a BOM", async () => {
+			const res = await supertest(app)
+				.put(`/api/files/content?repo=${repoRef}&path=created.txt`)
+				.send({ content: "new\n", expectedMtimeMs: 1 });
+
+			expect(res.status).toBe(404);
+			await expect(
+				fs.stat(path.join(repoDir, "created.txt")),
+			).rejects.toThrow();
+		});
+
+		test("does not double a BOM already in the content", async () => {
+			const filePath = path.join(repoDir, "bom-twice.cs");
+			await fs.writeFile(filePath, Buffer.concat([bom, Buffer.from("old\n")]));
+
+			const res = await putContent("bom-twice.cs", "\uFEFFnew\n");
+
+			expect(res.status).toBe(200);
+			const saved = await fs.readFile(filePath);
+			expect(saved.equals(Buffer.concat([bom, Buffer.from("new\n")]))).toBe(
+				true,
+			);
+		});
+	});
 });
