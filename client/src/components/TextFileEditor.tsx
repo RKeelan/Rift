@@ -396,6 +396,66 @@ export function getChangeRegionLines(
 }
 
 /**
+ * The edits that turn `previous` into `next`, one per run of changed lines and
+ * addressed by offsets into `previous`. Replacing only the lines that differ,
+ * rather than the whole document, lets the editor map its selection and scroll
+ * position through the edit.
+ */
+export function getLineChanges(
+	previous: string,
+	next: string,
+): { from: number; to: number; insert: string }[] {
+	// Each line keeps its terminator, so offsets are running sums of lengths and
+	// a change to the final newline is a change to the last line.
+	const previousLines = previous.match(/[^\n]*\n|[^\n]+$/g) ?? [];
+	const nextLines = next.match(/[^\n]*\n|[^\n]+$/g) ?? [];
+	const prefixLength = getCommonPrefixLength(previousLines, nextLines);
+	const suffixLength = getCommonSuffixLength(
+		previousLines,
+		nextLines,
+		prefixLength,
+	);
+	const previousMiddle = previousLines.slice(
+		prefixLength,
+		previousLines.length - suffixLength,
+	);
+	const nextMiddle = nextLines.slice(
+		prefixLength,
+		nextLines.length - suffixLength,
+	);
+	// Past the diff's edit budget, replace the differing region as one block.
+	const ops = getDiffOps(previousMiddle, nextMiddle) ?? [
+		...previousMiddle.map((line) => ({ type: "delete" as const, line })),
+		...nextMiddle.map((line) => ({ type: "insert" as const, line })),
+	];
+
+	const changes: { from: number; to: number; insert: string }[] = [];
+	let offset = previousLines
+		.slice(0, prefixLength)
+		.reduce((total, line) => total + line.length, 0);
+	for (let index = 0; index < ops.length; ) {
+		if (ops[index].type === "equal") {
+			offset += ops[index].line.length;
+			index += 1;
+			continue;
+		}
+		const from = offset;
+		let insert = "";
+		while (index < ops.length && ops[index].type !== "equal") {
+			const op = ops[index];
+			if (op.type === "delete") {
+				offset += op.line.length;
+			} else {
+				insert += op.line;
+			}
+			index += 1;
+		}
+		changes.push({ from, to: offset, insert });
+	}
+	return changes;
+}
+
+/**
  * Turns the editor's selection into inclusive, 1-based line ranges for staging.
  * A collapsed selection yields the cursor's line. A selection that ends at the
  * very start of a line (a full-line drag) does not claim that trailing line,
@@ -553,6 +613,7 @@ export function TextFileEditor({
 	const refreshDecorationsRef = useRef<(() => void) | null>(null);
 	const applyLineWrapRef = useRef<((wrap: boolean) => void) | null>(null);
 	const scrollToLineRef = useRef<((lineNumber: number) => void) | null>(null);
+	const replaceDocRef = useRef<((text: string) => void) | null>(null);
 	const originalContentRef = useRef("");
 	const lineSeparatorRef = useRef<"\r\n" | "\n">("\n");
 	// Anchor lines of the current change regions and the last one we jumped to,
@@ -572,6 +633,23 @@ export function TextFileEditor({
 	const [reloadToken, setReloadToken] = useState(0);
 	const [lineWrap, setLineWrap] = useState(readLineWrapPreference);
 	const lineWrapRef = useRef(lineWrap);
+	// The buffer's latest text, so an editor rebuilt for any reason starts from
+	// it rather than from text that a save or an edit has since replaced.
+	const docTextRef = useRef("");
+	// The change context is refetched independently of the buffer, as after a
+	// stage or a save. The editor reads it through this ref and redraws its
+	// decorations in place, keeping the buffer, its selection, and its scroll
+	// position.
+	const changeContextRef = useRef({
+		comparisonContent,
+		changeDiff,
+		changeType,
+	});
+
+	useEffect(() => {
+		changeContextRef.current = { comparisonContent, changeDiff, changeType };
+		refreshDecorationsRef.current?.();
+	}, [comparisonContent, changeDiff, changeType]);
 
 	useEffect(() => {
 		let active = true;
@@ -622,9 +700,10 @@ export function TextFileEditor({
 				if (!active) return;
 				const normalized = normalizeLineEndings(text);
 				lineSeparatorRef.current = detectLineSeparator(text);
+				originalContentRef.current = normalized;
+				docTextRef.current = normalized;
 				setContent(normalized);
 				setMtimeMs(Number.isFinite(nextMtimeMs) ? nextMtimeMs : null);
-				originalContentRef.current = normalized;
 			} catch (err) {
 				if (err instanceof DOMException && err.name === "AbortError") return;
 				if (active) {
@@ -686,9 +765,12 @@ export function TextFileEditor({
 			}
 
 			function buildChangeDecorations(doc: import("@codemirror/state").Text) {
+				const { comparisonContent, changeDiff, changeType } =
+					changeContextRef.current;
 				const changeDecorations = getEditorChangeDecorations({
 					currentContent: doc.toString(),
-					loadedContent: content,
+					// The file as last loaded or saved, which is what git's diff describes.
+					loadedContent: originalContentRef.current,
 					comparisonContent,
 					changeType,
 					changeDiff,
@@ -820,7 +902,8 @@ export function TextFileEditor({
 				}),
 				EditorView.updateListener.of((update) => {
 					if (!update.docChanged) return;
-					setDirty(update.state.doc.toString() !== originalContentRef.current);
+					docTextRef.current = update.state.doc.toString();
+					setDirty(docTextRef.current !== originalContentRef.current);
 					setError(null);
 				}),
 				EditorView.theme({
@@ -877,7 +960,7 @@ export function TextFileEditor({
 			}
 
 			const state = EditorState.create({
-				doc: content,
+				doc: docTextRef.current,
 				extensions: baseExtensions,
 			});
 			const view = new EditorView({
@@ -904,6 +987,11 @@ export function TextFileEditor({
 				view.dispatch({
 					selection: { anchor: pos },
 					effects: EditorView.scrollIntoView(pos, { y: "center" }),
+				});
+			};
+			replaceDocRef.current = (text: string) => {
+				view.dispatch({
+					changes: getLineChanges(view.state.doc.toString(), text),
 				});
 			};
 
@@ -942,21 +1030,15 @@ export function TextFileEditor({
 			refreshDecorationsRef.current = null;
 			applyLineWrapRef.current = null;
 			scrollToLineRef.current = null;
+			replaceDocRef.current = null;
 			if (viewRef.current) {
 				viewRef.current.destroy();
 				viewRef.current = null;
 			}
 		};
-	}, [
-		changeDiff,
-		changeType,
-		comparisonContent,
-		content,
-		filePath,
-		readOnly,
-		staged,
-		deleted,
-	]);
+		// The change context is deliberately absent: it reaches the editor through
+		// changeContextRef, and a change to it redraws the decorations in place.
+	}, [content, filePath, readOnly, staged, deleted]);
 
 	useEffect(() => {
 		lineWrapRef.current = lineWrap;
@@ -1128,9 +1210,24 @@ export function TextFileEditor({
 				throw new Error(getErrorMessage(errorBody, response.status));
 			}
 
-			// The index just changed, so reload the buffer to the new staged
+			// The index just changed, so bring the buffer up to the new staged
 			// content; the decorations then shrink to whatever remains staged.
-			setReloadToken((value) => value + 1);
+			// Editing the buffer in place keeps the editor's selection and scroll
+			// position, which reloading would reset to the top of the file.
+			const refreshed = await fetch(
+				apiUrl(
+					`/api/git/base-content?repo=${encodeURIComponent(repo)}&path=${encodeURIComponent(filePath)}&staged=false&_reload=${Date.now()}`,
+				),
+			).catch(() => null);
+			if (refreshed?.ok && replaceDocRef.current) {
+				const text = await refreshed.text();
+				const normalized = normalizeLineEndings(text);
+				lineSeparatorRef.current = detectLineSeparator(text);
+				originalContentRef.current = normalized;
+				replaceDocRef.current(normalized);
+			} else {
+				setReloadToken((value) => value + 1);
+			}
 			onUnstaged?.();
 		} catch (err) {
 			setError(

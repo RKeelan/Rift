@@ -737,6 +737,79 @@ describe("ChangesPage", () => {
 		});
 	});
 
+	test("refetches the diff after the editor saves", async () => {
+		let diffRequests = 0;
+
+		globalThis.fetch = mock(
+			(input: string | URL | Request, init?: RequestInit) => {
+				const url = typeof input === "string" ? input : input.toString();
+				const json = (body: unknown) =>
+					Promise.resolve(
+						new Response(JSON.stringify(body), {
+							status: 200,
+							headers: { "Content-Type": "application/json" },
+						}),
+					);
+
+				if (url.includes("/api/git/status")) {
+					return json({
+						files: [{ path: "app.ts", status: "modified", staged: false }],
+					});
+				}
+
+				if (url.includes("/api/git/diff")) {
+					diffRequests += 1;
+					return json({ diff: "diff content", truncated: false });
+				}
+
+				if (url.includes("/api/git/base-content")) {
+					return Promise.resolve(new Response("previous\n", { status: 200 }));
+				}
+
+				if (url.includes("/api/files/content")) {
+					if (init?.method === "PUT") return json({ mtimeMs: 2 });
+					return Promise.resolve(
+						new Response("current\n", {
+							status: 200,
+							headers: { "x-file-mtime-ms": "1" },
+						}),
+					);
+				}
+
+				return Promise.resolve(new Response("Not found", { status: 404 }));
+			},
+		) as typeof fetch;
+
+		const { container } = renderChangesPage();
+
+		await waitFor(() => {
+			expect(container.querySelectorAll(".changes-file-entry").length).toBe(1);
+		});
+		fireEvent.click(container.querySelector(".changes-file-entry") as Element);
+		await waitFor(() => {
+			expect(container.querySelector(".cm-content")).not.toBeNull();
+			expect(diffRequests).toBe(1);
+		});
+
+		const { EditorView } = await import("@codemirror/view");
+		const view = EditorView.findFromDOM(
+			container.querySelector(".cm-editor") as HTMLElement,
+		);
+		act(() => {
+			view?.dispatch({ changes: { from: 0, insert: "edited " } });
+		});
+		const save = screen.getByRole("button", { name: "Save" });
+		await waitFor(() => {
+			expect(save.hasAttribute("disabled")).toBe(false);
+		});
+		fireEvent.click(save);
+
+		// The save changed the working tree, so git's diff is fetched afresh.
+		await waitFor(() => {
+			expect(diffRequests).toBe(2);
+		});
+	});
+
 	test("refresh button is present", async () => {
 		mockFetchForChanges([]);
 
