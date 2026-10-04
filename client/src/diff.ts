@@ -267,3 +267,90 @@ export function getDiffOps(
 	}
 	return ops;
 }
+
+/**
+ * Splits text, in the editor's `\n` terms, into git's lines and whether the
+ * last of them ends with a newline.
+ */
+function splitGitLines(text: string): {
+	lines: string[];
+	finalNewline: boolean;
+} {
+	if (text === "") return { lines: [], finalNewline: false };
+	const lines = text.split("\n");
+	const finalNewline = lines[lines.length - 1] === "";
+	if (finalNewline) lines.pop();
+	return { lines, finalNewline };
+}
+
+/**
+ * Applies a single-file unified diff, as git prints it, to `original` and
+ * returns the text it produces, or null when the diff does not fit `original`.
+ * Both texts are in the editor's terms, with `\n` line breaks.
+ */
+export function applyDiff(original: string, diff: string): string | null {
+	const old = splitGitLines(original);
+	const result: string[] = [];
+	let next = 0;
+	let inHunk = false;
+	// The kind of the last hunk line read, which a "\ No newline at end of
+	// file" marker describes.
+	let last: "+" | "-" | " " | null = null;
+	// Whether the new side's last line, once a hunk reaches it, lacks a newline.
+	let newLastLacksNewline = false;
+
+	for (const line of diff.split("\n")) {
+		if (line.startsWith("@@")) {
+			const match = /^@@ -(\d+)(?:,(\d+))? \+\d+(?:,\d+)? @@/.exec(line);
+			if (!match) return null;
+			// An empty old range names the line before the insertion.
+			const start = match[2] === "0" ? Number(match[1]) : Number(match[1]) - 1;
+			if (start < next || start > old.lines.length) return null;
+			result.push(...old.lines.slice(next, start));
+			next = start;
+			inHunk = true;
+			last = null;
+			continue;
+		}
+
+		if (!inHunk || line === "") continue;
+
+		if (line.startsWith("\\")) {
+			// The line before the marker has no newline: after a deletion that is
+			// the old side's last line, after an addition the new side's, and after
+			// context both sides'.
+			if (last === null) return null;
+			if (last !== "+" && (old.finalNewline || next !== old.lines.length)) {
+				return null;
+			}
+			if (last !== "-") newLastLacksNewline = true;
+			continue;
+		}
+
+		const text = line.slice(1);
+		if (line[0] === "+") {
+			result.push(text);
+			newLastLacksNewline = false;
+			last = "+";
+		} else if (line[0] === " " || line[0] === "-") {
+			if (old.lines[next] !== text) return null;
+			last = line[0] === " " ? " " : "-";
+			if (last === " ") {
+				result.push(text);
+				newLastLacksNewline = false;
+			}
+			next += 1;
+		} else {
+			return null;
+		}
+	}
+
+	// A hunk that reached the end of the old side reached the end of the new
+	// one too, so its markers settle the final newline; otherwise the untouched
+	// tail keeps the old one.
+	const finalNewline =
+		next === old.lines.length ? !newLastLacksNewline : old.finalNewline;
+	result.push(...old.lines.slice(next));
+	if (result.length === 0) return "";
+	return `${result.join("\n")}${finalNewline ? "\n" : ""}`;
+}

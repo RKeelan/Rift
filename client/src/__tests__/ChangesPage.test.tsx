@@ -810,6 +810,60 @@ describe("ChangesPage", () => {
 		});
 	});
 
+	test("refetches the diff when the editor reloads the file", async () => {
+		let diffRequests = 0;
+
+		globalThis.fetch = mock((input: string | URL | Request) => {
+			const url = typeof input === "string" ? input : input.toString();
+			const json = (body: unknown) =>
+				Promise.resolve(
+					new Response(JSON.stringify(body), {
+						status: 200,
+						headers: { "Content-Type": "application/json" },
+					}),
+				);
+
+			if (url.includes("/api/git/status")) {
+				return json({
+					files: [{ path: "app.ts", status: "modified", staged: false }],
+				});
+			}
+			if (url.includes("/api/git/diff")) {
+				diffRequests += 1;
+				return json({ diff: "diff content", truncated: false });
+			}
+			if (url.includes("/api/git/base-content")) {
+				return Promise.resolve(new Response("previous\n", { status: 200 }));
+			}
+			if (url.includes("/api/files/content")) {
+				return Promise.resolve(
+					new Response("current\n", {
+						status: 200,
+						headers: { "x-file-mtime-ms": "1" },
+					}),
+				);
+			}
+			return Promise.resolve(new Response("Not found", { status: 404 }));
+		}) as typeof fetch;
+
+		const { container } = renderChangesPage();
+		await waitFor(() => {
+			expect(container.querySelectorAll(".changes-file-entry").length).toBe(1);
+		});
+		fireEvent.click(container.querySelector(".changes-file-entry") as Element);
+		await waitFor(() => {
+			expect(container.querySelector(".cm-content")).not.toBeNull();
+			expect(diffRequests).toBe(1);
+		});
+
+		fireEvent.click(screen.getByRole("button", { name: "Reload" }));
+
+		// The file was reread, so git's diff of it is reread too.
+		await waitFor(() => {
+			expect(diffRequests).toBe(2);
+		});
+	});
+
 	test("refresh button is present", async () => {
 		mockFetchForChanges([]);
 

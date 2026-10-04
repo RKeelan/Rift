@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { type DiffOp, getDiffOps } from "../diff.ts";
+import { applyDiff, type DiffOp, getDiffOps } from "../diff.ts";
+import {
+	CREATED_FILE_CASE,
+	GIT_DIFF_CASES,
+	type GitDiffCase,
+} from "./gitDiffCases.ts";
 
 function render(ops: DiffOp[]): string[] {
 	return ops.map(
@@ -124,5 +129,66 @@ describe("getDiffOps", () => {
 			).toEqual(current);
 			expect(editCount(script)).toBe(minimalEditCount(original, current));
 		}
+	});
+});
+
+describe("applyDiff", () => {
+	function gitCase(name: string): GitDiffCase {
+		const found = [...GIT_DIFF_CASES, CREATED_FILE_CASE].find(
+			(candidate) => candidate.name === name,
+		);
+		if (!found) throw new Error(`no case named ${name}`);
+		return found;
+	}
+
+	function applies(name: string) {
+		const { base, diff, current } = gitCase(name);
+		expect(applyDiff(base, diff)).toBe(current);
+	}
+
+	test("rebuilds the new side of every captured git diff", () => {
+		for (const { name, base, diff, current } of [
+			...GIT_DIFF_CASES,
+			CREATED_FILE_CASE,
+		]) {
+			expect({ name, result: applyDiff(base, diff) }).toEqual({
+				name,
+				result: current,
+			});
+		}
+	});
+
+	test("applies each of several hunks", () => {
+		applies("edits in three hunks");
+	});
+
+	test("fills an empty old side and empties a new one", () => {
+		applies("a created file");
+		applies("an emptied file");
+	});
+
+	test("follows the no-newline marker after context, a deletion, and an addition", () => {
+		applies("a modified line above an unchanged last line without a newline");
+		applies("a modified last line without a newline");
+		applies("a final newline added");
+		applies("a final newline removed");
+	});
+
+	test("rejects a diff that does not fit the original", () => {
+		const { diff } = gitCase("a modified line");
+
+		// A context line that differs.
+		expect(applyDiff("x\nb\nc\n", diff)).toBeNull();
+		// A deleted line that differs.
+		expect(applyDiff("a\nx\nc\n", diff)).toBeNull();
+		// A hunk that starts past the end.
+		expect(applyDiff("", diff)).toBeNull();
+		// A marker that says the old side lacks a final newline when it has one.
+		expect(
+			applyDiff(
+				"a\nb\n",
+				gitCase("a modified last line without a newline").diff,
+			),
+		).toBeNull();
 	});
 });
