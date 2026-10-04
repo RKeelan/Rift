@@ -58,7 +58,7 @@ The server binds to `127.0.0.1` by default, and refuses to start if `HOST` names
 
 Rift checks every request, for the client as well as the API, and sorts it by how it arrived:
 
-* A request with no proxy headers came straight from a process on this machine, such as the CLI, the Vite dev server, or a local browser. Rift allows it, since such a process can already read and write the files directly.
+* A request with no proxy headers came straight from a process on this machine, such as the Vite dev server or a local browser. Rift allows it, since such a process can already read and write the files directly.
 * A request with any proxy header (`x-forwarded-for`, `forwarded`, `via`, or any `tailscale-*` header, among others) came through a proxy. Rift allows it only if `tailscale serve` identified the caller, in `tailscale-user-login`, as one of the logins in `RIFT_ALLOWED_LOGINS`. Everything else gets a 403: Funnel requests, requests from tagged devices (which carry no identity), and requests from other logins. tailscaled replaces any identity header the caller sends, so the login cannot be forged through it.
 
 The loopback binding is what makes the first rule safe. Bound to loopback, the server can be reached from another machine only through tailscaled, and everything tailscaled forwards carries proxy headers.
