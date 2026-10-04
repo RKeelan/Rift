@@ -121,6 +121,36 @@ describe("buildPartialPatch", () => {
 		);
 	});
 
+	test("reads a deleted line that begins with dashes as a deletion", () => {
+		const input = diff(
+			"@@ -1,4 +1,3 @@",
+			" a",
+			"--- note",
+			"-b",
+			"-c",
+			"+B",
+			"+C",
+		);
+
+		expect(buildPartialPatch(input, [[3, 3]])).toBe(
+			diff("@@ -1,4 +1,3 @@", " a", " -- note", " b", " c", "+C"),
+		);
+	});
+
+	test("reads an added line that begins with pluses as an addition", () => {
+		const input = diff("@@ -1,2 +1,4 @@", " a", "+++i;", "+X", " b");
+
+		expect(buildPartialPatch(input, [[3, 3]])).toBe(
+			diff("@@ -1,2 +1,4 @@", " a", "+X", " b"),
+		);
+	});
+
+	test("anchors the deletions of an emptied file to line 1", () => {
+		const input = diff("@@ -1,2 +0,0 @@", "-a", "-b");
+
+		expect(buildPartialPatch(input, [[1, 1]])).toBe(input);
+	});
+
 	test("keeps only the hunks a range touches", () => {
 		const input = diff(
 			"@@ -1,2 +1,2 @@",
@@ -175,6 +205,36 @@ describe("buildPartialPatch (reverse)", () => {
 		expect(buildPartialPatch(input, [[2, 2]], true)).toBe(
 			diff("@@ -1,3 +1,2 @@", " a", "-b", " c"),
 		);
+	});
+
+	test("reads a deleted line that begins with dashes as a deletion", () => {
+		const input = diff(
+			"@@ -1,4 +1,3 @@",
+			" a",
+			"--- note",
+			"-b",
+			"-c",
+			"+B",
+			"+C",
+		);
+
+		expect(buildPartialPatch(input, [[3, 3]], true)).toBe(
+			diff("@@ -1,4 +1,3 @@", " a", " B", "+C"),
+		);
+	});
+
+	test("reads an added line that begins with pluses as an addition", () => {
+		const input = diff("@@ -1,2 +1,4 @@", " a", "+++i;", "+X", " b");
+
+		expect(buildPartialPatch(input, [[3, 3]], true)).toBe(
+			diff("@@ -1,2 +1,4 @@", " a", " ++i;", "+X", " b"),
+		);
+	});
+
+	test("anchors the deletions of an emptied file to line 1", () => {
+		const input = diff("@@ -1,2 +0,0 @@", "-a", "-b");
+
+		expect(buildPartialPatch(input, [[1, 1]], true)).toBe(input);
 	});
 
 	test("returns null when the selection covers no staged change", () => {

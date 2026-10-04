@@ -175,8 +175,10 @@ export function buildPartialPatch(
 	while (index < lines.length && lines[index].startsWith("@@")) {
 		const header = lines[index];
 		index += 1;
-		const match = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(header);
-		let newLine = match ? Number(match[1]) : 1;
+		const match = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/.exec(header);
+		// A hunk with no new lines, as when a file is emptied, names the line
+		// before it, so its deletions sit in front of the line after that.
+		let newLine = match ? Number(match[1]) + (match[2] === "0" ? 1 : 0) : 1;
 
 		const body: string[] = [];
 		let hunkChanged = false;
@@ -197,7 +199,9 @@ export function buildPartialPatch(
 				continue;
 			}
 
-			if (line.startsWith("+") && !line.startsWith("+++")) {
+			// The preamble loop consumed the file headers, so inside a hunk a line
+			// starting "+++" or "---" is a changed line beginning with "++" or "--".
+			if (line.startsWith("+")) {
 				if (lineSelected(newLine, ranges)) {
 					body.push(line);
 					hunkChanged = true;
@@ -214,7 +218,7 @@ export function buildPartialPatch(
 				continue;
 			}
 
-			if (line.startsWith("-") && !line.startsWith("---")) {
+			if (line.startsWith("-")) {
 				if (lineSelected(newLine, ranges)) {
 					body.push(line);
 					hunkChanged = true;
