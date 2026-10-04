@@ -1,7 +1,8 @@
+import { resolveHost } from "./access.js";
 import { createApp, getConfig } from "./app.js";
 
 const config = getConfig();
-const host = process.env.HOST || "127.0.0.1";
+const host = resolveHost(process.env.HOST);
 
 const app = createApp(config);
 
@@ -10,6 +11,16 @@ const server = app.listen(config.port, host, () => {
 	for (const root of config.roots) {
 		console.log(`Repos root: ${root.label} -> ${root.path}`);
 	}
+	console.log(
+		config.allowedLogins.length > 0
+			? `Allowed Tailscale logins: ${config.allowedLogins.join(", ")}`
+			: "Allowed Tailscale logins: none; every proxied request is refused",
+	);
+	console.log(
+		config.allowWrites
+			? "Writes: allowed"
+			: "Writes: refused; set RIFT_ALLOW_WRITES=1 to allow them",
+	);
 });
 
 let shuttingDown = false;

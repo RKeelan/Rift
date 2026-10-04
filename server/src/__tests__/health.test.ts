@@ -8,6 +8,8 @@ function makeConfig(overrides?: Partial<AppConfig>): AppConfig {
 	return {
 		port: 3000,
 		roots: [{ label: "root", path: process.cwd() }],
+		allowedLogins: [],
+		allowWrites: false,
 		...overrides,
 	};
 }
@@ -17,7 +19,13 @@ describe("GET /api/health", () => {
 		const app = createApp(makeConfig());
 		const response = await supertest(app).get("/api/health");
 		expect(response.status).toBe(200);
-		expect(response.body).toEqual({ status: "ok" });
+		expect(response.body).toEqual({ status: "ok", writesAllowed: false });
+	});
+
+	test("reports whether writes are allowed", async () => {
+		const app = createApp(makeConfig({ allowWrites: true }));
+		const response = await supertest(app).get("/api/health");
+		expect(response.body.writesAllowed).toBe(true);
 	});
 
 	test("returns JSON content type", async () => {
@@ -40,6 +48,7 @@ describe("GET /api/health", () => {
 		);
 		expect(response.status).toBe(200);
 		expect(response.body.gitRepo).toBe(true);
+		expect(response.body.writesAllowed).toBe(false);
 	});
 
 	test("returns 404 when repo does not exist", async () => {

@@ -167,6 +167,9 @@ export function output(data: unknown, format: Format): void {
 		if (obj.status && !obj.id) {
 			const parts = [`status: ${obj.status}`];
 			if (obj.gitRepo !== undefined) parts.push(`gitRepo: ${obj.gitRepo}`);
+			if (obj.writesAllowed !== undefined) {
+				parts.push(`writesAllowed: ${obj.writesAllowed}`);
+			}
 			process.stdout.write(`${parts.join("  ")}\n`);
 			return;
 		}
@@ -182,8 +185,12 @@ export function outputLine(line: string): void {
 
 export function outputError(err: unknown): void {
 	if (err instanceof ApiError) {
+		// The status distinguishes a refusal (403: a disallowed identity, or a
+		// write while the server is read-only) from a missing resource or a fault.
 		process.stderr.write(
-			`${JSON.stringify({ error: { code: err.code, message: err.message } })}\n`,
+			`${JSON.stringify({
+				error: { code: err.code, message: err.message, status: err.statusCode },
+			})}\n`,
 		);
 	} else if (err instanceof Error) {
 		process.stderr.write(

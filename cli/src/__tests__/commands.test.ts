@@ -543,6 +543,42 @@ describe("format", () => {
 		const parsed = JSON.parse(text);
 		expect(parsed.error.code).toBe("NOT_FOUND");
 		expect(parsed.error.message).toBe("Repository not found");
+		expect(parsed.error.status).toBe(404);
+	});
+
+	test("outputError reports a refused write with its status", async () => {
+		const { outputError } = await import("../format.js");
+		mockFetch(
+			{
+				error: {
+					code: "WRITES_DISABLED",
+					message: "Rift is read-only: the server does not allow changes.",
+				},
+			},
+			{ status: 403 },
+		);
+		let caught: unknown;
+		try {
+			await api.post("/api/git/stage?repo=Rift", { path: "a.ts" });
+		} catch (err) {
+			caught = err;
+		}
+		const text = captureStderr(() => outputError(caught));
+		expect(JSON.parse(text)).toEqual({
+			error: {
+				code: "WRITES_DISABLED",
+				message: "Rift is read-only: the server does not allow changes.",
+				status: 403,
+			},
+		});
+	});
+
+	test("output shows whether writes are allowed in text mode", async () => {
+		const { output } = await import("../format.js");
+		const text = captureStdout(() =>
+			output({ status: "ok", writesAllowed: false }, "text"),
+		);
+		expect(text).toBe("status: ok  writesAllowed: false\n");
 	});
 
 	test("outputError formats plain Error with generic code", async () => {

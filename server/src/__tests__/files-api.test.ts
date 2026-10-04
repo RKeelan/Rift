@@ -15,6 +15,8 @@ function makeConfig(overrides?: Partial<AppConfig>): AppConfig {
 	return {
 		port: 3000,
 		roots: [{ label: "root", path: reposRoot }],
+		allowedLogins: [],
+		allowWrites: true,
 		...overrides,
 	};
 }

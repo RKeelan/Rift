@@ -1,3 +1,4 @@
+import type { ClientRequest, IncomingMessage } from "node:http";
 import react from "@vitejs/plugin-react";
 import { VitePWA } from "vite-plugin-pwa";
 import { defineConfig } from "vite";
@@ -8,6 +9,26 @@ import { defineConfig } from "vite";
 // the dev proxy need to know about it.
 const BASE_PATH = "/rift";
 const BASE = `${BASE_PATH}/`;
+
+// The API trusts a request with no proxy headers as coming from this machine.
+// The dev server listens on every interface, so a request from another device
+// must not reach the API looking local: drop any identity headers it brought
+// and mark it as forwarded, and the API refuses it as it would any proxied
+// request without an allowed Tailscale login.
+function markRemoteRequest(proxyReq: ClientRequest, req: IncomingMessage) {
+	const address = req.socket.remoteAddress ?? "";
+	if (
+		address === "::1" ||
+		address.startsWith("127.") ||
+		address.startsWith("::ffff:127.")
+	) {
+		return;
+	}
+	for (const name of proxyReq.getHeaderNames()) {
+		if (name.startsWith("tailscale-")) proxyReq.removeHeader(name);
+	}
+	proxyReq.setHeader("x-forwarded-for", address || "unknown");
+}
 
 export default defineConfig({
 	base: BASE,
@@ -87,6 +108,10 @@ export default defineConfig({
 				ws: true,
 				rewrite: (path: string) =>
 					path.replace(new RegExp(`^${BASE_PATH}`), ""),
+				configure: (proxy) => {
+					proxy.on("proxyReq", markRemoteRequest);
+					proxy.on("proxyReqWs", markRemoteRequest);
+				},
 			},
 		},
 	},

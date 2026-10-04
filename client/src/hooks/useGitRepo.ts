@@ -4,12 +4,16 @@ import { useApi } from "./useApi.ts";
 interface HealthResponse {
 	status: string;
 	gitRepo: boolean;
+	writesAllowed?: boolean;
 }
 
 export function useGitRepo(repo: string | null) {
 	const { request } = useApi();
 	const [isGitRepo, setIsGitRepo] = useState<boolean | null>(null);
 	const [repoMissing, setRepoMissing] = useState(false);
+	// Optimistic until the server says otherwise; it refuses writes itself, so
+	// a wrong guess only means a refused request rather than a silent change.
+	const [writesAllowed, setWritesAllowed] = useState(true);
 	const [loading, setLoading] = useState(true);
 
 	const check = useCallback(async () => {
@@ -33,6 +37,7 @@ export function useGitRepo(repo: string | null) {
 		);
 		if (data) {
 			setIsGitRepo(data.gitRepo);
+			setWritesAllowed(data.writesAllowed !== false);
 			setRepoMissing(false);
 		} else if (unresolvable) {
 			setRepoMissing(true);
@@ -47,5 +52,11 @@ export function useGitRepo(repo: string | null) {
 		check();
 	}, [check]);
 
-	return { isGitRepo, loading, repoMissing, recheckGitRepo: check };
+	return {
+		isGitRepo,
+		loading,
+		repoMissing,
+		writesAllowed,
+		recheckGitRepo: check,
+	};
 }
