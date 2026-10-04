@@ -78,6 +78,19 @@ async function isBinaryFile(filePath: string): Promise<boolean> {
 	}
 }
 
+const UTF8_BOM = Buffer.from([0xef, 0xbb, 0xbf]);
+
+async function startsWithBom(filePath: string): Promise<boolean> {
+	const handle = await fs.open(filePath, "r");
+	try {
+		const buffer = Buffer.alloc(UTF8_BOM.length);
+		const { bytesRead } = await handle.read(buffer, 0, UTF8_BOM.length, 0);
+		return bytesRead === UTF8_BOM.length && buffer.equals(UTF8_BOM);
+	} finally {
+		await handle.close();
+	}
+}
+
 async function requireRepo(
 	roots: RepoRoot[],
 	req: Request,
@@ -367,7 +380,14 @@ export function fileRoutes(roots: RepoRoot[]): Router {
 			return;
 		}
 
-		await fs.writeFile(resolved, content, "utf-8");
+		// The client's fetch() strips a leading BOM, so restore it when the
+		// file on disk had one.
+		const toWrite =
+			!content.startsWith("\uFEFF") && (await startsWithBom(resolved))
+				? `\uFEFF${content}`
+				: content;
+
+		await fs.writeFile(resolved, toWrite, "utf-8");
 		const updatedStat = await fs.stat(resolved);
 		res.json({ mtimeMs: updatedStat.mtimeMs });
 	});
