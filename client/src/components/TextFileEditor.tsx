@@ -1,7 +1,7 @@
 import { ChevronDown, ChevronUp, WrapText } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { apiUrl } from "../apiUrl.ts";
-import { getDiffOps } from "../diff.ts";
+import { applyDiff, getDiffOps } from "../diff.ts";
 import { isChunkLoadError, reloadForStaleChunk } from "../staleChunk.ts";
 import "./TextFileEditor.css";
 
@@ -22,6 +22,36 @@ function readLineWrapPreference(): boolean {
  */
 function normalizeLineEndings(text: string): string {
 	return text.replace(/\r\n?/g, "\n");
+}
+
+/**
+ * Puts git's diff in the editor's terms. Reading a file as text drops a
+ * leading UTF-8 byte order mark, but git's diff arrives inside JSON and keeps
+ * it, after the prefix of whichever lines stand for line 1 of either side. A
+ * mark anywhere else is content, which the editor keeps too.
+ */
+function normalizeDiff(diff: string): string {
+	let oldLineOne = false;
+	let newLineOne = false;
+	return normalizeLineEndings(diff)
+		.split("\n")
+		.map((line) => {
+			const hunk = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line);
+			if (hunk) {
+				oldLineOne = hunk[1] === "1";
+				newLineOne = hunk[2] === "1";
+				return line;
+			}
+			const onOld = line[0] === " " || line[0] === "-";
+			const onNew = line[0] === " " || line[0] === "+";
+			const isLineOne = (onOld && oldLineOne) || (onNew && newLineOne);
+			if (onOld) oldLineOne = false;
+			if (onNew) newLineOne = false;
+			return isLineOne && line[1] === "\uFEFF"
+				? `${line[0]}${line.slice(2)}`
+				: line;
+		})
+		.join("\n");
 }
 
 /**
@@ -48,6 +78,15 @@ interface DeletedLineChunk {
 interface ChangeDecorationsData {
 	lineHighlights: ChangeLineHighlight[];
 	deletedChunks: DeletedLineChunk[];
+}
+
+interface EditorChangeDecorations extends ChangeDecorationsData {
+	/**
+	 * Whether the decorations come from git's diff, which then describes
+	 * exactly the change from the comparison to the buffer, so their line
+	 * numbers are the ones staging acts on.
+	 */
+	matchesGitDiff: boolean;
 }
 
 interface EditorChangeDecorationsOptions {
@@ -298,15 +337,15 @@ function getLiveChangeDecorations(
 			continue;
 		}
 
+		// The diff can interleave a run's insertions and deletions, but git lists
+		// a run's deletions first, anchored to the run's first new line, and
+		// stages them with that line. Anchor them there too, so a deletion is
+		// shown, picked, and staged at the same line.
 		const deletedLines: string[] = [];
-		while (index < ops.length && ops[index].type === "delete") {
-			deletedLines.push(ops[index].line);
-			index += 1;
-		}
-
 		const insertedLines: string[] = [];
-		while (index < ops.length && ops[index].type === "insert") {
-			insertedLines.push(ops[index].line);
+		while (index < ops.length && ops[index].type !== "equal") {
+			const { type, line } = ops[index];
+			(type === "delete" ? deletedLines : insertedLines).push(line);
 			index += 1;
 		}
 
@@ -339,29 +378,46 @@ export function getEditorChangeDecorations({
 	comparisonContent,
 	changeType = null,
 	changeDiff = null,
-}: EditorChangeDecorationsOptions): ChangeDecorationsData {
+}: EditorChangeDecorationsOptions): EditorChangeDecorations {
 	const current = normalizeLineEndings(currentContent);
 
 	if (comparisonContent !== undefined) {
-		return getLiveChangeDecorations(
-			normalizeLineEndings(comparisonContent),
-			current,
-		);
+		const comparison = normalizeLineEndings(comparisonContent);
+		// Staging slices git's diff, so draw git's diff whenever it describes
+		// exactly the change from the comparison to the buffer. A change that
+		// could sit in more than one place, such as a block deleted from between
+		// two similar ones, may be placed differently by the editor's own diff,
+		// and only git's placement names lines that staging acts on. The editor's
+		// diff draws the rest, such as unsaved edits, but staging by line then
+		// waits for git's diff to match again.
+		if (changeDiff !== null) {
+			const diff = normalizeDiff(changeDiff);
+			if (applyDiff(comparison, diff) === current) {
+				return { ...getDiffDecorations(diff), matchesGitDiff: true };
+			}
+		}
+		return {
+			...getLiveChangeDecorations(comparison, current),
+			matchesGitDiff: false,
+		};
 	}
 
 	if (!changeType && !changeDiff) {
-		return { lineHighlights: [], deletedChunks: [] };
+		return { lineHighlights: [], deletedChunks: [], matchesGitDiff: false };
 	}
 
 	const loaded = normalizeLineEndings(loadedContent);
-	return mergeChangeDecorations(
-		getChangeLineHighlights(
-			loaded,
-			changeType,
-			changeDiff === null ? null : normalizeLineEndings(changeDiff),
+	return {
+		...mergeChangeDecorations(
+			getChangeLineHighlights(
+				loaded,
+				changeType,
+				changeDiff === null ? null : normalizeDiff(changeDiff),
+			),
+			getLiveChangeDecorations(loaded, current),
 		),
-		getLiveChangeDecorations(loaded, current),
-	);
+		matchesGitDiff: false,
+	};
 }
 
 /**
@@ -456,10 +512,11 @@ export function getLineChanges(
 }
 
 /**
- * Turns the editor's selection into inclusive, 1-based line ranges for staging.
- * A collapsed selection yields the cursor's line. A selection that ends at the
- * very start of a line (a full-line drag) does not claim that trailing line,
- * matching how editors show such a selection.
+ * Turns the editor's selection into inclusive, 1-based line ranges for staging
+ * when no lines are picked in the gutter. A collapsed selection yields the
+ * cursor's line. A selection that ends at the very start of a line (a full-line
+ * drag) does not claim that trailing line, matching how editors show such a
+ * selection.
  */
 function selectionToRanges(
 	state: import("@codemirror/state").EditorState,
@@ -567,6 +624,10 @@ function getErrorMessage(body: unknown, status: number): string {
 	return `Request failed (${status})`;
 }
 
+function describeLineCount(count: number): string {
+	return count === 1 ? "1 line" : `${count} lines`;
+}
+
 // Shown in place of the edit status when the server refuses changes.
 export const WRITES_DISABLED_LABEL = "Read-only: writes are disabled";
 
@@ -580,8 +641,8 @@ export interface TextFileEditorProps {
 	changeType?: ChangeType | null;
 	// When set, the editor loads the file's staged (index) content instead of the
 	// working tree and presents it read-only, so a staged change can be viewed and
-	// unstaged line by line. It stays editable in the DOM so selecting lines works
-	// as it does when staging, but every edit is rejected.
+	// unstaged line by line. Lines are picked through the gutter, as they are when
+	// staging, so the DOM is non-editable and viewing never raises the keyboard.
 	staged?: boolean;
 	// When set, the file has been deleted, so there is no working-tree content to
 	// edit. The editor loads the version being removed—the index blob for an
@@ -592,6 +653,9 @@ export interface TextFileEditorProps {
 	onSaved?: () => void;
 	onStaged?: () => void;
 	onUnstaged?: () => void;
+	// Called when the user reloads the file, so the page can refetch the change
+	// context that git's line numbers come from along with it.
+	onReload?: () => void;
 }
 
 export function TextFileEditor({
@@ -607,6 +671,7 @@ export function TextFileEditor({
 	onSaved,
 	onStaged,
 	onUnstaged,
+	onReload,
 }: TextFileEditorProps) {
 	const editorRef = useRef<HTMLDivElement>(null);
 	const viewRef = useRef<import("@codemirror/view").EditorView | null>(null);
@@ -646,10 +711,74 @@ export function TextFileEditor({
 		changeType,
 	});
 
+	// Set when the editor itself has just changed what git's diff should say, by
+	// saving or by unstaging in place, and cleared when the page hands it the
+	// refetched context. Until then the old diff is known to be out of date, not
+	// evidence of a change on disk.
+	const [contextStale, setContextStale] = useState(false);
+
 	useEffect(() => {
 		changeContextRef.current = { comparisonContent, changeDiff, changeType };
 		refreshDecorationsRef.current?.();
+		setContextStale(false);
 	}, [comparisonContent, changeDiff, changeType]);
+
+	// Picked lines live in the CodeMirror state; this reaches them from the
+	// toolbar, and the count labels the Stage and Unstage buttons.
+	const pickerRef = useRef<{
+		ranges: () => [number, number][] | null;
+		clear: () => void;
+	} | null>(null);
+	const [pickedCount, setPickedCount] = useState(0);
+	// Without picks, Stage and Unstage act on the selection. The server ignores
+	// lines that hold no change, so a selection that covers none, such as the
+	// unseen cursor at the top of the non-editable staged view, would make the
+	// button silently do nothing; it is disabled instead.
+	const [selectionCoversChange, setSelectionCoversChange] = useState(false);
+
+	// A brand-new or deleted file has no diff to slice, so it stages whole; a
+	// staged new or deleted file likewise unstages whole. Every other change
+	// stages and unstages by line.
+	const stagesByLine = changeType !== "untracked" && changeType !== "deleted";
+	const unstagesByLine = changeType !== "added" && changeType !== "deleted";
+	// Picks and selections name lines of the change git reports, so acting on
+	// them waits until both the comparison and git's diff have arrived, and
+	// then until git's diff describes the buffer as shown. A clean buffer that
+	// git's diff does not describe was overtaken by a change on disk, and
+	// staging its lines would act on whichever lines now sit there.
+	const changeContextLoading =
+		comparisonContent === undefined || changeDiff === null || contextStale;
+	const matchesGitDiffRef = useRef(false);
+	const [matchesGitDiff, setMatchesGitDiff] = useState(false);
+	const byLineReady = !changeContextLoading && matchesGitDiff;
+	// Picking lines only makes sense where a Stage or Unstage acts on them.
+	const linePickingEnabled =
+		!readOnly &&
+		!deleted &&
+		(staged
+			? onUnstaged !== undefined && unstagesByLine
+			: onStaged !== undefined && stagesByLine);
+	// A file changed on disk since it loaded is the usual cause, but not the
+	// only one: a truncated diff or a clean filter can keep the two apart for
+	// good, so the notice offers the whole file as well as a reload.
+	const gitDiffMismatch =
+		linePickingEnabled && !dirty && !changeContextLoading && !matchesGitDiff;
+	// With git's diff matched but nothing picked, and no selection on a change,
+	// Stage and Unstage would act on nothing. They wait for a pick and say so.
+	const needsPick =
+		byLineReady &&
+		changeCount > 0 &&
+		pickedCount === 0 &&
+		!selectionCoversChange;
+	const stageNeedsPick = stagesByLine && needsPick;
+	const unstageNeedsPick = unstagesByLine && needsPick;
+	const linePickingEnabledRef = useRef(linePickingEnabled);
+	const applyLinePickingRef = useRef<((enabled: boolean) => void) | null>(null);
+
+	useEffect(() => {
+		linePickingEnabledRef.current = linePickingEnabled;
+		applyLinePickingRef.current?.(linePickingEnabled);
+	}, [linePickingEnabled]);
 
 	useEffect(() => {
 		let active = true;
@@ -665,6 +794,8 @@ export function TextFileEditor({
 		changeCountRef.current = 0;
 		lastNavLineRef.current = 0;
 		setChangeCount(0);
+		matchesGitDiffRef.current = false;
+		setMatchesGitDiff(false);
 
 		(async () => {
 			try {
@@ -742,18 +873,44 @@ export function TextFileEditor({
 				"@codemirror/language"
 			);
 			const { tags: t } = await import("@lezer/highlight");
+			const {
+				clearPickedLines,
+				countPickedLines,
+				deletionAnchorLine,
+				getPickTargets,
+				linePickerGutter,
+				livePickedLines,
+				pickedLines,
+				pickedLinesToRanges,
+				rangesCoverTarget,
+				togglePickedLine,
+			} = await import("./linePicking.ts");
 
 			if (destroyed || !editorRef.current) return;
 
 			const refreshChangeDecorations = StateEffect.define<void>();
 			class DeletedLinesWidget extends WidgetType {
-				constructor(private readonly lines: string[]) {
+				constructor(
+					readonly lines: string[],
+					readonly anchorLine: number,
+					readonly picked: boolean,
+				) {
 					super();
+				}
+
+				override eq(other: DeletedLinesWidget) {
+					return (
+						other.lines === this.lines &&
+						other.anchorLine === this.anchorLine &&
+						other.picked === this.picked
+					);
 				}
 
 				override toDOM() {
 					const wrapper = document.createElement("div");
-					wrapper.className = "cm-deletedChunk";
+					wrapper.className = `cm-deletedChunk${
+						this.picked ? " cm-deletedChunk--picked" : ""
+					}`;
 					for (const line of this.lines) {
 						const lineElement = document.createElement("div");
 						lineElement.className = "cm-deletedChunkLine";
@@ -764,10 +921,13 @@ export function TextFileEditor({
 				}
 			}
 
-			function buildChangeDecorations(doc: import("@codemirror/state").Text) {
+			// Diffing the document is the expensive part, so it runs only when the
+			// document or the change context changes; picking a line re-renders the
+			// decorations alone.
+			function computeChanges(doc: import("@codemirror/state").Text) {
 				const { comparisonContent, changeDiff, changeType } =
 					changeContextRef.current;
-				const changeDecorations = getEditorChangeDecorations({
+				const changes = getEditorChangeDecorations({
 					currentContent: doc.toString(),
 					// The file as last loaded or saved, which is what git's diff describes.
 					loadedContent: originalContentRef.current,
@@ -775,44 +935,60 @@ export function TextFileEditor({
 					changeType,
 					changeDiff,
 				});
-
-				changeRegionsRef.current = getChangeRegionLines(
-					changeDecorations,
-					doc.lines,
+				changes.lineHighlights.sort(
+					(left, right) => left.lineNumber - right.lineNumber,
 				);
+
+				changeRegionsRef.current = getChangeRegionLines(changes, doc.lines);
 				if (changeRegionsRef.current.length !== changeCountRef.current) {
 					changeCountRef.current = changeRegionsRef.current.length;
 					setChangeCount(changeRegionsRef.current.length);
 				}
+				if (changes.matchesGitDiff !== matchesGitDiffRef.current) {
+					matchesGitDiffRef.current = changes.matchesGitDiff;
+					setMatchesGitDiff(changes.matchesGitDiff);
+				}
 
+				return { changes, targets: getPickTargets(changes, doc.lines) };
+			}
+
+			function buildChangeDecorations(
+				doc: import("@codemirror/state").Text,
+				changes: ReturnType<typeof getEditorChangeDecorations>,
+				picked: ReadonlySet<number>,
+			) {
 				const ranges = [];
-				for (const highlight of changeDecorations.lineHighlights.sort(
-					(left, right) => left.lineNumber - right.lineNumber,
-				)) {
-					const { kind, lineNumber } = highlight;
+				for (const { kind, lineNumber } of changes.lineHighlights) {
 					if (lineNumber < 1 || lineNumber > doc.lines) {
 						continue;
 					}
 					const line = doc.line(lineNumber);
+					const pickedClass =
+						kind === "added" && picked.has(lineNumber) ? " cm-pickedLine" : "";
 					ranges.push(
 						Decoration.line({
 							attributes: {
-								class: `cm-changedLine cm-changedLine--${kind}`,
+								class: `cm-changedLine cm-changedLine--${kind}${pickedClass}`,
 							},
 						}).range(line.from),
 					);
 				}
 
-				for (const chunk of changeDecorations.deletedChunks) {
+				for (const chunk of changes.deletedChunks) {
 					const anchor =
 						chunk.anchorIndex >= doc.lines
 							? doc.length
 							: doc.line(chunk.anchorIndex + 1).from;
+					const anchorLine = deletionAnchorLine(chunk, doc.lines);
 					ranges.push(
 						Decoration.widget({
 							block: true,
 							side: -1,
-							widget: new DeletedLinesWidget(chunk.lines),
+							widget: new DeletedLinesWidget(
+								chunk.lines,
+								anchorLine,
+								picked.has(anchorLine),
+							),
 						}).range(anchor),
 					);
 				}
@@ -822,6 +998,32 @@ export function TextFileEditor({
 					true,
 				);
 			}
+
+			const changeField = StateField.define({
+				create(state) {
+					return computeChanges(state.doc);
+				},
+				update(value, transaction) {
+					if (
+						transaction.docChanged ||
+						transaction.effects.some((effect) =>
+							effect.is(refreshChangeDecorations),
+						)
+					) {
+						return computeChanges(transaction.state.doc);
+					}
+					return value;
+				},
+			});
+
+			const pickerGutter = linePickerGutter({
+				targets: (state) => state.field(changeField).targets,
+				// The targets only name lines that staging acts on once git's diff
+				// describes the buffer, which also means the change context has loaded.
+				canPick: (state) => state.field(changeField).changes.matchesGitDiff,
+				widgetAnchor: (widget) =>
+					widget instanceof DeletedLinesWidget ? widget.anchorLine : null,
+			});
 
 			const riftHighlightStyle = HighlightStyle.define([
 				{
@@ -875,36 +1077,49 @@ export function TextFileEditor({
 			]);
 
 			const lineWrapCompartment = new Compartment();
+			const linePickingCompartment = new Compartment();
 			const baseExtensions = [
 				lineNumbers(),
+				linePickingCompartment.of(
+					linePickingEnabledRef.current ? pickerGutter : [],
+				),
 				drawSelection(),
 				highlightActiveLine(),
 				lineWrapCompartment.of(
 					lineWrapRef.current ? EditorView.lineWrapping : [],
 				),
 				syntaxHighlighting(riftHighlightStyle),
-				StateField.define({
-					create(state) {
-						return buildChangeDecorations(state.doc);
-					},
-					update(value, transaction) {
-						if (
-							transaction.docChanged ||
-							transaction.effects.some((effect) =>
-								effect.is(refreshChangeDecorations),
-							)
-						) {
-							return buildChangeDecorations(transaction.state.doc);
-						}
-						return value;
-					},
-					provide: (field) => EditorView.decorations.from(field),
-				}),
+				changeField,
+				pickedLines,
+				EditorView.decorations.compute([changeField, pickedLines], (state) =>
+					buildChangeDecorations(
+						state.doc,
+						state.field(changeField).changes,
+						state.field(pickedLines),
+					),
+				),
 				EditorView.updateListener.of((update) => {
 					if (!update.docChanged) return;
 					docTextRef.current = update.state.doc.toString();
 					setDirty(docTextRef.current !== originalContentRef.current);
 					setError(null);
+				}),
+				EditorView.updateListener.of((update) => {
+					const picks = update.state.field(pickedLines);
+					const { targets } = update.state.field(changeField);
+					const targetsChanged =
+						targets !== update.startState.field(changeField).targets;
+					if (
+						picks !== update.startState.field(pickedLines) ||
+						targetsChanged
+					) {
+						setPickedCount(countPickedLines(picks, targets));
+					}
+					if (update.selectionSet || targetsChanged) {
+						setSelectionCoversChange(
+							rangesCoverTarget(selectionToRanges(update.state), targets),
+						);
+					}
 				}),
 				EditorView.theme({
 					"&": {
@@ -945,18 +1160,15 @@ export function TextFileEditor({
 				}),
 			];
 
-			if (readOnly || deleted) {
-				// A deleted file is display-only: there is nothing to edit and no line
-				// selection to make, so keep the DOM non-editable to spare mobile the
-				// pop-up keyboard.
+			if (readOnly || deleted || staged) {
+				// Nothing here is edited in place: a deleted file has no working tree,
+				// and staged content is the index blob, whose lines are picked through
+				// the gutter. Keep the DOM non-editable to spare mobile the pop-up
+				// keyboard.
 				baseExtensions.unshift(
 					EditorView.editable.of(false),
 					EditorState.readOnly.of(true),
 				);
-			} else if (staged) {
-				// Staged content is read-only, but the DOM stays editable so line
-				// selection for unstaging behaves exactly as it does when staging.
-				baseExtensions.unshift(EditorState.readOnly.of(true));
 			}
 
 			const state = EditorState.create({
@@ -971,10 +1183,29 @@ export function TextFileEditor({
 			refreshDecorationsRef.current = () => {
 				view.dispatch({ effects: refreshChangeDecorations.of() });
 			};
+			pickerRef.current = {
+				ranges: () => {
+					const live = livePickedLines(
+						view.state.field(pickedLines),
+						view.state.field(changeField).targets,
+					);
+					return live.length > 0 ? pickedLinesToRanges(live) : null;
+				},
+				clear: () => {
+					view.dispatch({ effects: clearPickedLines.of(null) });
+				},
+			};
 			applyLineWrapRef.current = (wrap: boolean) => {
 				view.dispatch({
 					effects: lineWrapCompartment.reconfigure(
 						wrap ? EditorView.lineWrapping : [],
+					),
+				});
+			};
+			applyLinePickingRef.current = (enabled: boolean) => {
+				view.dispatch({
+					effects: linePickingCompartment.reconfigure(
+						enabled ? pickerGutter : [],
 					),
 				});
 			};
@@ -1000,15 +1231,23 @@ export function TextFileEditor({
 				try {
 					const langSupport = await loader();
 					if (destroyed || viewRef.current !== view) return;
+					const picks = view.state.field(pickedLines);
 					view.setState(
 						EditorState.create({
 							doc: view.state.doc.toString(),
 							extensions: [...baseExtensions, langSupport],
 						}),
 					);
-					// The fresh state reverts to the wrap setting captured when the
-					// extensions were built, so re-apply whatever is current now.
+					// The fresh state reverts to the settings captured when the
+					// extensions were built, so re-apply whatever is current now, and
+					// keep any lines picked while the language loaded.
 					applyLineWrapRef.current(lineWrapRef.current);
+					applyLinePickingRef.current(linePickingEnabledRef.current);
+					if (picks.size > 0) {
+						view.dispatch({
+							effects: [...picks].map((line) => togglePickedLine.of(line)),
+						});
+					}
 				} catch {
 					// Plain text is fine if language support fails.
 				}
@@ -1029,8 +1268,12 @@ export function TextFileEditor({
 			destroyed = true;
 			refreshDecorationsRef.current = null;
 			applyLineWrapRef.current = null;
+			applyLinePickingRef.current = null;
 			scrollToLineRef.current = null;
 			replaceDocRef.current = null;
+			pickerRef.current = null;
+			setPickedCount(0);
+			setSelectionCoversChange(false);
 			if (viewRef.current) {
 				viewRef.current.destroy();
 				viewRef.current = null;
@@ -1092,7 +1335,8 @@ export function TextFileEditor({
 			return;
 		}
 		setReloadToken((value) => value + 1);
-	}, [dirty]);
+		onReload?.();
+	}, [dirty, onReload]);
 
 	const handleSave = useCallback(async () => {
 		if (readOnly || staged || !viewRef.current || mtimeMs === null) return;
@@ -1129,6 +1373,7 @@ export function TextFileEditor({
 
 			const body = (await response.json()) as { mtimeMs?: number };
 			originalContentRef.current = nextContent;
+			setContextStale(true);
 			setDirty(false);
 			refreshDecorationsRef.current?.();
 			if (typeof body.mtimeMs === "number" && Number.isFinite(body.mtimeMs)) {
@@ -1152,10 +1397,12 @@ export function TextFileEditor({
 			const body: { path: string; ranges?: [number, number][] } = {
 				path: filePath,
 			};
-			// A brand-new or deleted file has no diff to slice, so stage it whole; a
-			// tracked change stages exactly the selected lines.
-			if (changeType !== "untracked" && changeType !== "deleted") {
-				body.ranges = selectionToRanges(viewRef.current.state);
+			// A tracked change stages exactly the picked lines, or the selected
+			// ones when nothing is picked.
+			if (stagesByLine) {
+				body.ranges =
+					pickerRef.current?.ranges() ??
+					selectionToRanges(viewRef.current.state);
 			}
 
 			const response = await fetch(
@@ -1172,13 +1419,14 @@ export function TextFileEditor({
 				throw new Error(getErrorMessage(errorBody, response.status));
 			}
 
+			pickerRef.current?.clear();
 			onStaged?.();
 		} catch (err) {
 			setError(err instanceof Error ? err.message : "Failed to stage changes");
 		} finally {
 			setStaging(false);
 		}
-	}, [changeType, dirty, filePath, onStaged, readOnly, repo]);
+	}, [dirty, filePath, onStaged, readOnly, repo, stagesByLine]);
 
 	const handleUnstage = useCallback(async () => {
 		if (!staged || !viewRef.current) return;
@@ -1190,10 +1438,12 @@ export function TextFileEditor({
 			const body: { path: string; ranges?: [number, number][] } = {
 				path: filePath,
 			};
-			// A staged new or deleted file has no partial side to slice, so unstage it
-			// whole; a staged modification unstages exactly the selected lines.
-			if (changeType !== "added" && changeType !== "deleted") {
-				body.ranges = selectionToRanges(viewRef.current.state);
+			// A staged modification unstages exactly the picked lines, or the
+			// selected ones when nothing is picked.
+			if (unstagesByLine) {
+				body.ranges =
+					pickerRef.current?.ranges() ??
+					selectionToRanges(viewRef.current.state);
 			}
 
 			const response = await fetch(
@@ -1210,6 +1460,7 @@ export function TextFileEditor({
 				throw new Error(getErrorMessage(errorBody, response.status));
 			}
 
+			pickerRef.current?.clear();
 			// The index just changed, so bring the buffer up to the new staged
 			// content; the decorations then shrink to whatever remains staged.
 			// Editing the buffer in place keeps the editor's selection and scroll
@@ -1224,6 +1475,7 @@ export function TextFileEditor({
 				const normalized = normalizeLineEndings(text);
 				lineSeparatorRef.current = detectLineSeparator(text);
 				originalContentRef.current = normalized;
+				setContextStale(true);
 				replaceDocRef.current(normalized);
 			} else {
 				setReloadToken((value) => value + 1);
@@ -1236,7 +1488,7 @@ export function TextFileEditor({
 		} finally {
 			setUnstaging(false);
 		}
-	}, [changeType, filePath, onUnstaged, repo, staged]);
+	}, [filePath, onUnstaged, repo, staged, unstagesByLine]);
 
 	return (
 		<div className="text-file-editor">
@@ -1301,11 +1553,33 @@ export function TextFileEditor({
 							className="text-file-editor-button"
 							onClick={handleStage}
 							disabled={
-								loading || saving || staging || dirty || changeCount === 0
+								loading ||
+								saving ||
+								staging ||
+								dirty ||
+								changeCount === 0 ||
+								(stagesByLine && !byLineReady) ||
+								stageNeedsPick
 							}
-							title={dirty ? "Save before staging" : "Stage the selected lines"}
+							title={
+								dirty
+									? "Save before staging"
+									: stagesByLine && gitDiffMismatch
+										? "Git's diff doesn't match this file"
+										: stageNeedsPick
+											? "Pick changed lines in the gutter, or select them"
+											: pickedCount > 0
+												? "Stage the picked lines"
+												: "Stage the selected lines"
+							}
 						>
-							{staging ? "Staging..." : "Stage"}
+							{staging
+								? "Staging..."
+								: stageNeedsPick
+									? "Pick lines"
+									: pickedCount > 0
+										? `Stage ${describeLineCount(pickedCount)}`
+										: "Stage"}
 						</button>
 					)}
 					{!readOnly && staged && onUnstaged && (
@@ -1313,10 +1587,30 @@ export function TextFileEditor({
 							type="button"
 							className="text-file-editor-button"
 							onClick={handleUnstage}
-							disabled={loading || unstaging || changeCount === 0}
-							title="Unstage the selected lines"
+							disabled={
+								loading ||
+								unstaging ||
+								changeCount === 0 ||
+								(unstagesByLine && !byLineReady) ||
+								unstageNeedsPick
+							}
+							title={
+								unstagesByLine && gitDiffMismatch
+									? "Git's diff doesn't match this file"
+									: unstageNeedsPick
+										? "Pick staged lines in the gutter"
+										: pickedCount > 0
+											? "Unstage the picked lines"
+											: "Unstage the selected lines"
+							}
 						>
-							{unstaging ? "Unstaging..." : "Unstage"}
+							{unstaging
+								? "Unstaging..."
+								: unstageNeedsPick
+									? "Pick lines"
+									: pickedCount > 0
+										? `Unstage ${describeLineCount(pickedCount)}`
+										: "Unstage"}
 						</button>
 					)}
 					{!readOnly && !staged && !deleted && (
@@ -1333,6 +1627,13 @@ export function TextFileEditor({
 			</div>
 			{loading && <div className="text-file-editor-message">Loading...</div>}
 			{error && <div className="text-file-editor-error">{error}</div>}
+			{gitDiffMismatch && (
+				<div className="text-file-editor-notice">
+					{staged
+						? "Git's diff doesn't match this file. Reload, or unstage the whole file."
+						: "Git's diff doesn't match this file. Reload, or stage the whole file."}
+				</div>
+			)}
 			{content !== null && (
 				<div
 					ref={editorRef}

@@ -274,6 +274,12 @@ export function ChangesPage({
 		fetchStatus(true);
 	}, [fetchStatus]);
 
+	// Reloading rereads the file, and git's diff and the comparison have to be
+	// reread with it for the editor's line numbers to match git's again.
+	const handleEditorReload = useCallback(() => {
+		setRefreshToken((value) => value + 1);
+	}, []);
+
 	const handleBack = useCallback(() => {
 		diffAbortRef.current?.abort();
 		comparisonAbortRef.current?.abort();
@@ -471,6 +477,7 @@ export function ChangesPage({
 								readOnlyLabel={WRITES_DISABLED_LABEL}
 								onSaved={handleEditorSaved}
 								onStaged={handleEditorStaged}
+								onReload={handleEditorReload}
 							/>
 						</div>
 					)}
@@ -487,6 +494,7 @@ export function ChangesPage({
 								readOnlyLabel={WRITES_DISABLED_LABEL}
 								staged
 								onUnstaged={handleEditorUnstaged}
+								onReload={handleEditorReload}
 							/>
 						</div>
 					)}

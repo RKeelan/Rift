@@ -83,6 +83,14 @@
 	border-bottom: 1px solid var(--color-border);
 }
 
+.text-file-editor-notice {
+	padding: 0.5rem 0.75rem;
+	font-size: 0.8125rem;
+	color: var(--color-text-secondary);
+	border-bottom: 1px solid var(--color-border);
+	background: var(--color-surface);
+}
+
 .text-file-editor-surface {
 	flex: 1;
 	overflow: hidden;
@@ -106,8 +114,9 @@
 	text-decoration-color: rgba(255, 161, 152, 0.7);
 }
 
+/* CodeMirror measures a block widget by its border box, so a vertical margin
+   here would push the gutters out of line with the text below it. */
 .text-file-editor-surface .cm-deletedChunk {
-	margin: 0.125rem 0;
 	padding: 0.125rem 0;
 	background: rgba(248, 81, 73, 0.12);
 	box-shadow: inset 3px 0 0 #ffa198;
@@ -120,9 +129,52 @@
 	font-family: "SF Mono", "Fira Code", "Fira Mono", Menlo, Consolas, monospace;
 	font-size: 13px;
 	line-height: 1.4;
+	/* A blank deleted line still takes a line's height. */
+	min-height: 1.4em;
 }
 
 .text-file-editor-surface--wrap .cm-deletedChunkLine {
 	white-space: pre-wrap;
 	overflow-wrap: anywhere;
+}
+
+/* Line picking: a gutter column of tap targets beside the line numbers. */
+.text-file-editor-surface .cm-pickGutter {
+	width: 1.75rem;
+	touch-action: manipulation;
+}
+
+.text-file-editor-surface .cm-pickTarget {
+	height: 100%;
+	text-align: center;
+	cursor: pointer;
+	user-select: none;
+	-webkit-tap-highlight-color: transparent;
+}
+
+.text-file-editor-surface .cm-pickTarget--line {
+	color: #7ee787;
+	background: rgba(46, 160, 67, 0.12);
+}
+
+.text-file-editor-surface .cm-pickTarget--deletion {
+	color: #ffa198;
+	background: rgba(248, 81, 73, 0.12);
+}
+
+.text-file-editor-surface .cm-pickTarget--picked {
+	color: var(--color-surface);
+	background: var(--color-primary);
+	font-weight: 700;
+}
+
+/* Until git's diff describes the buffer, the targets cannot be picked. */
+.text-file-editor-surface .cm-pickTarget--waiting {
+	opacity: 0.4;
+	cursor: default;
+}
+
+.text-file-editor-surface .cm-line.cm-pickedLine,
+.text-file-editor-surface .cm-deletedChunk.cm-deletedChunk--picked {
+	box-shadow: inset 4px 0 0 var(--color-primary);
 }
