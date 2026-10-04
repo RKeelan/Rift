@@ -2,8 +2,8 @@ import type { IncomingHttpHeaders } from "node:http";
 import net from "node:net";
 import type { RequestHandler } from "express";
 
-// Rift has two kinds of caller. Local processes on this machine (the CLI, the
-// Vite dev proxy, a browser on the desktop) reach the loopback-bound server
+// Rift has two kinds of caller. Local processes on this machine (the Vite dev
+// proxy, a browser on the desktop) reach the loopback-bound server
 // directly and send no proxy headers; they already have filesystem access, so
 // the server trusts them. Everyone else arrives through `tailscale serve`, which
 // adds forwarding headers and stamps the caller's Tailscale identity, replacing
