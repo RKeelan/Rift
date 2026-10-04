@@ -219,9 +219,15 @@ export function createApp(config: AppConfig): express.Express {
 		});
 	});
 
+	// A missing build asset must not fall through to index.html: a stale page
+	// asking for a removed chunk would get HTML where it expects a module.
+	router.all("/assets/*path", (_req, res) => {
+		res.status(404).type("text/plain").send("Not found");
+	});
+
 	// SPA fallback: serve index.html for client-side routes
 	router.get("*path", (_req, res) => {
-		res.sendFile(path.join(clientDist, "index.html"));
+		res.sendFile("index.html", { root: clientDist });
 	});
 
 	app.use("/", router);

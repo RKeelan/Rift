@@ -2,6 +2,7 @@ import { ChevronDown, ChevronUp, WrapText } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { apiUrl } from "../apiUrl.ts";
 import { getDiffOps } from "../diff.ts";
+import { isChunkLoadError, reloadForStaleChunk } from "../staleChunk.ts";
 import "./TextFileEditor.css";
 
 const FILE_MTIME_HEADER = "x-file-mtime-ms";
@@ -925,6 +926,9 @@ export function TextFileEditor({
 			// to load leaves an empty pane with nothing to explain it. Say so
 			// rather than rendering nothing.
 			if (destroyed) return;
+			// Chunks without dependencies bypass Vite's preload helper, so a
+			// stale build surfaces here rather than as `vite:preloadError`.
+			if (isChunkLoadError(cause) && reloadForStaleChunk()) return;
 			const detail = cause instanceof Error ? `: ${cause.message}` : "";
 			setError(`Failed to load the editor${detail}`);
 		});
