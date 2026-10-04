@@ -91,6 +91,47 @@ describe("getEditorChangeDecorations", () => {
 		expect(decorations.deletedChunks).toEqual([]);
 	});
 
+	test("reads changed lines that begin with dashes or pluses from git's diff", () => {
+		const content = "a\n++i;\nb\n";
+
+		const decorations = getEditorChangeDecorations({
+			currentContent: content,
+			loadedContent: content,
+			changeType: "modified",
+			changeDiff: [
+				"--- a/f.c",
+				"+++ b/f.c",
+				"@@ -1,3 +1,3 @@",
+				" a",
+				"--- note",
+				"+++i;",
+				" b",
+				"",
+			].join("\n"),
+		});
+
+		expect(decorations.lineHighlights).toEqual([
+			{ kind: "added", lineNumber: 2 },
+		]);
+		expect(decorations.deletedChunks).toEqual([
+			{ anchorIndex: 1, lines: ["-- note"] },
+		]);
+	});
+
+	test("anchors the deletions of an emptied file to line 1", () => {
+		const decorations = getEditorChangeDecorations({
+			currentContent: "",
+			loadedContent: "",
+			changeType: "modified",
+			changeDiff: "--- a/f\n+++ b/f\n@@ -1,2 +0,0 @@\n-a\n-b\n",
+		});
+
+		expect(decorations.lineHighlights).toEqual([]);
+		expect(decorations.deletedChunks).toEqual([
+			{ anchorIndex: 0, lines: ["a", "b"] },
+		]);
+	});
+
 	test("marks only the edited lines when two edits sit far apart", () => {
 		const baseline = Array.from({ length: 2000 }, (_, i) => `line ${i}`);
 		const edited = baseline.slice();
@@ -464,6 +505,38 @@ describe("unstaging", () => {
 		expect(JSON.parse(requests[0].body as string)).toEqual({
 			path: "notes.txt",
 		});
+	});
+});
+
+describe("emptied files", () => {
+	const originalFetch = globalThis.fetch;
+
+	afterEach(() => {
+		cleanup();
+		globalThis.fetch = originalFetch;
+	});
+
+	test("opens a tracked file whose every line was deleted", async () => {
+		globalThis.fetch = (async () =>
+			new Response("", {
+				headers: { "x-file-mtime-ms": "1" },
+			})) as typeof fetch;
+
+		const { container } = render(
+			<TextFileEditor
+				filePath="notes.txt"
+				repo="test-repo"
+				changeType="modified"
+				changeDiff={
+					"--- a/notes.txt\n+++ b/notes.txt\n@@ -1,2 +0,0 @@\n-a\n-b\n"
+				}
+			/>,
+		);
+
+		await waitFor(() => {
+			expect(container.querySelector(".cm-deletedChunk")).not.toBeNull();
+		});
+		expect(container.querySelector(".text-file-editor-error")).toBeNull();
 	});
 });
 

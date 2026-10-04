@@ -694,6 +694,52 @@ describe("POST /api/git/stage (line ranges)", () => {
 		execSync("git checkout -- crlf.txt", { cwd: repoDir });
 	});
 
+	test("stages only the picked line after a deleted line that begins with dashes", async () => {
+		await commitFile("dash.sql", "a\n-- note\nb\nc\n");
+		await fs.writeFile(path.join(repoDir, "dash.sql"), "a\nB\nC\n");
+
+		const res = await supertest(app)
+			.post(`/api/git/stage?repo=${repoRef}`)
+			.send({ path: "dash.sql", ranges: [[3, 3]] });
+
+		expect(res.status).toBe(200);
+		// Only C is staged; the deletions anchored to line 2 stay in the index.
+		expect(indexContent("dash.sql")).toBe("a\n-- note\nb\nc\nC\n");
+
+		execSync("git reset -q HEAD dash.sql", { cwd: repoDir });
+		execSync("git checkout -- dash.sql", { cwd: repoDir });
+	});
+
+	test("leaves out an unpicked added line that begins with pluses", async () => {
+		await commitFile("plus.c", "a\nb\n");
+		await fs.writeFile(path.join(repoDir, "plus.c"), "a\n++i;\nX\nb\n");
+
+		const res = await supertest(app)
+			.post(`/api/git/stage?repo=${repoRef}`)
+			.send({ path: "plus.c", ranges: [[3, 3]] });
+
+		expect(res.status).toBe(200);
+		expect(indexContent("plus.c")).toBe("a\nX\nb\n");
+
+		execSync("git reset -q HEAD plus.c", { cwd: repoDir });
+		execSync("git checkout -- plus.c", { cwd: repoDir });
+	});
+
+	test("stages the emptying of a file through line 1", async () => {
+		await commitFile("emptied.txt", "a\nb\n");
+		await fs.writeFile(path.join(repoDir, "emptied.txt"), "");
+
+		const res = await supertest(app)
+			.post(`/api/git/stage?repo=${repoRef}`)
+			.send({ path: "emptied.txt", ranges: [[1, 1]] });
+
+		expect(res.status).toBe(200);
+		expect(indexContent("emptied.txt")).toBe("");
+
+		execSync("git reset -q HEAD emptied.txt", { cwd: repoDir });
+		execSync("git checkout -- emptied.txt", { cwd: repoDir });
+	});
+
 	test("a selection covering no change stages nothing", async () => {
 		await commitFile("noop.txt", "alpha\nbeta\n");
 		await fs.writeFile(path.join(repoDir, "noop.txt"), "ALPHA\nbeta\n");
@@ -832,6 +878,48 @@ describe("POST /api/git/unstage (line ranges)", () => {
 
 		execSync("git reset -q HEAD crlf.txt", { cwd: repoDir });
 		execSync("git checkout -- crlf.txt", { cwd: repoDir });
+	});
+
+	test("unstages only the picked line after a deleted line that begins with dashes", async () => {
+		await commitAndStage("dash.sql", "a\n-- note\nb\nc\n", "a\nB\nC\n");
+
+		const res = await supertest(app)
+			.post(`/api/git/unstage?repo=${repoRef}`)
+			.send({ path: "dash.sql", ranges: [[3, 3]] });
+
+		expect(res.status).toBe(200);
+		expect(indexContent("dash.sql")).toBe("a\nB\n");
+
+		execSync("git reset -q HEAD dash.sql", { cwd: repoDir });
+		execSync("git checkout -- dash.sql", { cwd: repoDir });
+	});
+
+	test("keeps an unpicked staged line that begins with pluses", async () => {
+		await commitAndStage("plus.c", "a\nb\n", "a\n++i;\nX\nb\n");
+
+		const res = await supertest(app)
+			.post(`/api/git/unstage?repo=${repoRef}`)
+			.send({ path: "plus.c", ranges: [[3, 3]] });
+
+		expect(res.status).toBe(200);
+		expect(indexContent("plus.c")).toBe("a\n++i;\nb\n");
+
+		execSync("git reset -q HEAD plus.c", { cwd: repoDir });
+		execSync("git checkout -- plus.c", { cwd: repoDir });
+	});
+
+	test("unstages the emptying of a file through line 1", async () => {
+		await commitAndStage("emptied.txt", "a\nb\n", "");
+
+		const res = await supertest(app)
+			.post(`/api/git/unstage?repo=${repoRef}`)
+			.send({ path: "emptied.txt", ranges: [[1, 1]] });
+
+		expect(res.status).toBe(200);
+		expect(indexContent("emptied.txt")).toBe("a\nb\n");
+
+		execSync("git reset -q HEAD emptied.txt", { cwd: repoDir });
+		execSync("git checkout -- emptied.txt", { cwd: repoDir });
 	});
 
 	test("a selection covering no staged change unstages nothing", async () => {
