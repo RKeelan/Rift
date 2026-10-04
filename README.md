@@ -31,7 +31,7 @@ REPOS_ROOT=/path/to/repos bun run dev
 $env:REPOS_ROOT = "C:\Users\you\Src\you;C:\Users\you\OneDrive\Notes"
 ```
 
-Each root is named after its final path segment, and that label qualifies every repo name the API returns — `you/Rift`, `Notes/Journal`. Roots whose last segment collides grow leftward until the labels differ. A repo name always resolves against the single root it names, so one root can never reach into another.
+Each root is named after its final path segment, and that label qualifies every repo name the API returns — `you/Rift`, `Notes/Journal`. Roots whose last segment collides grow leftward until the labels differ. A drive root such as `O:\` is named after its letter (`O`), and the POSIX root `/` is named `root`. A repo name always resolves against the single root it names, so one root can never reach into another.
 
 Rift only lists repositories that are immediate children of a root. Point each root directly at a directory of checkouts rather than at a tree containing them; the shallow scan is what keeps large sibling folders, such as photo or archive directories, from being walked on every dashboard load.
 

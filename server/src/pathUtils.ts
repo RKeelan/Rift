@@ -18,6 +18,13 @@ async function realpathOfNearest(p: string): Promise<string | null> {
 	}
 }
 
+// True when `candidate` is `dir` or lies beneath it. Filesystem roots (`/`,
+// `C:\`) already end in a separator, so one is only appended when missing.
+function isWithin(dir: string, candidate: string): boolean {
+	const prefix = dir.endsWith(path.sep) ? dir : dir + path.sep;
+	return candidate === dir || candidate.startsWith(prefix);
+}
+
 /**
  * Resolves a user-supplied path against the working directory and rejects
  * any result that escapes it (e.g. `../`, absolute paths, or symlinks that
@@ -31,22 +38,12 @@ export async function resolveSafePath(
 ): Promise<string | null> {
 	const normalizedDir = path.resolve(workingDir);
 	const resolved = path.resolve(normalizedDir, requestedPath);
-	if (
-		!resolved.startsWith(normalizedDir + path.sep) &&
-		resolved !== normalizedDir
-	) {
-		return null;
-	}
+	if (!isWithin(normalizedDir, resolved)) return null;
 
 	const realDir = await realpathOfNearest(normalizedDir);
 	const realResolved = await realpathOfNearest(resolved);
 	if (!realDir || !realResolved) return null;
-	if (
-		!realResolved.startsWith(realDir + path.sep) &&
-		realResolved !== realDir
-	) {
-		return null;
-	}
+	if (!isWithin(realDir, realResolved)) return null;
 
 	return resolved;
 }
@@ -101,10 +98,7 @@ export async function resolveRepo(
 	}
 	const normalizedRoot = path.resolve(reposRoot);
 	const resolved = path.resolve(normalizedRoot, repoName);
-	if (
-		!resolved.startsWith(normalizedRoot + path.sep) &&
-		resolved !== normalizedRoot
-	) {
+	if (!isWithin(normalizedRoot, resolved)) {
 		return { ok: false, reason: "forbidden" };
 	}
 	try {

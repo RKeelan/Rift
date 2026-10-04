@@ -54,15 +54,19 @@ export function inferReposRoot(cwd: string, homeDir: string): string | null {
 /**
  * Names each root after its final path segment, which is what repo names are
  * qualified with (`Notes/Journal`). Roots whose basenames collide grow leftward
- * one segment at a time until the labels are distinct.
+ * one segment at a time until the labels are distinct. A filesystem root has no
+ * final segment, so a drive root is named after its letter (`O`) and the POSIX
+ * root is named `root`.
  */
 export function labelRoots(rootPaths: string[]): RepoRoot[] {
-	const segmentsFor = rootPaths.map((rootPath) =>
-		path
+	const segmentsFor = rootPaths.map((rootPath) => {
+		const segments = path
 			.resolve(rootPath)
 			.split(/[\\/]+/)
-			.filter(Boolean),
-	);
+			.filter(Boolean)
+			.map((segment) => segment.replace(/^([A-Za-z]):$/, "$1"));
+		return segments.length > 0 ? segments : ["root"];
+	});
 	const depths = rootPaths.map(() => 1);
 
 	const labelAt = (index: number): string => {

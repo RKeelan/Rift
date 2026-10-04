@@ -48,6 +48,17 @@ describe("labelRoots", () => {
 		expect(new Set(roots.map((root) => root.label)).size).toBe(2);
 	});
 
+	test.if(process.platform === "win32")(
+		"names a drive root after its letter",
+		() => {
+			expect(labelRoots(["O:\\"])[0].label).toBe("O");
+		},
+	);
+
+	test.if(process.platform !== "win32")("names the POSIX root `root`", () => {
+		expect(labelRoots(["/"])[0].label).toBe("root");
+	});
+
 	test("resolves each root to an absolute path", () => {
 		for (const root of labelRoots(["."])) {
 			expect(path.isAbsolute(root.path)).toBe(true);
