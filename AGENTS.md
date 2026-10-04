@@ -5,8 +5,18 @@ Read `README.md` first for the product overview, environment behaviour, and the 
 ## Repository Guidance
 
 - Give every endpoint that changes a file or a repo a method other than `GET`, `HEAD`, or `OPTIONS`. The `RIFT_ALLOW_WRITES` switch refuses requests by method, so a mutating `GET` would bypass it.
-- Validate API changes with tests, and UI changes in the real client in a browser at phone width (360px and 412px).
+- Validate API changes with tests, and UI changes in the real client on Android (see Testing on Android).
 - Run `bun run lint`, `bun run format:check`, and `bun test` before handing work off.
+
+## Testing on Android
+
+Rift's users reach it from Chrome on Android, so that is where a UI change has to work. The on-screen keyboard, touch selection and the visual viewport all behave differently there than in desktop Chrome, and bugs in them pass unit tests and desktop checks alike. When the machine has the Android emulator, test in its Chrome; desktop Chrome at phone width (360px and 412px) is the fallback.
+
+- The emulator cannot resolve tailnet names. Run `bun scripts/emulator-proxy.ts`, which serves the deployed Rift under `/rift/` on `127.0.0.1:13001`, then `adb reverse tcp:8080 tcp:13001`, and open `http://localhost:8080/rift/` in the emulator's Chrome.
+- Drive it as a person would: `adb shell input` taps, swipes and key events, and the on-screen keyboard for typing. Record with `adb shell screenrecord`.
+- To measure layout and scrolling, forward Chrome's DevTools socket with `adb forward tcp:9222 localabstract:chrome_devtools_remote` and attach a CDP client, such as Playwright's `connect_over_cdp`. Sample positions frame by frame before deciding what causes a jump.
+- Exercise changes in a scratch repository under one of the roots, never in a real one, and check staging with `git diff --cached`.
+- Leave the emulator's other apps and their data alone. Never take control of the host's desktop windows or keyboard to reach a browser.
 
 ## Deployment
 
