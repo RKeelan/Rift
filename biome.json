@@ -12,6 +12,12 @@
 		"indentStyle": "tab"
 	},
 	"files": {
-		"includes": ["**", "!**/node_modules", "!**/dist", "!**/*.json"]
+		"includes": [
+			"**",
+			"!**/node_modules",
+			"!**/dist",
+			"!**/*.json",
+			"!!**/.claude"
+		]
 	}
 }
