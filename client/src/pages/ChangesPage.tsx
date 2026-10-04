@@ -74,6 +74,9 @@ export function ChangesPage({
 	// Bumped after a stage so the base-content and diff effects refetch, shrinking
 	// the editor's change decorations to whatever remains unstaged.
 	const [refreshToken, setRefreshToken] = useState(0);
+	// Bumped after a save, which changes the working tree but not the index, so
+	// only git's diff needs refetching.
+	const [diffRefreshToken, setDiffRefreshToken] = useState(0);
 	const abortRef = useRef<AbortController | null>(null);
 	const diffAbortRef = useRef<AbortController | null>(null);
 	const comparisonAbortRef = useRef<AbortController | null>(null);
@@ -257,6 +260,7 @@ export function ChangesPage({
 	);
 
 	const handleEditorSaved = useCallback(() => {
+		setDiffRefreshToken((value) => value + 1);
 		fetchStatus(true);
 	}, [fetchStatus]);
 
@@ -387,7 +391,7 @@ export function ChangesPage({
 					repo: repoName,
 					path: selectedPath,
 					staged: selectedStaged ?? "false",
-					_refresh: String(refreshToken),
+					_refresh: `${refreshToken}.${diffRefreshToken}`,
 				});
 				const res = await fetch(apiUrl(`/api/git/diff?${params}`), {
 					signal: controller.signal,
@@ -419,6 +423,7 @@ export function ChangesPage({
 		selectedStatus,
 		showError,
 		refreshToken,
+		diffRefreshToken,
 	]);
 
 	// Detail view: every change type opens in the editor.

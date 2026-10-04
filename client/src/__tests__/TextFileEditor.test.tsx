@@ -10,6 +10,7 @@ import {
 import {
 	getChangeRegionLines,
 	getEditorChangeDecorations,
+	getLineChanges,
 	TextFileEditor,
 } from "../components/TextFileEditor.tsx";
 
@@ -505,6 +506,239 @@ describe("unstaging", () => {
 		expect(JSON.parse(requests[0].body as string)).toEqual({
 			path: "notes.txt",
 		});
+	});
+
+	test("keeps the editor when an unstage changes the staged content", async () => {
+		let index = "a\nB\nc\nD\n";
+		globalThis.fetch = (async (_input: string, init?: RequestInit) => {
+			if (init?.method === "POST") {
+				index = "a\nb\nc\nD\n";
+				return new Response(JSON.stringify({ files: [] }), {
+					headers: { "Content-Type": "application/json" },
+				});
+			}
+			return new Response(index);
+		}) as unknown as typeof fetch;
+
+		const { container } = render(
+			<TextFileEditor
+				filePath="notes.txt"
+				repo="test-repo"
+				comparisonContent={"a\nb\nc\nd\n"}
+				changeType="modified"
+				staged
+				onUnstaged={() => {}}
+			/>,
+		);
+		await waitFor(() => {
+			expect(container.querySelector(".cm-content")).not.toBeNull();
+		});
+		const { EditorView } = await import("@codemirror/view");
+		const view = EditorView.findFromDOM(
+			container.querySelector(".cm-editor") as HTMLElement,
+		);
+		if (!view) throw new Error("editor view not found");
+
+		const line2 = view.state.doc.line(2);
+		act(() => {
+			view.dispatch({ selection: { anchor: line2.from } });
+		});
+		const unstage = await screen.findByRole("button", { name: "Unstage" });
+		await waitFor(() => {
+			expect(unstage.hasAttribute("disabled")).toBe(false);
+		});
+		fireEvent.click(unstage);
+
+		const currentView = () =>
+			EditorView.findFromDOM(
+				container.querySelector(".cm-editor") as HTMLElement,
+			);
+		await waitFor(() => {
+			expect(currentView()?.state.doc.toString()).toBe("a\nb\nc\nD\n");
+		});
+		// A rebuilt editor would start again at the top of the file, so the
+		// buffer must change in place. Compared as a boolean, since printing two
+		// editor views on a mismatch takes the test runner practically forever.
+		expect(currentView() === view).toBe(true);
+	});
+});
+
+describe("getLineChanges", () => {
+	async function apply(previous: string, next: string) {
+		const { ChangeSet, Text } = await import("@codemirror/state");
+		const changes = getLineChanges(previous, next);
+		return ChangeSet.of(changes, previous.length)
+			.apply(Text.of(previous.split("\n")))
+			.toString();
+	}
+
+	test("turns one text into the other", async () => {
+		const cases: [string, string][] = [
+			["a\nb\nc\n", "a\nB\nc\n"],
+			["a\nb\nc\nd\ne\n", "a\nc\nd\nx\ny\ne\n"],
+			["a\nb", "a\nb\n"],
+			["a\nb\n", "a\nb"],
+			["", "a\n"],
+			["a\n", ""],
+			["a\nb\n", "a\nb\n"],
+		];
+		for (const [previous, next] of cases) {
+			expect(await apply(previous, next)).toBe(next);
+		}
+	});
+
+	test("leaves unchanged lines out of every edit", () => {
+		expect(getLineChanges("a\nb\nc\nd\ne\n", "a\nB\nc\nd\nE\n")).toEqual([
+			{ from: 2, to: 4, insert: "B\n" },
+			{ from: 8, to: 10, insert: "E\n" },
+		]);
+	});
+});
+
+describe("refreshed change context", () => {
+	const originalFetch = globalThis.fetch;
+
+	afterEach(() => {
+		cleanup();
+		globalThis.fetch = originalFetch;
+	});
+
+	async function editorView(container: HTMLElement) {
+		const { EditorView } = await import("@codemirror/view");
+		const view = EditorView.findFromDOM(
+			container.querySelector(".cm-editor") as HTMLElement,
+		);
+		if (!view) throw new Error("editor view not found");
+		return view;
+	}
+
+	test("redraws its decorations in place", async () => {
+		globalThis.fetch = (async () =>
+			new Response("a\nB\nc\n", {
+				headers: { "x-file-mtime-ms": "1" },
+			})) as typeof fetch;
+
+		const { container, rerender } = render(
+			<TextFileEditor
+				filePath="notes.txt"
+				repo="test-repo"
+				comparisonContent={"a\nb\nc\n"}
+			/>,
+		);
+		await waitFor(() => {
+			expect(container.querySelector(".cm-changedLine--added")).not.toBeNull();
+		});
+		const view = await editorView(container);
+
+		// The change was staged, so the index now matches the buffer.
+		rerender(
+			<TextFileEditor
+				filePath="notes.txt"
+				repo="test-repo"
+				comparisonContent={"a\nB\nc\n"}
+			/>,
+		);
+
+		await waitFor(() => {
+			expect(container.querySelector(".cm-changedLine")).toBeNull();
+		});
+		// Compared as a boolean, since printing two editor views on a mismatch
+		// would take the test runner practically forever.
+		expect((await editorView(container)) === view).toBe(true);
+	});
+
+	test("keeps an earlier save when a stage refreshes the change context", async () => {
+		let disk = "a\nB\n";
+		const saves: string[] = [];
+		let stages = 0;
+		globalThis.fetch = (async (_input: string, init?: RequestInit) => {
+			if (init?.method === "PUT") {
+				disk = JSON.parse(init.body as string).content;
+				saves.push(disk);
+				return new Response(JSON.stringify({ mtimeMs: saves.length + 1 }), {
+					headers: { "Content-Type": "application/json" },
+				});
+			}
+			if (init?.method === "POST") {
+				stages += 1;
+				return new Response(JSON.stringify({ files: [] }), {
+					headers: { "Content-Type": "application/json" },
+				});
+			}
+			return new Response(disk, { headers: { "x-file-mtime-ms": "1" } });
+		}) as unknown as typeof fetch;
+
+		const props = {
+			filePath: "notes.txt",
+			repo: "test-repo",
+			changeType: "modified" as const,
+			onSaved: () => {},
+			onStaged: () => {},
+		};
+		const { container, rerender } = render(
+			<TextFileEditor
+				{...props}
+				comparisonContent={"a\nb\n"}
+				changeDiff={"@@ -1,2 +1,2 @@\n a\n-b\n+B\n"}
+			/>,
+		);
+		await waitFor(() => {
+			expect(container.querySelector(".cm-content")).not.toBeNull();
+		});
+		const view = await editorView(container);
+
+		// Edit and save.
+		act(() => {
+			view.dispatch({ changes: { from: 0, insert: "X\n" } });
+		});
+		fireEvent.click(await screen.findByRole("button", { name: "Save" }));
+		await waitFor(() => {
+			expect(saves.length).toBe(1);
+		});
+
+		// Stage the new first line, then hand the editor the change context that
+		// ChangesPage refetches after a stage.
+		act(() => {
+			view.dispatch({ selection: { anchor: 0 } });
+		});
+		const stage = screen.getByRole("button", { name: "Stage" });
+		await waitFor(() => {
+			expect(stage.hasAttribute("disabled")).toBe(false);
+		});
+		fireEvent.click(stage);
+		await waitFor(() => {
+			expect(stages).toBe(1);
+		});
+		rerender(
+			<TextFileEditor
+				{...props}
+				comparisonContent={"X\na\nb\n"}
+				changeDiff={"@@ -1,3 +1,3 @@\n X\n a\n-b\n+B\n"}
+			/>,
+		);
+		await waitFor(() => {
+			expect(container.querySelectorAll(".cm-changedLine--added").length).toBe(
+				1,
+			);
+		});
+
+		// Edit and save again.
+		const after = await editorView(container);
+		act(() => {
+			after.dispatch({
+				changes: { from: after.state.doc.length, insert: "Y\n" },
+			});
+		});
+		const save = screen.getByRole("button", { name: "Save" });
+		await waitFor(() => {
+			expect(save.hasAttribute("disabled")).toBe(false);
+		});
+		fireEvent.click(save);
+		await waitFor(() => {
+			expect(saves.length).toBe(2);
+		});
+
+		expect(saves[1]).toBe("X\na\nB\nY\n");
 	});
 });
 
