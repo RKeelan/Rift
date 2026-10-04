@@ -29,6 +29,16 @@ describe("PWA build output", () => {
 		expect(existsSync(resolve(distDir, "sw.js"))).toBe(true);
 	});
 
+	// Chrome on Android otherwise shrinks only the visual viewport for the
+	// on-screen keyboard. The full-height layout then runs on under the
+	// keyboard, and Chrome pans the whole page, header and toolbar included,
+	// to follow the cursor.
+	test("the on-screen keyboard resizes the layout", () => {
+		const html = readFileSync(resolve(distDir, "index.html"), "utf-8");
+		const viewport = html.match(/<meta name="viewport" content="([^"]*)"/);
+		expect(viewport?.[1]).toInclude("interactive-widget=resizes-content");
+	});
+
 	// The app is mounted under a sub-path. An install started from the wrong
 	// scope, or icons resolved against the host root, fails on the phone rather
 	// than at build time — so pin the base path here.
