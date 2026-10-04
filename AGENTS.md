@@ -5,6 +5,7 @@ Read `README.md` first for the product overview, environment behaviour, and the 
 ## Repository Guidance
 
 - The CLI in `cli/` must stay in feature parity with the web client; if you add or change a web-facing endpoint, update the CLI as well.
+- Give every endpoint that changes a file or a repo a method other than `GET`, `HEAD`, or `OPTIONS`. The `RIFT_ALLOW_WRITES` switch refuses requests by method, so a mutating `GET` would bypass it.
 - When validating against the live system, use the CLI entry point (`bun run --cwd cli src/index.ts`) rather than ad-hoc `curl` commands or throwaway scripts.
 - Run `bun run lint`, `bun run format:check`, and `bun test` before handing work off.
 

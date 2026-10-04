@@ -3,7 +3,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { apiUrl } from "../apiUrl.ts";
 import { useErrorBanner } from "../components/ErrorBanner.tsx";
-import { TextFileEditor } from "../components/TextFileEditor.tsx";
+import {
+	TextFileEditor,
+	WRITES_DISABLED_LABEL,
+} from "../components/TextFileEditor.tsx";
 import { useSession } from "../contexts/SessionContext.tsx";
 import "./ChangesPage.css";
 
@@ -48,7 +51,13 @@ function StatusBadge({ status }: { status: FileStatus }) {
 	);
 }
 
-export function ChangesPage() {
+const WRITES_DISABLED_TITLE = "The server does not allow changes";
+
+export function ChangesPage({
+	writesAllowed = true,
+}: {
+	writesAllowed?: boolean;
+}) {
 	const { showError } = useErrorBanner();
 	const { repoName } = useSession();
 	const [searchParams, setSearchParams] = useSearchParams();
@@ -435,7 +444,8 @@ export function ChangesPage() {
 						onClick={() => {
 							void handleDetailStageToggle();
 						}}
-						disabled={actionPending}
+						disabled={actionPending || !writesAllowed}
+						title={writesAllowed ? undefined : WRITES_DISABLED_TITLE}
 					>
 						{selected.staged ? "Unstage" : "Stage"}
 					</button>
@@ -452,6 +462,8 @@ export function ChangesPage() {
 								changeType={selectedStatus}
 								filePath={selected.path}
 								repo={repoName as string}
+								readOnly={!writesAllowed}
+								readOnlyLabel={WRITES_DISABLED_LABEL}
 								onSaved={handleEditorSaved}
 								onStaged={handleEditorStaged}
 							/>
@@ -466,6 +478,8 @@ export function ChangesPage() {
 								changeType={selectedStatus}
 								filePath={selected.path}
 								repo={repoName as string}
+								readOnly={!writesAllowed}
+								readOnlyLabel={WRITES_DISABLED_LABEL}
 								staged
 								onUnstaged={handleEditorUnstaged}
 							/>
@@ -519,6 +533,13 @@ export function ChangesPage() {
 				</div>
 			)}
 
+			{!writesAllowed && (
+				<div className="changes-readonly-note" role="note">
+					Read-only: the server does not allow changes, so staging and editing
+					are disabled.
+				</div>
+			)}
+
 			<div className="changes-list">
 				{loading && <div className="changes-message">Loading...</div>}
 
@@ -555,9 +576,9 @@ export function ChangesPage() {
 											type="button"
 											className="changes-file-action"
 											onClick={() => handleToggleStage(entry)}
-											disabled={actionPending}
+											disabled={actionPending || !writesAllowed}
 											aria-label={`Unstage ${entry.path}`}
-											title="Unstage"
+											title={writesAllowed ? "Unstage" : WRITES_DISABLED_TITLE}
 										>
 											<Minus size={18} />
 										</button>
@@ -591,9 +612,9 @@ export function ChangesPage() {
 											type="button"
 											className="changes-file-action"
 											onClick={() => handleToggleStage(entry)}
-											disabled={actionPending}
+											disabled={actionPending || !writesAllowed}
 											aria-label={`Stage ${entry.path}`}
-											title="Stage"
+											title={writesAllowed ? "Stage" : WRITES_DISABLED_TITLE}
 										>
 											<Plus size={18} />
 										</button>

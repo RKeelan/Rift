@@ -502,6 +502,9 @@ function getErrorMessage(body: unknown, status: number): string {
 	return `Request failed (${status})`;
 }
 
+// Shown in place of the edit status when the server refuses changes.
+export const WRITES_DISABLED_LABEL = "Read-only: writes are disabled";
+
 export interface TextFileEditorProps {
 	filePath: string;
 	repo: string;
@@ -1200,7 +1203,7 @@ export function TextFileEditor({
 							{staging ? "Staging..." : "Stage"}
 						</button>
 					)}
-					{staged && onUnstaged && (
+					{!readOnly && staged && onUnstaged && (
 						<button
 							type="button"
 							className="text-file-editor-button"

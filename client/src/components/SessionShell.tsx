@@ -19,7 +19,8 @@ export function SessionShell() {
 
 function SessionRoutes({ repoName }: { repoName: string }) {
 	const { clearRepo } = useSession();
-	const { isGitRepo, repoMissing, recheckGitRepo } = useGitRepo(repoName);
+	const { isGitRepo, repoMissing, writesAllowed, recheckGitRepo } =
+		useGitRepo(repoName);
 
 	// A stored repo the server no longer resolves — renamed, deleted, or from an
 	// older name format — would otherwise leave every tab failing to load.
@@ -34,10 +35,16 @@ function SessionRoutes({ repoName }: { repoName: string }) {
 	return (
 		<div className="app">
 			<Routes>
-				<Route path="/files" element={<FilesPage />} />
+				<Route
+					path="/files"
+					element={<FilesPage writesAllowed={writesAllowed} />}
+				/>
 				{showGitTabs && (
 					<>
-						<Route path="/changes" element={<ChangesPage />} />
+						<Route
+							path="/changes"
+							element={<ChangesPage writesAllowed={writesAllowed} />}
+						/>
 						<Route path="/history" element={<HistoryPage />} />
 					</>
 				)}

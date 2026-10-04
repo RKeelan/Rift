@@ -9,6 +9,8 @@ function makeConfig(reposRoot: string): AppConfig {
 	return {
 		port: 3000,
 		roots: [{ label: "root", path: reposRoot }],
+		allowedLogins: [],
+		allowWrites: false,
 	};
 }
 
@@ -84,6 +86,8 @@ describe("GET /api/repos", () => {
 				{ label: "root", path: reposRoot },
 				{ label: "other", path: secondRoot },
 			],
+			allowedLogins: [],
+			allowWrites: false,
 		});
 
 		const res = await supertest(multiApp).get("/api/repos");

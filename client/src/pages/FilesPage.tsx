@@ -6,7 +6,10 @@ import {
 	FolderOpen,
 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { TextFileEditor } from "../components/TextFileEditor.tsx";
+import {
+	TextFileEditor,
+	WRITES_DISABLED_LABEL,
+} from "../components/TextFileEditor.tsx";
 import { useApi } from "../hooks/useApi.ts";
 import { useSession } from "../contexts/SessionContext.tsx";
 import "./FilesPage.css";
@@ -36,10 +39,12 @@ function FileViewer({
 	filePath,
 	onNavigate,
 	repo,
+	writesAllowed,
 }: {
 	filePath: string;
 	onNavigate: (dir: string) => void;
 	repo: string;
+	writesAllowed: boolean;
 }) {
 	return (
 		<div className="file-viewer">
@@ -60,7 +65,12 @@ function FileViewer({
 				</button>
 				<Breadcrumbs path={filePath} onNavigate={onNavigate} />
 			</header>
-			<TextFileEditor filePath={filePath} repo={repo} />
+			<TextFileEditor
+				filePath={filePath}
+				repo={repo}
+				readOnly={!writesAllowed}
+				readOnlyLabel={WRITES_DISABLED_LABEL}
+			/>
 		</div>
 	);
 }
@@ -175,7 +185,11 @@ function TreeEntry({
 	);
 }
 
-export function FilesPage() {
+export function FilesPage({
+	writesAllowed = true,
+}: {
+	writesAllowed?: boolean;
+}) {
 	const { request } = useApi();
 	const { repoName } = useSession();
 	const [tree, setTree] = useState<TreeNode[]>([]);
@@ -314,6 +328,7 @@ export function FilesPage() {
 				filePath={viewingFile}
 				onNavigate={handleNavigate}
 				repo={repoName as string}
+				writesAllowed={writesAllowed}
 			/>
 		);
 	}

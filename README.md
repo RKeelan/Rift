@@ -15,6 +15,15 @@ bun run dev
 
 The client is served under the `/rift/` sub-path, so the dev URL is <http://localhost:5173/rift/>. See [Sub-path deployment](#sub-path-deployment).
 
+The development server refuses writes unless they are enabled, like any other instance (see [Access control](#access-control)). To edit and stage during development, set `RIFT_ALLOW_WRITES` first:
+
+```powershell
+$env:RIFT_ALLOW_WRITES = "1"
+bun run dev
+```
+
+The Vite dev server listens on every interface. Its API proxy marks requests from other devices as forwarded and strips any Tailscale headers they carry, so the API refuses them; during development the API is usable only from this machine.
+
 If `REPOS_ROOT` is unset, Rift infers it from the current working directory. When you run Rift from a checkout under your home directory, it looks for a common source directory name between your home directory and the checkout root, using the first match it finds. The recognised names are `src`, `source`, and `repos`, case-insensitively. If Rift cannot infer a source root that way, the server refuses to start — set `REPOS_ROOT` explicitly so a misconfigured run does not expose your entire home directory.
 
 Set `REPOS_ROOT` explicitly to override that behaviour:
@@ -35,19 +44,38 @@ Each root is named after its final path segment, and that label qualifies every 
 
 Rift only lists repositories that are immediate children of a root. Point each root directly at a directory of checkouts rather than at a tree containing them; the shallow scan is what keeps large sibling folders, such as photo or archive directories, from being walked on every dashboard load.
 
-By default the server binds to `127.0.0.1`. To expose it on other interfaces (for example, when fronting it with `tailscale serve`), set `HOST`:
+### Serving other devices
 
-```powershell
-HOST=0.0.0.0 bun run prod
-```
-
-Tailscale's `tailscale serve` command forwards from localhost, so the default `127.0.0.1` binding is sufficient there:
+`bun run prod` builds the app and starts the server. Other devices reach it through `tailscale serve`, which forwards from localhost:
 
 ```powershell
 bun run tailscale && bun run prod
 ```
 
-`bun run prod` builds the app and starts the server.
+### Access control
+
+The server binds to `127.0.0.1` by default, and refuses to start if `HOST` names anything other than a loopback address: an address in `127.0.0.0/8`, `::1`, or `localhost`.
+
+Rift checks every request, for the client as well as the API, and sorts it by how it arrived:
+
+* A request with no proxy headers came straight from a process on this machine, such as the CLI, the Vite dev server, or a local browser. Rift allows it, since such a process can already read and write the files directly.
+* A request with any proxy header (`x-forwarded-for`, `forwarded`, `via`, or any `tailscale-*` header, among others) came through a proxy. Rift allows it only if `tailscale serve` identified the caller, in `tailscale-user-login`, as one of the logins in `RIFT_ALLOWED_LOGINS`. Everything else gets a 403: Funnel requests, requests from tagged devices (which carry no identity), and requests from other logins. tailscaled replaces any identity header the caller sends, so the login cannot be forged through it.
+
+The loopback binding is what makes the first rule safe. Bound to loopback, the server can be reached from another machine only through tailscaled, and everything tailscaled forwards carries proxy headers.
+
+`RIFT_ALLOWED_LOGINS` is a comma-separated list of Tailscale logins, compared case-insensitively. When it is unset or empty, every proxied request is refused, so a deployment that omits it fails closed.
+
+```powershell
+$env:RIFT_ALLOWED_LOGINS = "you@example.com,partner@example.com"
+```
+
+`RIFT_ALLOW_WRITES` decides whether Rift may change anything. Unless it is `1`, `true`, `yes`, or `on`, every request that would change the filesystem or a repository (saving a file, staging, unstaging) gets a 403, from local callers as well as proxied ones. The switch treats every method other than `GET`, `HEAD`, and `OPTIONS` as a write. The client reads the setting from `/api/health` and disables its editing and staging controls when writes are refused.
+
+```powershell
+$env:RIFT_ALLOW_WRITES = "1"
+```
+
+The server logs both settings when it starts, and logs each request it refuses.
 
 ### Sub-path deployment
 
