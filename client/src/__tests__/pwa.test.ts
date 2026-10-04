@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 const distDir = resolve(import.meta.dir, "../../dist");
@@ -61,12 +61,26 @@ describe("PWA build output", () => {
 		});
 
 		test("service worker registers within the base scope", () => {
-			const registerSW = readFileSync(
-				resolve(distDir, "registerSW.js"),
-				"utf-8",
+			// Registration happens in the main bundle via `virtual:pwa-register`,
+			// which reloads the page when an updated worker activates.
+			const assetsDir = resolve(distDir, "assets");
+			const main = readdirSync(assetsDir).find(
+				(name) => name.startsWith("index-") && name.endsWith(".js"),
 			);
-			expect(registerSW).toInclude(`${BASE}sw.js`);
-			expect(registerSW).toInclude(`scope: '${BASE}'`);
+			expect(main).toBeDefined();
+			const bundle = readFileSync(resolve(assetsDir, main ?? ""), "utf-8");
+			expect(bundle).toInclude(`${BASE}sw.js`);
+			expect(bundle).toInclude(`scope:\`${BASE}\``);
+			expect(bundle).toInclude("window.location.reload()");
+		});
+
+		test("main bundle listens for vite:preloadError", () => {
+			const assetsDir = resolve(distDir, "assets");
+			const main = readdirSync(assetsDir).find(
+				(name) => name.startsWith("index-") && name.endsWith(".js"),
+			);
+			const bundle = readFileSync(resolve(assetsDir, main ?? ""), "utf-8");
+			expect(bundle).toInclude("vite:preloadError");
 		});
 
 		test("navigation fallback points at the mounted index", () => {
