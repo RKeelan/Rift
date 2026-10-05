@@ -8,7 +8,7 @@ import {
 	waitFor,
 } from "@testing-library/react";
 import {
-	getChangeRegionLines,
+	getChangeRegions,
 	getEditorChangeDecorations,
 	getLineChanges,
 	TextFileEditor,
@@ -94,7 +94,10 @@ async function tap(
 async function enabledButton(name: string) {
 	const button = await screen.findByRole("button", { name });
 	await waitFor(() => {
-		expect(button.hasAttribute("disabled")).toBe(false);
+		expect(
+			button.hasAttribute("disabled") ||
+				button.getAttribute("aria-disabled") === "true",
+		).toBe(false);
 	});
 	return button;
 }
@@ -381,9 +384,9 @@ describe("getEditorChangeDecorations", () => {
 	});
 });
 
-describe("getChangeRegionLines", () => {
+describe("getChangeRegions", () => {
 	test("merges adjacent changed lines and splits on a gap", () => {
-		const regions = getChangeRegionLines(
+		const regions = getChangeRegions(
 			{
 				lineHighlights: [
 					{ kind: "added", lineNumber: 2 },
@@ -395,11 +398,14 @@ describe("getChangeRegionLines", () => {
 			10,
 		);
 
-		expect(regions).toEqual([2, 7]);
+		expect(regions).toEqual([
+			{ start: 2, end: 3 },
+			{ start: 7, end: 7 },
+		]);
 	});
 
 	test("treats a deletion beside an addition as one region", () => {
-		const regions = getChangeRegionLines(
+		const regions = getChangeRegions(
 			{
 				lineHighlights: [{ kind: "added", lineNumber: 4 }],
 				deletedChunks: [{ anchorIndex: 3, lines: ["old"] }],
@@ -407,11 +413,11 @@ describe("getChangeRegionLines", () => {
 			10,
 		);
 
-		expect(regions).toEqual([4]);
+		expect(regions).toEqual([{ start: 4, end: 4 }]);
 	});
 
 	test("anchors a pure deletion at the following line", () => {
-		const regions = getChangeRegionLines(
+		const regions = getChangeRegions(
 			{
 				lineHighlights: [],
 				deletedChunks: [{ anchorIndex: 4, lines: ["gone"] }],
@@ -419,7 +425,19 @@ describe("getChangeRegionLines", () => {
 			10,
 		);
 
-		expect(regions).toEqual([5]);
+		expect(regions).toEqual([{ start: 5, end: 5 }]);
+	});
+
+	test("joins a deletion to an addition just below its unchanged anchor", () => {
+		const regions = getChangeRegions(
+			{
+				lineHighlights: [{ kind: "added", lineNumber: 5 }],
+				deletedChunks: [{ anchorIndex: 3, lines: ["gone"] }],
+			},
+			10,
+		);
+
+		expect(regions).toEqual([{ start: 4, end: 5 }]);
 	});
 });
 
@@ -719,9 +737,10 @@ describe("staging", () => {
 
 		// Staging acts on the file as saved, so the edits are saved first.
 		await enabledButton("Save");
-		expect(screen.queryByRole("button", { name: /^Stage/ }) === null).toBe(
-			true,
-		);
+		expect(
+			screen.queryByRole("button", { name: /^Stage (selection|file|\d)/ }) ===
+				null,
+		).toBe(true);
 	});
 
 	test("offers Stage selection only when a selection covers a change", async () => {
@@ -1558,9 +1577,10 @@ describe("line picking", () => {
 			});
 			// Staging acts on the file as saved, so Save stands in for it.
 			await enabledButton("Save");
-			expect(screen.queryByRole("button", { name: /^Stage/ }) === null).toBe(
-				true,
-			);
+			expect(
+				screen.queryByRole("button", { name: /^Stage (selection|file|\d)/ }) ===
+					null,
+			).toBe(true);
 		});
 	});
 
@@ -1626,12 +1646,376 @@ describe("line picking", () => {
 		act(() => {
 			view.dispatch({ selection: { anchor: view.state.doc.line(4).from } });
 		});
-		expect(screen.queryByRole("button", { name: /^Unstage/ }) === null).toBe(
-			true,
-		);
+		expect(
+			screen.queryByRole("button", { name: /^Unstage (selection|\d)/ }) ===
+				null,
+		).toBe(true);
 
 		await tap(container, 4);
 		await enabledButton("Unstage 1 line");
+	});
+});
+
+describe("change strips", () => {
+	const originalFetch = globalThis.fetch;
+
+	afterEach(() => {
+		cleanup();
+		globalThis.fetch = originalFetch;
+	});
+
+	// Line 2 is modified, lines 5 and 6 are added, and "g" is deleted outright,
+	// so its deletion anchors to the unchanged "h" on line 9.
+	const THREE_CHANGES = {
+		file: "a\nB\nc\nd\nX\nY\ne\nf\nh\n",
+		comparison: "a\nb\nc\nd\ne\nf\ng\nh\n",
+		diff: "@@ -1,8 +1,9 @@\n a\n-b\n+B\n c\n d\n+X\n+Y\n e\n f\n-g\n h\n",
+	};
+
+	// With `hold` set, each POST waits for `release`, so a test can look at the
+	// editor while a stage is in flight.
+	function mockFetch(file: string, hold: boolean) {
+		const requests: { url: string; body: unknown }[] = [];
+		const pending: (() => void)[] = [];
+		globalThis.fetch = (async (input: string, init?: RequestInit) => {
+			if (init?.method === "POST") {
+				requests.push({ url: input, body: JSON.parse(init.body as string) });
+				if (hold) {
+					await new Promise<void>((resolve) => pending.push(resolve));
+				}
+				return new Response(JSON.stringify({ files: [] }), {
+					headers: { "Content-Type": "application/json" },
+				});
+			}
+			return new Response(file, {
+				headers: { "x-file-mtime-ms": "1" },
+			});
+		}) as unknown as typeof fetch;
+		return {
+			requests,
+			release: () => {
+				for (const resolve of pending.splice(0)) resolve();
+			},
+		};
+	}
+
+	const baseProps = {
+		filePath: "notes.txt",
+		repo: "test-repo",
+		comparisonContent: THREE_CHANGES.comparison,
+		changeType: "modified" as const,
+	};
+
+	async function renderWithStrips(
+		props: Partial<Parameters<typeof TextFileEditor>[0]> = {},
+		{ hold = false, file = THREE_CHANGES.file } = {},
+	) {
+		const { requests, release } = mockFetch(file, hold);
+		const { container, rerender } = render(
+			<TextFileEditor
+				{...baseProps}
+				changeDiff={THREE_CHANGES.diff}
+				onStaged={() => {}}
+				{...props}
+			/>,
+		);
+		await waitFor(() => {
+			expect(container.querySelector(".cm-content")).not.toBeNull();
+		});
+
+		const { EditorView } = await import("@codemirror/view");
+		const view = EditorView.findFromDOM(
+			container.querySelector(".cm-editor") as HTMLElement,
+		);
+		if (!view) throw new Error("editor view not found");
+		return { container, rerender, view, requests, release };
+	}
+
+	function strips(container: HTMLElement) {
+		return [...container.querySelectorAll(".cm-changeStrip")].map((strip) => [
+			strip.querySelector(".cm-changeStripLabel")?.textContent,
+			strip.querySelector("button")?.textContent,
+		]);
+	}
+
+	function stripStates(container: HTMLElement) {
+		return [...container.querySelectorAll(".cm-changeStrip")].map((strip) => [
+			strip.querySelector(".cm-changeStripLabel")?.textContent,
+			strip.querySelector("button")?.getAttribute("aria-disabled") === "true"
+				? "disabled"
+				: "enabled",
+		]);
+	}
+
+	test("draws a strip above each change, naming its first line", async () => {
+		const { container } = await renderWithStrips();
+
+		await waitFor(() => {
+			expect(strips(container)).toEqual([
+				["Line 2", "Stage"],
+				["Line 5", "Stage"],
+				["Line 9", "Stage"],
+			]);
+		});
+		// A modified line's strip sits above its deleted lines too.
+		expect(
+			container
+				.querySelector(".cm-changeStrip")
+				?.nextElementSibling?.classList.contains("cm-deletedChunk"),
+		).toBe(true);
+	});
+
+	test("stages a change whole, naming the diff it comes from", async () => {
+		const blobs = `${"a".repeat(40)}..${"b".repeat(40)}`;
+		const { requests } = await renderWithStrips({
+			changeDiff: `diff --git a/notes.txt b/notes.txt\nindex ${blobs} 100644\n--- a/notes.txt\n+++ b/notes.txt\n${THREE_CHANGES.diff}`,
+		});
+
+		fireEvent.click(await enabledButton("Stage the change at line 5"));
+
+		await waitFor(() => {
+			expect(requests.length).toBe(1);
+		});
+		expect(requests[0].url).toContain("/api/git/stage");
+		expect(requests[0].body).toEqual({
+			path: "notes.txt",
+			ranges: [[5, 6]],
+			expectedBlobs: blobs,
+		});
+	});
+
+	test("stages a deletion with the line below it", async () => {
+		const { requests } = await renderWithStrips();
+
+		fireEvent.click(await enabledButton("Stage the change at line 9"));
+
+		await waitFor(() => {
+			expect(requests.length).toBe(1);
+		});
+		expect(requests[0].body).toEqual({ path: "notes.txt", ranges: [[9, 9]] });
+	});
+
+	test("stages a deletion and the addition below its unchanged anchor together", async () => {
+		// git anchors the deletion of "b" to the unchanged "c", and "X" is added
+		// just below it, so the two read as one change.
+		const { container, requests } = await renderWithStrips(
+			{
+				comparisonContent: "a\nb\nc\nd\n",
+				changeDiff: "@@ -1,4 +1,4 @@\n a\n-b\n c\n+X\n d\n",
+			},
+			{ file: "a\nc\nX\nd\n" },
+		);
+
+		await waitFor(() => {
+			expect(strips(container)).toEqual([["Line 2", "Stage"]]);
+		});
+		fireEvent.click(await enabledButton("Stage the change at line 2"));
+
+		await waitFor(() => {
+			expect(requests.length).toBe(1);
+		});
+		expect(requests[0].body).toEqual({ path: "notes.txt", ranges: [[2, 3]] });
+	});
+
+	test("drops the picks within the change it stages, and keeps the rest", async () => {
+		const { container, requests } = await renderWithStrips();
+		await tap(container, 2);
+		await tap(container, 5);
+		await screen.findByRole("button", { name: "Stage 2 lines" });
+
+		fireEvent.click(await enabledButton("Stage the change at line 2"));
+
+		await waitFor(() => {
+			expect(requests.length).toBe(1);
+		});
+		expect(requests[0].body).toEqual({ path: "notes.txt", ranges: [[2, 2]] });
+		expect(await enabledButton("Stage 1 line")).toBeDefined();
+	});
+
+	test("follows its change when the context is refetched", async () => {
+		const { container, rerender, requests } = await renderWithStrips();
+		await enabledButton("Stage the change at line 5");
+
+		// "X" has been staged, so the change at line 5 is now "Y" on line 6.
+		rerender(
+			<TextFileEditor
+				{...baseProps}
+				comparisonContent={"a\nb\nc\nd\nX\ne\nf\ng\nh\n"}
+				changeDiff={
+					"@@ -1,9 +1,9 @@\n a\n-b\n+B\n c\n d\n X\n+Y\n e\n f\n-g\n h\n"
+				}
+				onStaged={() => {}}
+			/>,
+		);
+		await waitFor(() => {
+			expect(strips(container).map(([label]) => label)).toEqual([
+				"Line 2",
+				"Line 6",
+				"Line 9",
+			]);
+		});
+
+		fireEvent.click(await enabledButton("Stage the change at line 6"));
+
+		await waitFor(() => {
+			expect(requests.length).toBe(1);
+		});
+		expect(requests[0].body).toEqual({ path: "notes.txt", ranges: [[6, 6]] });
+	});
+
+	test("stages after the language support loads", async () => {
+		const { language } = await import("@codemirror/language");
+		const { view, requests } = await renderWithStrips({
+			filePath: "notes.md",
+		});
+		// Loading the language replaces the editor's state.
+		await waitFor(() => {
+			expect(view.state.facet(language) !== null).toBe(true);
+		});
+
+		fireEvent.click(await enabledButton("Stage the change at line 5"));
+
+		await waitFor(() => {
+			expect(requests.length).toBe(1);
+		});
+		expect(requests[0].body).toEqual({ path: "notes.md", ranges: [[5, 6]] });
+	});
+
+	test("swallows the press, and takes focus from the editor", async () => {
+		const { container, view } = await renderWithStrips();
+		const strip = await waitFor(() => {
+			const found = container.querySelector(".cm-changeStrip");
+			if (!found) throw new Error("no change strip");
+			return found;
+		});
+
+		// fireEvent returns false when the handler prevented the default.
+		expect(fireEvent.mouseDown(strip)).toBe(false);
+		expect(
+			fireEvent.mouseDown(await enabledButton("Stage the change at line 2")),
+		).toBe(false);
+
+		// A tap while the editor has focus would raise Android's keyboard. The
+		// selection outlasts the focus.
+		act(() => view.focus());
+		selectLines(view, 1, 2);
+		const selection = view.state.selection;
+		expect(document.activeElement === view.contentDOM).toBe(true);
+		fireEvent.mouseDown(strip);
+		expect(document.activeElement === view.contentDOM).toBe(false);
+		expect(view.state.selection.eq(selection)).toBe(true);
+	});
+
+	test("disables the strips while a stage is in flight", async () => {
+		const { container, release, requests } = await renderWithStrips(
+			{},
+			{ hold: true },
+		);
+
+		fireEvent.click(await enabledButton("Stage the change at line 2"));
+
+		await waitFor(() => {
+			expect(stripStates(container).map(([, state]) => state)).toEqual([
+				"disabled",
+				"disabled",
+				"disabled",
+			]);
+		});
+		// A disabled strip still swallows the press, and its button does nothing.
+		const other = screen.getByRole("button", {
+			name: "Stage the change at line 5",
+		});
+		expect(fireEvent.mouseDown(other)).toBe(false);
+		fireEvent.click(other);
+		expect(requests.length).toBe(1);
+
+		act(() => release());
+		await enabledButton("Stage the change at line 5");
+	});
+
+	test("keeps its strips in place, disabled, while git's diff does not describe the buffer", async () => {
+		const { container, rerender, view, requests } = await renderWithStrips({
+			changeDiff: null,
+		});
+		await screen.findByRole("button", { name: "Next change" });
+		// Only git's diff names lines that staging acts on.
+		expect(strips(container)).toEqual([]);
+
+		const withDiff = (changeDiff: string | null) =>
+			rerender(
+				<TextFileEditor
+					{...baseProps}
+					changeDiff={changeDiff}
+					onStaged={() => {}}
+				/>,
+			);
+		withDiff(THREE_CHANGES.diff);
+		await enabledButton("Stage the change at line 5");
+
+		// Refetching the context, as after a stage, leaves them where they are.
+		withDiff(null);
+		await waitFor(() => {
+			expect(stripStates(container)).toEqual([
+				["Line 2", "disabled"],
+				["Line 5", "disabled"],
+				["Line 9", "disabled"],
+			]);
+		});
+		withDiff(THREE_CHANGES.diff);
+		await enabledButton("Stage the change at line 5");
+
+		// Unsaved edits move them with the text below them, and start no new
+		// ones.
+		act(() => {
+			view.dispatch({ changes: { from: 0, insert: "x\n" } });
+		});
+		await screen.findByRole("button", { name: "Save" });
+		expect(stripStates(container)).toEqual([
+			["Line 3", "disabled"],
+			["Line 6", "disabled"],
+			["Line 10", "disabled"],
+		]);
+		fireEvent.click(
+			screen.getByRole("button", { name: "Stage the change at line 6" }),
+		);
+		expect(requests.length).toBe(0);
+	});
+
+	test("draws no strips for an untracked file, or without a Stage", async () => {
+		for (const props of [
+			{ changeType: "untracked" as const, changeDiff: null },
+			{ onStaged: undefined },
+			{ readOnly: true, readOnlyLabel: "Writes are off" },
+		]) {
+			const { container } = await renderWithStrips(props);
+			await screen.findByRole("button", { name: "Next change" });
+
+			expect(strips(container)).toEqual([]);
+			cleanup();
+		}
+	});
+
+	test("unstages a change whole from the staged view", async () => {
+		const { container, requests } = await renderWithStrips({
+			staged: true,
+			onStaged: undefined,
+			onUnstaged: () => {},
+		});
+
+		await waitFor(() => {
+			expect(strips(container).map(([, button]) => button)).toEqual([
+				"Unstage",
+				"Unstage",
+				"Unstage",
+			]);
+		});
+		fireEvent.click(await enabledButton("Unstage the change at line 5"));
+
+		await waitFor(() => {
+			expect(requests.length).toBe(1);
+		});
+		expect(requests[0].url).toContain("/api/git/unstage");
+		expect(requests[0].body).toEqual({ path: "notes.txt", ranges: [[5, 6]] });
 	});
 });
 

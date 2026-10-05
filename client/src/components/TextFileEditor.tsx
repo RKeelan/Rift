@@ -429,16 +429,25 @@ export function getEditorChangeDecorations({
 	};
 }
 
+/** A run of changed lines, inclusive and 1-based. */
+export interface ChangeRegion {
+	start: number;
+	end: number;
+}
+
 /**
- * Collapses the per-line change decorations into one anchor line per change
- * region, so Previous/Next can jump between changes the way VS Code's diff
- * editor does. Adjacent changed lines (and a deletion sitting against them)
- * count as a single region; a gap of an unchanged line starts a new one.
+ * Collapses the per-line change decorations into change regions, so
+ * Previous/Next can jump between changes the way VS Code's diff editor does,
+ * and each change can be staged whole. Adjacent changed lines (and a deletion
+ * sitting against them, through the line it is anchored to) count as a single
+ * region; a gap of an unchanged line starts a new one. Every line of a region
+ * is a changed line or a deletion's anchor, so staging the region's lines
+ * stages exactly its changes.
  */
-export function getChangeRegionLines(
+export function getChangeRegions(
 	decorations: ChangeDecorationsData,
 	docLines: number,
-): number[] {
+): ChangeRegion[] {
 	const markers = new Set<number>();
 	for (const highlight of decorations.lineHighlights) {
 		if (highlight.lineNumber >= 1 && highlight.lineNumber <= docLines) {
@@ -449,13 +458,14 @@ export function getChangeRegionLines(
 		markers.add(Math.min(Math.max(chunk.anchorIndex + 1, 1), docLines));
 	}
 
-	const regions: number[] = [];
-	let previous = Number.NEGATIVE_INFINITY;
+	const regions: ChangeRegion[] = [];
 	for (const line of [...markers].sort((left, right) => left - right)) {
-		if (line - previous > 1) {
-			regions.push(line);
+		const last = regions[regions.length - 1];
+		if (last && line - last.end <= 1) {
+			last.end = line;
+		} else {
+			regions.push({ start: line, end: line });
 		}
-		previous = line;
 	}
 	return regions;
 }
@@ -866,6 +876,8 @@ export function TextFileEditor({
 		// lines of, or null while git's diff does not describe the buffer.
 		diffBlobs: () => string | null;
 		clear: () => void;
+		// Drops the picks within a change that has just been staged whole.
+		unpick: (region: ChangeRegion) => void;
 	} | null>(null);
 	const [pickedCount, setPickedCount] = useState(0);
 	// Without picks, Stage and Unstage act on a selection, offered only when it
@@ -910,6 +922,17 @@ export function TextFileEditor({
 		linePickingEnabledRef.current = linePickingEnabled;
 		applyLinePickingRef.current?.(linePickingEnabled);
 	}, [linePickingEnabled]);
+
+	// Each change gets a strip above it whose button stages or unstages that
+	// change alone. The strips are drawn by the editor, and reach the page's
+	// state through these refs.
+	const runRegionActionRef = useRef<((region: ChangeRegion) => void) | null>(
+		null,
+	);
+	const stripsEnabledRef = useRef(false);
+	const applyStripsEnabledRef = useRef<((enabled: boolean) => void) | null>(
+		null,
+	);
 
 	useEffect(() => {
 		let active = true;
@@ -1059,6 +1082,89 @@ export function TextFileEditor({
 			if (destroyed || !editorRef.current) return;
 
 			const refreshChangeDecorations = StateEffect.define<void>();
+			const setStripsEnabled = StateEffect.define<boolean>();
+			const stripsEnabled = StateField.define<boolean>({
+				create: () => stripsEnabledRef.current,
+				update(value, transaction) {
+					for (const effect of transaction.effects) {
+						if (effect.is(setStripsEnabled)) value = effect.value;
+					}
+					return value;
+				},
+			});
+
+			class ChangeStripWidget extends WidgetType {
+				constructor(
+					readonly region: ChangeRegion,
+					readonly enabled: boolean,
+				) {
+					super();
+				}
+
+				override eq(other: ChangeStripWidget) {
+					return (
+						other.region.start === this.region.start &&
+						other.region.end === this.region.end &&
+						other.enabled === this.enabled
+					);
+				}
+
+				override get estimatedHeight() {
+					return 48;
+				}
+
+				override toDOM(view: import("@codemirror/view").EditorView) {
+					const strip = document.createElement("div");
+					strip.className = "cm-changeStrip";
+					// Swallowing the press keeps the cursor where it was. Chrome on
+					// Android raises the keyboard on any tap while the editor has
+					// focus, so the press also takes focus from the editor: staging a
+					// change is not typing.
+					strip.addEventListener("mousedown", (event) => {
+						event.preventDefault();
+						view.contentDOM.blur();
+					});
+					const label = document.createElement("span");
+					label.className = "cm-changeStripLabel";
+					const button = document.createElement("button");
+					button.type = "button";
+					button.className = "cm-changeStripButton";
+					button.textContent = staged ? "Unstage" : "Stage";
+					// The strip is redrawn in place as its change moves or its button
+					// is enabled, so the button reads its change from the strip. It
+					// is marked disabled rather than made so, because a disabled
+					// control drops the press before the strip can swallow it.
+					button.addEventListener("click", () => {
+						if (button.getAttribute("aria-disabled") === "true") return;
+						// Only a strip placed by git's diff names lines staging acts on.
+						if (!view.state.field(changeField).changes.matchesGitDiff) return;
+						runRegionActionRef.current?.({
+							start: Number(strip.dataset.start),
+							end: Number(strip.dataset.end),
+						});
+					});
+					strip.append(label, button);
+					this.updateDOM(strip);
+					return strip;
+				}
+
+				override updateDOM(strip: HTMLElement) {
+					const label = strip.querySelector(".cm-changeStripLabel");
+					const button = strip.querySelector("button");
+					if (!label || !button) return false;
+					const { start, end } = this.region;
+					strip.dataset.start = String(start);
+					strip.dataset.end = String(end);
+					label.textContent = `Line ${start}`;
+					button.setAttribute(
+						"aria-label",
+						`${staged ? "Unstage" : "Stage"} the change at line ${start}`,
+					);
+					button.setAttribute("aria-disabled", String(!this.enabled));
+					return true;
+				}
+			}
+
 			class DeletedLinesWidget extends WidgetType {
 				constructor(
 					readonly lines: string[],
@@ -1109,7 +1215,8 @@ export function TextFileEditor({
 					(left, right) => left.lineNumber - right.lineNumber,
 				);
 
-				changeRegionsRef.current = getChangeRegionLines(changes, doc.lines);
+				const regions = getChangeRegions(changes, doc.lines);
+				changeRegionsRef.current = regions.map(({ start }) => start);
 				if (changeRegionsRef.current.length !== changeCountRef.current) {
 					changeCountRef.current = changeRegionsRef.current.length;
 					setChangeCount(changeRegionsRef.current.length);
@@ -1121,6 +1228,8 @@ export function TextFileEditor({
 
 				return {
 					changes,
+					// The changes that get a strip, which only git's diff can place.
+					strips: changes.matchesGitDiff ? regions : [],
 					targets: getPickTargets(changes, doc.lines),
 					// The blob ids of the git diff these targets were read from, kept
 					// beside them so a stage or unstage names the diff whose line
@@ -1179,20 +1288,66 @@ export function TextFileEditor({
 				);
 			}
 
+			function buildChangeStrips(
+				state: import("@codemirror/state").EditorState,
+			) {
+				const { strips } = state.field(changeField);
+				const enabled = state.field(stripsEnabled);
+				return Decoration.set(
+					strips.map((region) =>
+						Decoration.widget({
+							block: true,
+							// Above the deleted lines that share the region's first line.
+							side: -2,
+							widget: new ChangeStripWidget(region, enabled),
+						}).range(state.doc.line(region.start).from),
+					),
+					true,
+				);
+			}
+
+			// Moves the strips through an edit, so each stays above the text it
+			// stood over.
+			function mapStrips(
+				strips: ChangeRegion[],
+				transaction: import("@codemirror/state").Transaction,
+			): ChangeRegion[] {
+				if (!transaction.docChanged) return strips;
+				const lineAfter = (line: number) =>
+					transaction.state.doc.lineAt(
+						transaction.changes.mapPos(
+							transaction.startState.doc.line(line).from,
+						),
+					).number;
+				return strips.map(({ start, end }) => {
+					const mappedStart = lineAfter(start);
+					return {
+						start: mappedStart,
+						end: Math.max(mappedStart, lineAfter(end)),
+					};
+				});
+			}
+
 			const changeField = StateField.define({
 				create(state) {
 					return computeChanges(state.doc);
 				},
 				update(value, transaction) {
 					if (
-						transaction.docChanged ||
-						transaction.effects.some((effect) =>
+						!transaction.docChanged &&
+						!transaction.effects.some((effect) =>
 							effect.is(refreshChangeDecorations),
 						)
 					) {
-						return computeChanges(transaction.state.doc);
+						return value;
 					}
-					return value;
+					const next = computeChanges(transaction.state.doc);
+					if (next.changes.matchesGitDiff) return next;
+					// While git's diff does not describe the buffer, as during unsaved
+					// edits or while the context is refetched after a stage, the
+					// strips stay where they were, disabled. Adding or removing them
+					// would move the text below them, including the line being typed.
+					return { ...next, strips: mapStrips(value.strips, transaction) };
 				},
 			});
 
@@ -1204,6 +1359,14 @@ export function TextFileEditor({
 				widgetAnchor: (widget) =>
 					widget instanceof DeletedLinesWidget ? widget.anchorLine : null,
 			});
+			// Picking lines and staging a change whole are offered together, since
+			// both need a Stage or Unstage that acts by line.
+			const lineActions = [
+				pickerGutter,
+				EditorView.decorations.compute([changeField, stripsEnabled], (state) =>
+					buildChangeStrips(state),
+				),
+			];
 
 			const riftHighlightStyle = HighlightStyle.define([
 				{
@@ -1267,7 +1430,7 @@ export function TextFileEditor({
 				draftLockCompartment.of(draftOfferRef.current ? draftLock : []),
 				lineNumbers(),
 				linePickingCompartment.of(
-					linePickingEnabledRef.current ? pickerGutter : [],
+					linePickingEnabledRef.current ? lineActions : [],
 				),
 				drawSelection(),
 				highlightActiveLine(),
@@ -1277,6 +1440,7 @@ export function TextFileEditor({
 				syntaxHighlighting(riftHighlightStyle),
 				changeField,
 				pickedLines,
+				stripsEnabled,
 				EditorView.decorations.compute([changeField, pickedLines], (state) =>
 					buildChangeDecorations(
 						state.doc,
@@ -1396,6 +1560,16 @@ export function TextFileEditor({
 				clear: () => {
 					view.dispatch({ effects: clearPickedLines.of(null) });
 				},
+				unpick: ({ start, end }) => {
+					const within = [...view.state.field(pickedLines)].filter(
+						(line) => line >= start && line <= end,
+					);
+					if (within.length > 0) {
+						view.dispatch({
+							effects: within.map((line) => togglePickedLine.of(line)),
+						});
+					}
+				},
 			};
 			applyDraftLockRef.current = (locked: boolean) => {
 				view.dispatch({
@@ -1412,9 +1586,12 @@ export function TextFileEditor({
 			applyLinePickingRef.current = (enabled: boolean) => {
 				view.dispatch({
 					effects: linePickingCompartment.reconfigure(
-						enabled ? pickerGutter : [],
+						enabled ? lineActions : [],
 					),
 				});
+			};
+			applyStripsEnabledRef.current = (enabled: boolean) => {
+				view.dispatch({ effects: setStripsEnabled.of(enabled) });
 			};
 			scrollToLineRef.current = (lineNumber: number) => {
 				const clamped = Math.min(Math.max(lineNumber, 1), view.state.doc.lines);
@@ -1481,6 +1658,7 @@ export function TextFileEditor({
 			refreshDecorationsRef.current = null;
 			applyLineWrapRef.current = null;
 			applyLinePickingRef.current = null;
+			applyStripsEnabledRef.current = null;
 			applyDraftLockRef.current = null;
 			scrollToLineRef.current = null;
 			replaceDocRef.current = null;
@@ -1689,154 +1867,177 @@ export function TextFileEditor({
 		}
 	}, [filePath, keepDraft, mtimeMs, onSaved, readOnly, repo, staged]);
 
-	const handleStage = useCallback(async () => {
-		if (
-			readOnly ||
-			!viewRef.current ||
-			dirty ||
-			draftOfferRef.current !== null
-		) {
-			return;
-		}
+	// Stages the given change whole, or else the picked or selected lines.
+	const handleStage = useCallback(
+		async (region?: ChangeRegion) => {
+			if (
+				readOnly ||
+				!viewRef.current ||
+				dirty ||
+				draftOfferRef.current !== null ||
+				// A file that stages whole has no changes to stage on their own.
+				(region && !stagesByLine)
+			) {
+				return;
+			}
 
-		setStaging(true);
-		setError(null);
+			setStaging(true);
+			setError(null);
 
-		try {
-			const body: {
-				path: string;
-				ranges?: [number, number][];
-				expectedBlobs?: string;
-				expectedMtimeMs?: number;
-			} = {
-				path: filePath,
-			};
-			// A tracked change stages exactly the picked lines, or the selected
-			// ones when nothing is picked. Either way it names the git diff those
-			// line numbers come from, so the server refuses rather than staging
-			// whatever lines now sit at them. An untracked file stages whole and
-			// names the version on screen by its modification time instead.
-			if (stagesByLine) {
-				body.ranges =
-					pickerRef.current?.ranges() ??
-					selectionToRanges(viewRef.current.state);
-				if (body.ranges.length === 0) return;
-				const blobs = pickerRef.current?.diffBlobs() ?? null;
-				if (blobs !== null) {
-					body.expectedBlobs = blobs;
+			try {
+				const body: {
+					path: string;
+					ranges?: [number, number][];
+					expectedBlobs?: string;
+					expectedMtimeMs?: number;
+				} = {
+					path: filePath,
+				};
+				// A tracked change stages exactly the change's lines, or the picked
+				// ones, or the selected ones when nothing is picked. Each way it names
+				// the git diff those line numbers come from, so the server refuses
+				// rather than staging whatever lines now sit at them. An untracked
+				// file stages whole and names the version on screen by its
+				// modification time instead.
+				if (stagesByLine) {
+					body.ranges = region
+						? [[region.start, region.end]]
+						: (pickerRef.current?.ranges() ??
+							selectionToRanges(viewRef.current.state));
+					if (body.ranges.length === 0) return;
+					const blobs = pickerRef.current?.diffBlobs() ?? null;
+					if (blobs !== null) {
+						body.expectedBlobs = blobs;
+					}
+				} else if (mtimeMs !== null) {
+					body.expectedMtimeMs = mtimeMs;
 				}
-			} else if (mtimeMs !== null) {
-				body.expectedMtimeMs = mtimeMs;
-			}
 
-			const response = await fetch(
-				apiUrl(`/api/git/stage?repo=${encodeURIComponent(repo)}`),
-				{
-					method: "POST",
-					headers: { "Content-Type": "application/json" },
-					body: JSON.stringify(body),
-				},
-			);
-
-			if (response.status === 409) {
-				throw new Error(
-					"The file changed since it was loaded. Reload before staging.",
+				const response = await fetch(
+					apiUrl(`/api/git/stage?repo=${encodeURIComponent(repo)}`),
+					{
+						method: "POST",
+						headers: { "Content-Type": "application/json" },
+						body: JSON.stringify(body),
+					},
 				);
-			}
-			if (!response.ok) {
-				const errorBody = await response.json().catch(() => null);
-				throw new Error(getErrorMessage(errorBody, response.status));
-			}
 
-			pickerRef.current?.clear();
-			onStaged?.();
-		} catch (err) {
-			setError(err instanceof Error ? err.message : "Failed to stage changes");
-		} finally {
-			setStaging(false);
-		}
-	}, [dirty, filePath, mtimeMs, onStaged, readOnly, repo, stagesByLine]);
-
-	const handleUnstage = useCallback(async () => {
-		if (!staged || !viewRef.current) return;
-
-		setUnstaging(true);
-		setError(null);
-
-		try {
-			const body: {
-				path: string;
-				ranges?: [number, number][];
-				expectedBlobs?: string;
-			} = {
-				path: filePath,
-			};
-			// A staged modification unstages exactly the picked lines, or the
-			// selected ones when nothing is picked, and names the staged diff
-			// those line numbers come from, as staging does.
-			if (unstagesByLine) {
-				body.ranges =
-					pickerRef.current?.ranges() ??
-					selectionToRanges(viewRef.current.state);
-				if (body.ranges.length === 0) return;
-				const blobs = pickerRef.current?.diffBlobs() ?? null;
-				if (blobs !== null) {
-					body.expectedBlobs = blobs;
+				if (response.status === 409) {
+					throw new Error(
+						"The file changed since it was loaded. Reload before staging.",
+					);
 				}
-			}
+				if (!response.ok) {
+					const errorBody = await response.json().catch(() => null);
+					throw new Error(getErrorMessage(errorBody, response.status));
+				}
 
-			const response = await fetch(
-				apiUrl(`/api/git/unstage?repo=${encodeURIComponent(repo)}`),
-				{
-					method: "POST",
-					headers: { "Content-Type": "application/json" },
-					body: JSON.stringify(body),
-				},
-			);
-
-			if (response.status === 409) {
-				throw new Error(
-					"The staged change is different now. Reload before unstaging.",
+				// Staging leaves the buffer as it was, so picks in other changes
+				// still name their lines, and a change staged whole drops only its
+				// own.
+				if (region) {
+					pickerRef.current?.unpick(region);
+				} else {
+					pickerRef.current?.clear();
+				}
+				onStaged?.();
+			} catch (err) {
+				setError(
+					err instanceof Error ? err.message : "Failed to stage changes",
 				);
+			} finally {
+				setStaging(false);
 			}
-			if (!response.ok) {
-				const errorBody = await response.json().catch(() => null);
-				throw new Error(getErrorMessage(errorBody, response.status));
-			}
+		},
+		[dirty, filePath, mtimeMs, onStaged, readOnly, repo, stagesByLine],
+	);
 
-			pickerRef.current?.clear();
-			// The index just changed, so bring the buffer up to the new staged
-			// content; the decorations then shrink to whatever remains staged.
-			// Editing the buffer in place keeps the editor's selection and scroll
-			// position, which reloading would reset to the top of the file.
-			const refreshed = await fetch(
-				apiUrl(
-					`/api/git/base-content?repo=${encodeURIComponent(repo)}&path=${encodeURIComponent(filePath)}&staged=false&_reload=${Date.now()}`,
-				),
-			).catch(() => null);
-			if (refreshed?.ok && replaceDocRef.current) {
-				const text = await refreshed.text();
-				const normalized = normalizeLineEndings(text);
-				lineSeparatorRef.current = detectLineSeparator(text);
-				originalContentRef.current = normalized;
-				setContextStale(true);
-				replaceDocRef.current(normalized);
-			} else {
-				setReloadToken((value) => value + 1);
-			}
-			onUnstaged?.();
-		} catch (err) {
-			setError(
-				err instanceof Error ? err.message : "Failed to unstage changes",
-			);
-		} finally {
-			setUnstaging(false);
-		}
-	}, [filePath, onUnstaged, repo, staged, unstagesByLine]);
+	// Unstages the given change whole, or else the picked or selected lines.
+	const handleUnstage = useCallback(
+		async (region?: ChangeRegion) => {
+			// A file that unstages whole has no changes to unstage on their own.
+			if (!staged || !viewRef.current || (region && !unstagesByLine)) return;
 
-	// The editor stages or unstages picked or selected lines itself. The page's
-	// file action covers the whole file; without one, the editor stages an
-	// untracked file whole itself.
+			setUnstaging(true);
+			setError(null);
+
+			try {
+				const body: {
+					path: string;
+					ranges?: [number, number][];
+					expectedBlobs?: string;
+				} = {
+					path: filePath,
+				};
+				// A staged modification unstages exactly the change's lines, or the
+				// picked ones, or the selected ones when nothing is picked, and names
+				// the staged diff those line numbers come from, as staging does.
+				if (unstagesByLine) {
+					body.ranges = region
+						? [[region.start, region.end]]
+						: (pickerRef.current?.ranges() ??
+							selectionToRanges(viewRef.current.state));
+					if (body.ranges.length === 0) return;
+					const blobs = pickerRef.current?.diffBlobs() ?? null;
+					if (blobs !== null) {
+						body.expectedBlobs = blobs;
+					}
+				}
+
+				const response = await fetch(
+					apiUrl(`/api/git/unstage?repo=${encodeURIComponent(repo)}`),
+					{
+						method: "POST",
+						headers: { "Content-Type": "application/json" },
+						body: JSON.stringify(body),
+					},
+				);
+
+				if (response.status === 409) {
+					throw new Error(
+						"The staged change is different now. Reload before unstaging.",
+					);
+				}
+				if (!response.ok) {
+					const errorBody = await response.json().catch(() => null);
+					throw new Error(getErrorMessage(errorBody, response.status));
+				}
+
+				pickerRef.current?.clear();
+				// The index just changed, so bring the buffer up to the new staged
+				// content; the decorations then shrink to whatever remains staged.
+				// Editing the buffer in place keeps the editor's selection and scroll
+				// position, which reloading would reset to the top of the file.
+				const refreshed = await fetch(
+					apiUrl(
+						`/api/git/base-content?repo=${encodeURIComponent(repo)}&path=${encodeURIComponent(filePath)}&staged=false&_reload=${Date.now()}`,
+					),
+				).catch(() => null);
+				if (refreshed?.ok && replaceDocRef.current) {
+					const text = await refreshed.text();
+					const normalized = normalizeLineEndings(text);
+					lineSeparatorRef.current = detectLineSeparator(text);
+					originalContentRef.current = normalized;
+					setContextStale(true);
+					replaceDocRef.current(normalized);
+				} else {
+					setReloadToken((value) => value + 1);
+				}
+				onUnstaged?.();
+			} catch (err) {
+				setError(
+					err instanceof Error ? err.message : "Failed to unstage changes",
+				);
+			} finally {
+				setUnstaging(false);
+			}
+		},
+		[filePath, onUnstaged, repo, staged, unstagesByLine],
+	);
+
+	// The editor stages or unstages picked or selected lines, and each change
+	// whole, itself. The page's file action covers the whole file; without one,
+	// the editor stages an untracked file whole itself.
 	const lineActionAvailable = staged
 		? !readOnly && onUnstaged !== undefined && unstagesByLine
 		: !readOnly && !deleted && onStaged !== undefined && stagesByLine;
@@ -1851,6 +2052,16 @@ export function TextFileEditor({
 	const runLineAction = () => {
 		void (staged ? handleUnstage() : handleStage());
 	};
+	useEffect(() => {
+		runRegionActionRef.current = (region) => {
+			void (staged ? handleUnstage(region) : handleStage(region));
+		};
+	}, [handleStage, handleUnstage, staged]);
+	// A change's strip acts when the action bar's line action would.
+	useEffect(() => {
+		stripsEnabledRef.current = !lineActionDisabled;
+		applyStripsEnabledRef.current?.(!lineActionDisabled);
+	}, [lineActionDisabled]);
 	const lineActionLabel = (lines: string) =>
 		lineActionBusy
 			? staged

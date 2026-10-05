@@ -5,7 +5,10 @@ import {
 	getPickTargets,
 	pickedLinesToRanges,
 } from "../components/linePicking.ts";
-import { getEditorChangeDecorations } from "../components/TextFileEditor.tsx";
+import {
+	getChangeRegions,
+	getEditorChangeDecorations,
+} from "../components/TextFileEditor.tsx";
 import { GIT_DIFF_CASES } from "./gitDiffCases.ts";
 
 /** The added and deleted lines of a diff or patch, sorted for comparison. */
@@ -63,6 +66,50 @@ describe("a pick stages exactly the lines it names", () => {
 			}
 
 			// Every change in git's diff is reachable through some pick.
+			expect(covered.sort()).toEqual(changedLines(diff));
+		});
+	}
+});
+
+// A change's strip stages its region whole: every line from its first to its
+// last, which picks that change's lines and nothing of any other change.
+describe("a change stages exactly its own lines", () => {
+	for (const { name, base, current, diff } of GIT_DIFF_CASES) {
+		test(name, () => {
+			const decorations = getEditorChangeDecorations({
+				currentContent: current,
+				loadedContent: current,
+				comparisonContent: base,
+				changeDiff: diff,
+				changeType: "modified",
+			});
+			expect(decorations.matchesGitDiff).toBe(true);
+			const currentLines = current.split("\n");
+			const docLines = currentLines.length;
+			const targets = getPickTargets(decorations, docLines);
+
+			const covered: string[] = [];
+			for (const { start, end } of getChangeRegions(decorations, docLines)) {
+				const within = (line: number) => line >= start && line <= end;
+				const expected = [
+					...[...targets.lines]
+						.filter(within)
+						.map((line) => `+${currentLines[line - 1]}`),
+					...decorations.deletedChunks
+						.filter((chunk) => within(deletionAnchorLine(chunk, docLines)))
+						.flatMap((chunk) => chunk.lines.map((deleted) => `-${deleted}`)),
+				].sort();
+
+				const patch = buildPartialPatch(diff, [[start, end]]);
+
+				expect({ start, staged: changedLines(patch) }).toEqual({
+					start,
+					staged: expected,
+				});
+				covered.push(...expected);
+			}
+
+			// The changes together stage the whole of git's diff.
 			expect(covered.sort()).toEqual(changedLines(diff));
 		});
 	}
