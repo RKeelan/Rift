@@ -1156,6 +1156,41 @@ describe("line picking", () => {
 		);
 	});
 
+	test("tapping a changed line's number picks it too", async () => {
+		const { container } = await renderForPicking();
+		const lineNumber = (line: number) =>
+			waitFor(() => {
+				const found = [
+					...container.querySelectorAll<HTMLElement>(
+						".cm-lineNumbers .cm-gutterElement",
+					),
+				].find((element) => element.textContent === String(line));
+				if (!found) throw new Error(`no number for line ${line}`);
+				return found;
+			});
+
+		// Line 1 is unchanged, so its number picks nothing and lets the press
+		// through.
+		const unchanged = await lineNumber(1);
+		expect(fireEvent.mouseDown(unchanged)).toBe(true);
+		act(() => {
+			fireEvent.click(unchanged);
+		});
+		expect(screen.queryByRole("button", { name: "Stage 1 line" })).toBeNull();
+
+		// Line 2 is modified, so its number picks it, swallowing the press as
+		// the gutter's own target does.
+		const changed = await lineNumber(2);
+		expect(fireEvent.mouseDown(changed)).toBe(false);
+		act(() => {
+			fireEvent.click(changed);
+		});
+		await screen.findByRole("button", { name: "Stage 1 line" });
+		expect(contentLine(container, 2).classList.contains("cm-pickedLine")).toBe(
+			true,
+		);
+	});
+
 	test("swallows the press so picking does not move focus", async () => {
 		const { container } = await renderForPicking();
 
