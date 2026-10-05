@@ -1307,13 +1307,17 @@ export function TextFileEditor({
 				}),
 				EditorView.theme({
 					"&": {
-						fontSize: "13px",
+						// Material's body text size for Android.
+						fontSize: "16px",
 						height: "100%",
 						color: "var(--color-text)",
 						backgroundColor: "var(--color-bg)",
 					},
 					".cm-scroller": {
 						overflow: "auto",
+						// 24px lines, so each tap target in the line-picking gutter
+						// is 24px tall.
+						lineHeight: "1.5",
 						fontFamily:
 							"'SF Mono', 'Fira Code', 'Fira Mono', Menlo, Consolas, monospace",
 					},

@@ -18,6 +18,17 @@ Rift's users reach it from Chrome on Android, so that is where a UI change has t
 - Exercise changes in a scratch repository under one of the roots, never in a real one, and check staging with `git diff --cached`.
 - Leave the emulator's other apps and their data alone. Never take control of the host's desktop windows or keyboard to reach a browser.
 
+## Android UI Guidelines
+
+Follow Android's UI guidelines by default, and depart from them only where a decision has been made to, recorded below. In particular:
+
+- Make every touch target at least 48dp square, which is 48 CSS pixels ([Android accessibility](https://developer.android.com/guide/topics/ui/accessibility/apps)).
+- Set text meant for reading, such as the editor's, at Material 3's Body Large size of 16sp, which is 16 CSS pixels ([Material 3 type scale](https://m3.material.io/styles/typography/type-scale-tokens)).
+
+Decided departures:
+
+- Line-picking targets are only a line tall (24px), because a target per line could be 48px tall only if every line were. To make up for it, a changed line's number picks it as well as its 36px-wide gutter cell.
+
 ## Deployment
 
 Rift runs continuously from a prebuilt bundle, so editing source does not change what the running server serves. Rebuild and redeploy as soon as a task is complete, before asking for approval to commit — Richard tests every change on his phone, and a change that is not deployed cannot be tested:
