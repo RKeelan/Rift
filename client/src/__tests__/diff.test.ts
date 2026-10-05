@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { applyDiff, type DiffOp, getDiffOps } from "../diff.ts";
+import { applyDiff, type DiffOp, getDiffOps, getWordChanges } from "../diff.ts";
 import {
 	CREATED_FILE_CASE,
 	GIT_DIFF_CASES,
@@ -129,6 +129,62 @@ describe("getDiffOps", () => {
 			).toEqual(current);
 			expect(editCount(script)).toBe(minimalEditCount(original, current));
 		}
+	});
+});
+
+describe("getWordChanges", () => {
+	// The text of each range, so a failure shows words rather than offsets.
+	function marked(before: string, after: string) {
+		const changes = getWordChanges(before, after);
+		if (!changes) return null;
+		return {
+			before: changes.before.map(([from, to]) => before.slice(from, to)),
+			after: changes.after.map(([from, to]) => after.slice(from, to)),
+		};
+	}
+
+	test("marks the word that changed on each side", () => {
+		expect(getWordChanges("the quick brown fox", "the quick red fox")).toEqual({
+			before: [[10, 15]],
+			after: [[10, 13]],
+		});
+	});
+
+	test("joins changed words with only unchanged whitespace between them", () => {
+		expect(marked("a b c d e f", "a X Y d e f")).toEqual({
+			before: ["b c"],
+			after: ["X Y"],
+		});
+	});
+
+	test("marks punctuation on its own", () => {
+		expect(marked("call(a, b)", "call(a, b, c)")).toEqual({
+			before: [],
+			after: [", c"],
+		});
+		expect(marked("if (x > 1) {", "if (x >= 1) {")).toEqual({
+			before: [],
+			after: ["="],
+		});
+	});
+
+	test("marks nothing on a line that did not change", () => {
+		expect(getWordChanges("same words", "same words")).toEqual({
+			before: [],
+			after: [],
+		});
+	});
+
+	test("marks nothing on a line that was rewritten", () => {
+		expect(getWordChanges("alpha beta gamma", "one two three")).toBeNull();
+		expect(getWordChanges("", "something new")).toBeNull();
+	});
+
+	test("counts offsets as the editor does, in UTF-16 code units", () => {
+		expect(getWordChanges("naïve café 🎉 ok", "naïve café 🎉 fine")).toEqual({
+			before: [[14, 16]],
+			after: [[14, 18]],
+		});
 	});
 });
 

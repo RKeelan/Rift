@@ -2,7 +2,12 @@ import { ChevronDown, ChevronUp, EllipsisVertical, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { apiUrl } from "../apiUrl.ts";
-import { applyDiff, getDiffOps } from "../diff.ts";
+import {
+	applyDiff,
+	type CharRange,
+	getDiffOps,
+	getWordChanges,
+} from "../diff.ts";
 import {
 	clearDraft,
 	clearDraftIfText,
@@ -427,6 +432,52 @@ export function getEditorChangeDecorations({
 		),
 		matchesGitDiff: false,
 	};
+}
+
+/** The changed words of each modified line, on both of its sides. */
+export interface WordMarks {
+	/** Each added line's changed words. */
+	added: Map<number, CharRange[]>;
+	/**
+	 * Each deleted chunk's changed words, line by line, with null for a line
+	 * that has none worth marking.
+	 */
+	deleted: Map<DeletedLineChunk, (CharRange[] | null)[]>;
+}
+
+/**
+ * Pairs each line a change removes with the line that takes its place, and
+ * marks the words that differ between the two. Only a change that adds as many
+ * lines as it removes is paired, since otherwise which line replaced which is
+ * a guess.
+ */
+export function getWordMarks(
+	decorations: ChangeDecorationsData,
+	lineText: (lineNumber: number) => string,
+): WordMarks {
+	const addedLines = new Set(
+		decorations.lineHighlights
+			.filter(({ kind }) => kind === "added")
+			.map(({ lineNumber }) => lineNumber),
+	);
+	const marks: WordMarks = { added: new Map(), deleted: new Map() };
+	for (const chunk of decorations.deletedChunks) {
+		// A chunk's deletions sit in front of the first line its change adds.
+		const first = chunk.anchorIndex + 1;
+		let count = 0;
+		while (addedLines.has(first + count)) count += 1;
+		if (count === 0 || count !== chunk.lines.length) continue;
+		marks.deleted.set(
+			chunk,
+			chunk.lines.map((line, index) => {
+				const changes = getWordChanges(line, lineText(first + index));
+				if (!changes) return null;
+				marks.added.set(first + index, changes.after);
+				return changes.before;
+			}),
+		);
+	}
+	return marks;
 }
 
 /** A run of changed lines, inclusive and 1-based. */
@@ -1170,6 +1221,7 @@ export function TextFileEditor({
 					readonly lines: string[],
 					readonly anchorLine: number,
 					readonly picked: boolean,
+					readonly marks: (CharRange[] | null)[] | undefined,
 				) {
 					super();
 				}
@@ -1178,7 +1230,8 @@ export function TextFileEditor({
 					return (
 						other.lines === this.lines &&
 						other.anchorLine === this.anchorLine &&
-						other.picked === this.picked
+						other.picked === this.picked &&
+						other.marks === this.marks
 					);
 				}
 
@@ -1187,12 +1240,20 @@ export function TextFileEditor({
 					wrapper.className = `cm-deletedChunk${
 						this.picked ? " cm-deletedChunk--picked" : ""
 					}`;
-					for (const line of this.lines) {
+					this.lines.forEach((line, index) => {
 						const lineElement = document.createElement("div");
 						lineElement.className = "cm-deletedChunkLine";
-						lineElement.textContent = line;
+						let offset = 0;
+						for (const [from, to] of this.marks?.[index] ?? []) {
+							const word = document.createElement("span");
+							word.className = "cm-changedWord";
+							word.textContent = line.slice(from, to);
+							lineElement.append(line.slice(offset, from), word);
+							offset = to;
+						}
+						lineElement.append(line.slice(offset));
 						wrapper.append(lineElement);
-					}
+					});
 					return wrapper;
 				}
 			}
@@ -1228,6 +1289,11 @@ export function TextFileEditor({
 
 				return {
 					changes,
+					wordMarks: getWordMarks(changes, (lineNumber) =>
+						lineNumber >= 1 && lineNumber <= doc.lines
+							? doc.line(lineNumber).text
+							: "",
+					),
 					// The changes that get a strip, which only git's diff can place.
 					strips: changes.matchesGitDiff ? regions : [],
 					targets: getPickTargets(changes, doc.lines),
@@ -1244,9 +1310,11 @@ export function TextFileEditor({
 			function buildChangeDecorations(
 				doc: import("@codemirror/state").Text,
 				changes: ReturnType<typeof getEditorChangeDecorations>,
+				wordMarks: WordMarks,
 				picked: ReadonlySet<number>,
 			) {
 				const ranges = [];
+				const changedWord = Decoration.mark({ class: "cm-changedWord" });
 				for (const { kind, lineNumber } of changes.lineHighlights) {
 					if (lineNumber < 1 || lineNumber > doc.lines) {
 						continue;
@@ -1261,6 +1329,11 @@ export function TextFileEditor({
 							},
 						}).range(line.from),
 					);
+					for (const [from, to] of wordMarks.added.get(lineNumber) ?? []) {
+						if (to <= line.length) {
+							ranges.push(changedWord.range(line.from + from, line.from + to));
+						}
+					}
 				}
 
 				for (const chunk of changes.deletedChunks) {
@@ -1277,6 +1350,7 @@ export function TextFileEditor({
 								chunk.lines,
 								anchorLine,
 								picked.has(anchorLine),
+								wordMarks.deleted.get(chunk),
 							),
 						}).range(anchor),
 					);
@@ -1445,6 +1519,7 @@ export function TextFileEditor({
 					buildChangeDecorations(
 						state.doc,
 						state.field(changeField).changes,
+						state.field(changeField).wordMarks,
 						state.field(pickedLines),
 					),
 				),
