@@ -18,6 +18,21 @@ function makeConfig(reposRoot: string): AppConfig {
 	};
 }
 
+// The editor reads the blob ids it sends with a stage or unstage from the
+// `index` line of the diff it draws, which comes from this endpoint.
+async function blobsFromDiff(
+	app: ReturnType<typeof createApp>,
+	name: string,
+	staged = false,
+): Promise<string> {
+	const res = await supertest(app).get(
+		`/api/git/diff?repo=${repoRef}&path=${name}&staged=${staged}`,
+	);
+	const blobs = /^index ([0-9a-f]+\.\.[0-9a-f]+)/m.exec(res.body.diff)?.[1];
+	if (!blobs) throw new Error(`no index line in the diff of ${name}`);
+	return blobs;
+}
+
 describe("GET /api/git/status", () => {
 	let reposRoot: string;
 	let repoDir: string;
@@ -740,6 +755,163 @@ describe("POST /api/git/stage (line ranges)", () => {
 		execSync("git checkout -- emptied.txt", { cwd: repoDir });
 	});
 
+	test("names each side of the diff by its full blob id", async () => {
+		await commitFile("ids.txt", "one\ntwo\n");
+		await fs.writeFile(path.join(repoDir, "ids.txt"), "one\nTWO\n");
+
+		const [from, to] = (await blobsFromDiff(app, "ids.txt")).split("..");
+
+		expect(from).toBe(
+			execSync("git rev-parse :ids.txt", { cwd: repoDir }).toString().trim(),
+		);
+		expect(to).toBe(
+			execSync("git hash-object ids.txt", { cwd: repoDir }).toString().trim(),
+		);
+
+		execSync("git checkout -- ids.txt", { cwd: repoDir });
+	});
+
+	test("stages exactly the picked lines of the diff the caller read", async () => {
+		await commitFile("fresh.txt", "one\ntwo\nthree\n");
+		await fs.writeFile(path.join(repoDir, "fresh.txt"), "ONE\ntwo\nTHREE\n");
+		const expectedBlobs = await blobsFromDiff(app, "fresh.txt");
+
+		const res = await supertest(app)
+			.post(`/api/git/stage?repo=${repoRef}`)
+			.send({ path: "fresh.txt", ranges: [[3, 3]], expectedBlobs });
+
+		expect(res.status).toBe(200);
+		expect(indexContent("fresh.txt")).toBe("one\ntwo\nTHREE\n");
+
+		execSync("git reset -q HEAD fresh.txt", { cwd: repoDir });
+		execSync("git checkout -- fresh.txt", { cwd: repoDir });
+	});
+
+	test("refuses to stage lines of a diff that changed since it was read", async () => {
+		await commitFile("stale.txt", "one\ntwo\nthree\n");
+		await fs.writeFile(path.join(repoDir, "stale.txt"), "one\ntwo\nTHREE\n");
+		const expectedBlobs = await blobsFromDiff(app, "stale.txt");
+		// An agent deletes line 1 and adds a line after the caller read line
+		// numbers from the diff, so line 3 now names the agent's line, not the one
+		// the caller picked.
+		await fs.writeFile(path.join(repoDir, "stale.txt"), "two\nTHREE\nFOUR\n");
+
+		const res = await supertest(app)
+			.post(`/api/git/stage?repo=${repoRef}`)
+			.send({ path: "stale.txt", ranges: [[3, 3]], expectedBlobs });
+
+		expect(res.status).toBe(409);
+		expect(res.body.error.code).toBe("DIFF_CHANGED");
+		expect(indexContent("stale.txt")).toBe("one\ntwo\nthree\n");
+
+		execSync("git checkout -- stale.txt", { cwd: repoDir });
+	});
+
+	test("refuses to stage a whole file whose diff changed since it was read", async () => {
+		await commitFile("whole.txt", "one\n");
+		await fs.writeFile(path.join(repoDir, "whole.txt"), "ONE\n");
+		const expectedBlobs = await blobsFromDiff(app, "whole.txt");
+		await fs.writeFile(path.join(repoDir, "whole.txt"), "ONE\nTWO\n");
+
+		const res = await supertest(app)
+			.post(`/api/git/stage?repo=${repoRef}`)
+			.send({ path: "whole.txt", expectedBlobs });
+
+		expect(res.status).toBe(409);
+		expect(res.body.error.code).toBe("DIFF_CHANGED");
+		expect(indexContent("whole.txt")).toBe("one\n");
+
+		execSync("git checkout -- whole.txt", { cwd: repoDir });
+	});
+
+	test("stages and unstages lines with the blob ids of the diff the editor reads", async () => {
+		await commitFile("round.txt", "one\ntwo\nthree\nfour\n");
+		await fs.writeFile(
+			path.join(repoDir, "round.txt"),
+			"one\nTWO\nthree\nFOUR\n",
+		);
+
+		const unstagedBlobs = await blobsFromDiff(app, "round.txt");
+		const staged = await supertest(app)
+			.post(`/api/git/stage?repo=${repoRef}`)
+			.send({
+				path: "round.txt",
+				ranges: [[4, 4]],
+				expectedBlobs: unstagedBlobs,
+			});
+		expect(staged.status).toBe(200);
+		expect(indexContent("round.txt")).toBe("one\ntwo\nthree\nFOUR\n");
+
+		// The stage moved the index, so the ids read before it no longer name the
+		// unstaged diff.
+		const again = await supertest(app)
+			.post(`/api/git/stage?repo=${repoRef}`)
+			.send({
+				path: "round.txt",
+				ranges: [[2, 2]],
+				expectedBlobs: unstagedBlobs,
+			});
+		expect(again.status).toBe(409);
+		expect(indexContent("round.txt")).toBe("one\ntwo\nthree\nFOUR\n");
+
+		const stagedBlobs = await blobsFromDiff(app, "round.txt", true);
+		const unstaged = await supertest(app)
+			.post(`/api/git/unstage?repo=${repoRef}`)
+			.send({
+				path: "round.txt",
+				ranges: [[4, 4]],
+				expectedBlobs: stagedBlobs,
+			});
+		expect(unstaged.status).toBe(200);
+		expect(indexContent("round.txt")).toBe("one\ntwo\nthree\nfour\n");
+
+		execSync("git checkout -- round.txt", { cwd: repoDir });
+	});
+
+	test("requires full blob ids", async () => {
+		const res = await supertest(app)
+			.post(`/api/git/stage?repo=${repoRef}`)
+			.send({
+				path: "mod.txt",
+				ranges: [[2, 2]],
+				expectedBlobs: "abc1234..def5678",
+			});
+
+		expect(res.status).toBe(400);
+		expect(res.body.error.code).toBe("INVALID_BLOBS");
+	});
+
+	test("stages an untracked file whole only at the mtime the caller read", async () => {
+		await fs.writeFile(path.join(repoDir, "new.txt"), "one\n");
+		const { mtimeMs } = await fs.stat(path.join(repoDir, "new.txt"));
+		await fs.utimes(
+			path.join(repoDir, "new.txt"),
+			new Date(),
+			new Date(mtimeMs + 5000),
+		);
+
+		const stale = await supertest(app)
+			.post(`/api/git/stage?repo=${repoRef}`)
+			.send({ path: "new.txt", expectedMtimeMs: mtimeMs });
+		expect(stale.status).toBe(409);
+		expect(stale.body.error.code).toBe("FILE_MODIFIED");
+		expect(
+			execSync("git ls-files -- new.txt", { cwd: repoDir }).toString(),
+		).toBe("");
+
+		const fresh = await supertest(app)
+			.post(`/api/git/stage?repo=${repoRef}`)
+			.send({
+				path: "new.txt",
+				expectedMtimeMs: (await fs.stat(path.join(repoDir, "new.txt"))).mtimeMs,
+			});
+		expect(fresh.status).toBe(200);
+		expect(indexContent("new.txt")).toBe("one\n");
+
+		execSync("git rm -q --cached new.txt", { cwd: repoDir });
+		await fs.rm(path.join(repoDir, "new.txt"));
+	});
+
 	test("a selection covering no change stages nothing", async () => {
 		await commitFile("noop.txt", "alpha\nbeta\n");
 		await fs.writeFile(path.join(repoDir, "noop.txt"), "ALPHA\nbeta\n");
@@ -920,6 +1092,104 @@ describe("POST /api/git/unstage (line ranges)", () => {
 
 		execSync("git reset -q HEAD emptied.txt", { cwd: repoDir });
 		execSync("git checkout -- emptied.txt", { cwd: repoDir });
+	});
+
+	test("unstages lines of the staged diff the caller read", async () => {
+		await commitAndStage("fresh.txt", "one\ntwo\n", "one\nTWO\n");
+		const expectedBlobs = await blobsFromDiff(app, "fresh.txt", true);
+
+		const res = await supertest(app)
+			.post(`/api/git/unstage?repo=${repoRef}`)
+			.send({ path: "fresh.txt", ranges: [[2, 2]], expectedBlobs });
+
+		expect(res.status).toBe(200);
+		expect(indexContent("fresh.txt")).toBe("one\ntwo\n");
+
+		execSync("git reset -q HEAD fresh.txt", { cwd: repoDir });
+		execSync("git checkout -- fresh.txt", { cwd: repoDir });
+	});
+
+	test("refuses to unstage lines once the index has changed", async () => {
+		await commitAndStage("stale.txt", "one\ntwo\nthree\n", "one\ntwo\nTHREE\n");
+		const expectedBlobs = await blobsFromDiff(app, "stale.txt", true);
+		// Something else stages further changes after the caller read the diff,
+		// so line 3 now names a line the caller never saw staged.
+		await fs.writeFile(path.join(repoDir, "stale.txt"), "two\nTHREE\nFOUR\n");
+		execSync("git add stale.txt", { cwd: repoDir });
+
+		const res = await supertest(app)
+			.post(`/api/git/unstage?repo=${repoRef}`)
+			.send({ path: "stale.txt", ranges: [[3, 3]], expectedBlobs });
+
+		expect(res.status).toBe(409);
+		expect(res.body.error.code).toBe("DIFF_CHANGED");
+		expect(indexContent("stale.txt")).toBe("two\nTHREE\nFOUR\n");
+
+		execSync("git reset -q HEAD stale.txt", { cwd: repoDir });
+		execSync("git checkout -- stale.txt", { cwd: repoDir });
+	});
+
+	test("refuses to unstage lines once a commit has moved HEAD", async () => {
+		await commitAndStage(
+			"moved.txt",
+			"one\ntwo\nthree\n",
+			"one\nTWO\nthree\nfour\n",
+		);
+		const expectedBlobs = await blobsFromDiff(app, "moved.txt", true);
+		// A commit takes part of the staged change, so the same index blob now
+		// differs from HEAD by a different diff.
+		const partial = path.join(repoDir, "partial.txt");
+		await fs.writeFile(partial, "one\nTWO\nthree\n");
+		execSync(
+			`git update-index --cacheinfo 100644,${execSync(
+				`git hash-object -w "${partial}"`,
+				{ cwd: repoDir },
+			)
+				.toString()
+				.trim()},moved.txt`,
+			{ cwd: repoDir },
+		);
+		execSync('git commit -q -m "take part"', { cwd: repoDir });
+		execSync("git add moved.txt", { cwd: repoDir });
+		await fs.rm(partial);
+
+		const res = await supertest(app)
+			.post(`/api/git/unstage?repo=${repoRef}`)
+			.send({ path: "moved.txt", ranges: [[2, 2]], expectedBlobs });
+
+		expect(res.status).toBe(409);
+		expect(res.body.error.code).toBe("DIFF_CHANGED");
+		expect(indexContent("moved.txt")).toBe("one\nTWO\nthree\nfour\n");
+
+		execSync("git reset -q HEAD moved.txt", { cwd: repoDir });
+		execSync("git checkout -- moved.txt", { cwd: repoDir });
+	});
+
+	test("refuses to unstage a whole file whose staged diff changed since it was read", async () => {
+		await commitAndStage("whole.txt", "one\n", "ONE\n");
+		const expectedBlobs = await blobsFromDiff(app, "whole.txt", true);
+		await fs.writeFile(path.join(repoDir, "whole.txt"), "ONE\nTWO\n");
+		execSync("git add whole.txt", { cwd: repoDir });
+
+		const res = await supertest(app)
+			.post(`/api/git/unstage?repo=${repoRef}`)
+			.send({ path: "whole.txt", expectedBlobs });
+
+		expect(res.status).toBe(409);
+		expect(res.body.error.code).toBe("DIFF_CHANGED");
+		expect(indexContent("whole.txt")).toBe("ONE\nTWO\n");
+
+		execSync("git reset -q HEAD whole.txt", { cwd: repoDir });
+		execSync("git checkout -- whole.txt", { cwd: repoDir });
+	});
+
+	test("requires full blob ids", async () => {
+		const res = await supertest(app)
+			.post(`/api/git/unstage?repo=${repoRef}`)
+			.send({ path: "mod.txt", ranges: [[2, 2]], expectedBlobs: "HEAD..HEAD" });
+
+		expect(res.status).toBe(400);
+		expect(res.body.error.code).toBe("INVALID_BLOBS");
 	});
 
 	test("a selection covering no staged change unstages nothing", async () => {
