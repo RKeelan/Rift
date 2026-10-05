@@ -212,6 +212,52 @@
 	overflow-wrap: anywhere;
 }
 
+/* A strip above each change, naming its first line, with a button that stages
+   or unstages the change whole. Like the deleted lines, it has no vertical
+   margin, so the gutters stay in line with the text, and its rule is a shadow
+   rather than a border, so the strip is as tall as its 48px button. */
+.text-file-editor-surface .cm-changeStrip {
+	display: flex;
+	align-items: center;
+	gap: 0.5rem;
+	min-height: 48px;
+	padding-left: 0.875rem;
+	box-shadow: inset 0 1px 0 var(--color-border);
+	background: var(--color-surface);
+	color: var(--color-text-muted);
+	font-family: var(--font-ui);
+	font-size: 0.875rem;
+	white-space: normal;
+	touch-action: manipulation;
+	user-select: none;
+}
+
+/* Without wrapping, the strip is as wide as the longest line, so the button
+   follows the label rather than sitting at the far end, off screen. */
+.text-file-editor-surface--wrap .cm-changeStripLabel {
+	flex: 1;
+	min-width: 0;
+}
+
+.text-file-editor-surface .cm-changeStripButton {
+	min-width: 48px;
+	min-height: 48px;
+	padding: 0 1rem;
+	border: 0;
+	background: none;
+	color: var(--color-primary);
+	font: inherit;
+	font-size: 1rem;
+	font-weight: 600;
+	cursor: pointer;
+	-webkit-tap-highlight-color: transparent;
+}
+
+.text-file-editor-surface .cm-changeStripButton[aria-disabled="true"] {
+	opacity: 0.5;
+	cursor: default;
+}
+
 /* Line picking: a gutter column of tap targets beside the line numbers. A
    changed line's number is part of its target, so the column stays narrow. */
 .text-file-editor-surface .cm-pickGutter {

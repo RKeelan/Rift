@@ -829,9 +829,7 @@ describe("ChangesPage", () => {
 			expect(
 				bar.getByRole("button", { name: "Save" }).hasAttribute("disabled"),
 			).toBe(false);
-			expect(screen.queryByRole("button", { name: /^Stage/ }) === null).toBe(
-				true,
-			);
+			expect(bar.queryByRole("button", { name: /^Stage/ }) === null).toBe(true);
 		});
 
 		async function reopen(container: HTMLElement) {

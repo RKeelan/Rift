@@ -21,10 +21,11 @@
 	--color-border: #333;
 	--tab-bar-height: 56px;
 	--safe-area-bottom: env(safe-area-inset-bottom, 0px);
-
-	font-family:
+	--font-ui:
 		-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial,
 		sans-serif, "Apple Color Emoji", "Segoe UI Emoji";
+
+	font-family: var(--font-ui);
 	font-size: 16px;
 	line-height: 1.5;
 	color: var(--color-text);
