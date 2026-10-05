@@ -228,14 +228,18 @@ export function linePickerGutter({
 	canPick,
 	widgetAnchor,
 }: LinePickerOptions) {
-	// Swallowing the press keeps focus where it was, so picking never raises
-	// the keyboard or starts a text selection.
+	// Swallowing the press keeps the cursor where it was and starts no text
+	// selection. Chrome on Android raises the keyboard on any tap while the
+	// editor has focus, so the press also takes focus from the editor.
 	function pickOnTap(
 		pickLine: (view: EditorView, event: Event) => number | null,
 	) {
 		return {
-			mousedown: (view: EditorView, _block: BlockInfo, event: Event) =>
-				pickLine(view, event) !== null,
+			mousedown(view: EditorView, _block: BlockInfo, event: Event) {
+				if (pickLine(view, event) === null) return false;
+				view.contentDOM.blur();
+				return true;
+			},
 			click(view: EditorView, _block: BlockInfo, event: Event) {
 				const line = pickLine(view, event);
 				if (line === null) return false;
