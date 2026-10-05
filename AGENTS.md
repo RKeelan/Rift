@@ -31,3 +31,5 @@ Deploying uncommitted work is expected, so the running bundle often reproduces n
 ## Dependency Management
 
 Always pin dependencies to exact versions — no `^`, `~`, or bare package names. `.bunfmt` sets `save-exact=true` so `bun add` pins automatically. `bun.lock` must be committed.
+
+The root `package.json` overrides `@codemirror/state`, `@codemirror/view`, and `@codemirror/language`, so every CodeMirror package shares the client's copy; without them, bumping the client's pins leaves the language packages on the old version, and two copies of `@codemirror/state` break the editor. The overrides decide what is installed, and Dependabot bumps only the client's pins, so raise the overrides to match on the Dependabot branch. A client test fails while they disagree.
