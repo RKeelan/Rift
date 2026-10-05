@@ -45,6 +45,7 @@ const globals = [
 	"KeyboardEvent",
 	"InputEvent",
 	"FocusEvent",
+	"Window",
 ] as const;
 
 for (const key of globals) {
