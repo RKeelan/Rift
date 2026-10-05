@@ -732,6 +732,11 @@ export function TextFileEditor({
 	const changeCountRef = useRef(0);
 	const lastNavLineRef = useRef(0);
 	const [changeCount, setChangeCount] = useState(0);
+	// Whether the editor view is built and has its language, which replaces its
+	// state, so a position set before then would be lost.
+	const [editorReady, setEditorReady] = useState(false);
+	// Whether this view has been moved to the file's first change yet.
+	const openedAtChangeRef = useRef(false);
 	const [content, setContent] = useState<string | null>(null);
 	const [error, setError] = useState<string | null>(null);
 	const [loading, setLoading] = useState(true);
@@ -1020,6 +1025,8 @@ export function TextFileEditor({
 		if (content === null || !editorRef.current) return;
 
 		let destroyed = false;
+		setEditorReady(false);
+		openedAtChangeRef.current = false;
 
 		(async () => {
 			const { Compartment, EditorState, StateEffect, StateField } =
@@ -1453,6 +1460,9 @@ export function TextFileEditor({
 					// Plain text is fine if language support fails.
 				}
 			}
+			if (!destroyed && viewRef.current === view) {
+				setEditorReady(true);
+			}
 		})().catch((cause: unknown) => {
 			// CodeMirror arrives through dynamic imports, so a chunk that fails
 			// to load leaves an empty pane with nothing to explain it. Say so
@@ -1467,6 +1477,7 @@ export function TextFileEditor({
 
 		return () => {
 			destroyed = true;
+			setEditorReady(false);
 			refreshDecorationsRef.current = null;
 			applyLineWrapRef.current = null;
 			applyLinePickingRef.current = null;
@@ -1511,6 +1522,23 @@ export function TextFileEditor({
 		document.addEventListener("pointerdown", closeOutside);
 		return () => document.removeEventListener("pointerdown", closeOutside);
 	}, [menuOpen]);
+
+	// A file opens at its first change rather than at its top, once the view has
+	// its language and the change context has placed the changes. A reader who
+	// has already moved the cursor or scrolled is left where they are.
+	useEffect(() => {
+		const view = viewRef.current;
+		if (!editorReady || changeCount === 0 || !view) return;
+		if (openedAtChangeRef.current) return;
+		openedAtChangeRef.current = true;
+		if (view.state.selection.main.head !== 0 || view.scrollDOM.scrollTop > 0) {
+			return;
+		}
+		const first = changeRegionsRef.current[0];
+		if (first === undefined) return;
+		lastNavLineRef.current = first;
+		scrollToLineRef.current?.(first);
+	}, [editorReady, changeCount]);
 
 	const goToChange = useCallback((direction: 1 | -1) => {
 		const regions = changeRegionsRef.current;

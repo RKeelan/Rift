@@ -461,14 +461,15 @@ describe("change navigation", () => {
 		return view.state.doc.lineAt(view.state.selection.main.head).number;
 	}
 
-	test("Next and Previous cycle through the changes and wrap around", async () => {
+	test("opens at the first change, and Next and Previous cycle through the changes", async () => {
 		const view = await renderWithChanges();
 
 		const next = screen.getByRole("button", { name: "Next change" });
 		const previous = screen.getByRole("button", { name: "Previous change" });
 
-		fireEvent.click(next);
-		expect(selectedLine(view)).toBe(2);
+		await waitFor(() => {
+			expect(selectedLine(view)).toBe(2);
+		});
 
 		fireEvent.click(next);
 		expect(selectedLine(view)).toBe(4);
@@ -483,6 +484,53 @@ describe("change navigation", () => {
 
 		fireEvent.click(previous);
 		expect(selectedLine(view)).toBe(2);
+	});
+
+	// The comparison arrives after the file, as it does from the server.
+	async function renderWithLateComparison() {
+		globalThis.fetch = (async () =>
+			new Response("a\nB\nc\nD\ne\n", {
+				headers: { "x-file-mtime-ms": "1" },
+			})) as typeof fetch;
+
+		const props = { filePath: "notes.txt", repo: "test-repo" };
+		const { container, rerender } = render(<TextFileEditor {...props} />);
+		await waitFor(() => {
+			expect(container.querySelector(".cm-content")).not.toBeNull();
+		});
+		const { EditorView } = await import("@codemirror/view");
+		const view = EditorView.findFromDOM(
+			container.querySelector(".cm-editor") as HTMLElement,
+		);
+		if (!view) throw new Error("editor view not found");
+		const addComparison = () =>
+			rerender(
+				<TextFileEditor {...props} comparisonContent={"a\nb\nc\nd\ne\n"} />,
+			);
+		return { view, addComparison };
+	}
+
+	test("opens at the first change once the comparison arrives", async () => {
+		const { view, addComparison } = await renderWithLateComparison();
+		expect(selectedLine(view)).toBe(1);
+
+		addComparison();
+
+		await waitFor(() => {
+			expect(selectedLine(view)).toBe(2);
+		});
+	});
+
+	test("leaves a reader who has already moved the cursor where they are", async () => {
+		const { view, addComparison } = await renderWithLateComparison();
+		act(() => {
+			view.dispatch({ selection: { anchor: view.state.doc.line(5).from } });
+		});
+
+		addComparison();
+		await screen.findByRole("button", { name: "Next change" });
+
+		expect(selectedLine(view)).toBe(5);
 	});
 
 	test("hides the change controls when there are no changes", async () => {
