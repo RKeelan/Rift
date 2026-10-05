@@ -1,5 +1,12 @@
 import { type EditorState, StateEffect, StateField } from "@codemirror/state";
-import { GutterMarker, gutter, type WidgetType } from "@codemirror/view";
+import {
+	type BlockInfo,
+	type EditorView,
+	GutterMarker,
+	gutter,
+	lineNumbers,
+	type WidgetType,
+} from "@codemirror/view";
 
 /**
  * Line picking: tapping the gutter beside a changed line adds it to, or removes
@@ -190,6 +197,14 @@ function pickTargetLine(event: Event): number | null {
 	return cell ? Number(cell.dataset.pickLine) : null;
 }
 
+/** The changed line whose number was tapped, or null for any other line. */
+function numberedPickLine(event: Event, targets: PickTargets): number | null {
+	const target = event.target;
+	if (!(target instanceof Element)) return null;
+	const line = Number(target.closest(".cm-gutterElement")?.textContent);
+	return targets.lines.has(line) ? line : null;
+}
+
 export interface LinePickerOptions {
 	/** Reads the current pick targets from the editor state. */
 	targets: (state: EditorState) => PickTargets;
@@ -205,13 +220,34 @@ export interface LinePickerOptions {
 /**
  * A gutter beside the line numbers with a tap target for every changed line
  * and every deletion. Unchanged lines get no target and so cannot be picked.
+ * A changed line's number picks it too, so the column can stay narrow while
+ * the target spans both.
  */
 export function linePickerGutter({
 	targets,
 	canPick,
 	widgetAnchor,
 }: LinePickerOptions) {
-	return gutter({
+	// Swallowing the press keeps focus where it was, so picking never raises
+	// the keyboard or starts a text selection.
+	function pickOnTap(
+		pickLine: (view: EditorView, event: Event) => number | null,
+	) {
+		return {
+			mousedown: (view: EditorView, _block: BlockInfo, event: Event) =>
+				pickLine(view, event) !== null,
+			click(view: EditorView, _block: BlockInfo, event: Event) {
+				const line = pickLine(view, event);
+				if (line === null) return false;
+				if (canPick(view.state)) {
+					view.dispatch({ effects: togglePickedLine.of(line) });
+				}
+				return true;
+			},
+		};
+	}
+
+	const pickGutter = gutter({
 		class: "cm-pickGutter",
 		lineMarker(view, block) {
 			const line = view.state.doc.lineAt(block.from).number;
@@ -238,18 +274,15 @@ export function linePickerGutter({
 				update.state.field(pickedLines) ||
 			targets(update.startState) !== targets(update.state) ||
 			canPick(update.startState) !== canPick(update.state),
-		domEventHandlers: {
-			// Swallowing the press keeps focus where it was, so picking never
-			// raises the keyboard or starts a text selection.
-			mousedown: (_view, _block, event) => pickTargetLine(event) !== null,
-			click(view, _block, event) {
-				const line = pickTargetLine(event);
-				if (line === null) return false;
-				if (canPick(view.state)) {
-					view.dispatch({ effects: togglePickedLine.of(line) });
-				}
-				return true;
-			},
-		},
+		domEventHandlers: pickOnTap((_view, event) => pickTargetLine(event)),
 	});
+
+	// Joins the editor's own line numbers rather than adding a second column.
+	const numberTargets = lineNumbers({
+		domEventHandlers: pickOnTap((view, event) =>
+			numberedPickLine(event, targets(view.state)),
+		),
+	});
+
+	return [pickGutter, numberTargets];
 }

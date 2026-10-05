@@ -138,10 +138,11 @@
 	color: #ffa198;
 	white-space: pre;
 	font-family: "SF Mono", "Fira Code", "Fira Mono", Menlo, Consolas, monospace;
-	font-size: 13px;
-	line-height: 1.4;
+	/* The editor's own text size and line height. */
+	font-size: 16px;
+	line-height: 1.5;
 	/* A blank deleted line still takes a line's height. */
-	min-height: 1.4em;
+	min-height: 1.5em;
 }
 
 .text-file-editor-surface--wrap .cm-deletedChunkLine {
@@ -149,15 +150,21 @@
 	overflow-wrap: anywhere;
 }
 
-/* Line picking: a gutter column of tap targets beside the line numbers. */
+/* Line picking: a gutter column of tap targets beside the line numbers. A
+   changed line's number is part of its target, so the column stays narrow. */
 .text-file-editor-surface .cm-pickGutter {
-	width: 1.75rem;
+	width: 2.25rem;
 	touch-action: manipulation;
 }
 
 .text-file-editor-surface .cm-pickTarget {
+	display: flex;
+	align-items: center;
+	justify-content: center;
 	height: 100%;
-	text-align: center;
+	font-size: 1.25rem;
+	font-weight: 700;
+	line-height: 1;
 	cursor: pointer;
 	user-select: none;
 	-webkit-tap-highlight-color: transparent;
