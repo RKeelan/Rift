@@ -2,12 +2,12 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type { Request, Response } from "express";
 import { Router } from "express";
-import { simpleGit } from "simple-git";
 import {
 	type RepoRoot,
 	resolveRepoInRoots,
 	resolveSafePath,
 } from "../pathUtils.js";
+import { repoGit } from "../repoGit.js";
 
 const MAX_ENTRIES = 1000;
 const MAX_FILE_SIZE = 1024 * 1024; // 1 MB
@@ -27,7 +27,7 @@ interface TextFileInfo {
 
 async function isGitRepo(dir: string): Promise<boolean> {
 	try {
-		const git = simpleGit(dir);
+		const git = repoGit(dir);
 		return await git.checkIsRepo();
 	} catch {
 		return false;
@@ -38,7 +38,7 @@ async function getIgnoredPaths(
 	workingDir: string,
 	entries: string[],
 ): Promise<Set<string>> {
-	const git = simpleGit(workingDir);
+	const git = repoGit(workingDir);
 	const ignored = new Set<string>();
 
 	if (entries.length === 0) return ignored;

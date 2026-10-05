@@ -4,12 +4,13 @@ import os from "node:os";
 import path from "node:path";
 import type { Request, Response } from "express";
 import { Router } from "express";
-import { type StatusResult, simpleGit } from "simple-git";
+import type { StatusResult } from "simple-git";
 import {
 	type RepoRoot,
 	resolveRepoInRoots,
 	resolveSafePath,
 } from "../pathUtils.js";
+import { repoGit } from "../repoGit.js";
 
 const MAX_DIFF_SIZE = 1024 * 1024; // 1 MB
 
@@ -79,7 +80,7 @@ async function resolveGitRepo(
 	roots: RepoRoot[],
 	req: Request,
 	res: Response,
-): Promise<ReturnType<typeof simpleGit> | null> {
+): Promise<ReturnType<typeof repoGit> | null> {
 	const repoName = req.query.repo as string;
 	if (!repoName) {
 		res.status(400).json({
@@ -101,7 +102,7 @@ async function resolveGitRepo(
 		res.status(status).json({ error: { code, message } });
 		return null;
 	}
-	return simpleGit(result.path);
+	return repoGit(result.path);
 }
 
 // A [start, end] pair of inclusive, 1-based line numbers naming lines in the
@@ -275,7 +276,7 @@ function checkDiffBlobs(diff: string, expectedBlobs: string | null): void {
 // diff it slices is the same output it checks against expectedBlobs, so the
 // patch holds exactly the lines the caller picked.
 async function applyPartialStage(
-	gitRoot: ReturnType<typeof simpleGit>,
+	gitRoot: ReturnType<typeof repoGit>,
 	relativePath: string,
 	ranges: LineRange[],
 	expectedBlobs: string | null,
@@ -299,7 +300,7 @@ async function applyPartialStage(
 // applyPartialStage. A no-op (returning early) when the selection covers no
 // staged change, so the caller can still return the current status.
 async function applyPartialUnstage(
-	gitRoot: ReturnType<typeof simpleGit>,
+	gitRoot: ReturnType<typeof repoGit>,
 	relativePath: string,
 	ranges: LineRange[],
 	expectedBlobs: string | null,
@@ -427,7 +428,7 @@ async function handleStageAction(
 		return;
 	}
 
-	const gitRoot = simpleGit(toplevel);
+	const gitRoot = repoGit(toplevel);
 	const relativePath = path.relative(toplevel, resolved);
 
 	if (
@@ -591,7 +592,7 @@ export function gitRoutes(roots: RepoRoot[]): Router {
 		}
 
 		const toplevel = (await git.revparse(["--show-toplevel"])).trim();
-		const gitRoot = simpleGit(toplevel);
+		const gitRoot = repoGit(toplevel);
 		const before = buildStatusEntries(await gitRoot.status());
 		if (!before.some((entry) => entry.staged)) {
 			res.status(400).json({
@@ -819,7 +820,7 @@ export function gitRoutes(roots: RepoRoot[]): Router {
 
 		try {
 			const relativePath = path.relative(toplevel, resolved);
-			const gitRoot = simpleGit(toplevel);
+			const gitRoot = repoGit(toplevel);
 			// Use git show which handles root commits (no parent) naturally
 			const diff = await gitRoot.raw([
 				"show",
@@ -887,7 +888,7 @@ export function gitRoutes(roots: RepoRoot[]): Router {
 
 		try {
 			const relativePath = toGitPath(path.relative(toplevel, resolved));
-			const gitRoot = simpleGit(toplevel);
+			const gitRoot = repoGit(toplevel);
 			// Unstaged edits are compared against the index, matching what
 			// `git diff` reports; staged edits are compared against HEAD. A
 			// file added but not yet committed has no HEAD version at all.
@@ -948,7 +949,7 @@ export function gitRoutes(roots: RepoRoot[]): Router {
 		const staged = req.query.staged === "true";
 		// Run the diff from the repo root so path interpretation is
 		// consistent with git status output (both repo-root-relative).
-		const gitRoot = simpleGit(toplevel);
+		const gitRoot = repoGit(toplevel);
 		const relativePath = path.relative(toplevel, resolved);
 		// Full blob ids on the index line let a caller name this diff when it
 		// stages or unstages lines read from it.
