@@ -187,6 +187,17 @@
 	text-decoration-color: rgba(255, 161, 152, 0.7);
 }
 
+/* The words a modified line changed, within the line and its deleted text. */
+.text-file-editor-surface .cm-changedLine--added .cm-changedWord {
+	background: rgba(46, 160, 67, 0.4);
+	border-radius: 2px;
+}
+
+.text-file-editor-surface .cm-deletedChunkLine .cm-changedWord {
+	background: rgba(248, 81, 73, 0.4);
+	border-radius: 2px;
+}
+
 /* CodeMirror measures a block widget by its border box, so a vertical margin
    here would push the gutters out of line with the text below it. */
 .text-file-editor-surface .cm-deletedChunk {

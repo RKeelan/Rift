@@ -268,6 +268,84 @@ export function getDiffOps(
 	return ops;
 }
 
+/** A run of characters within a line, as `[from, to)` offsets. */
+export type CharRange = [number, number];
+
+// A word is a run of letters, digits, underscores and apostrophes. Any other
+// character stands alone, except whitespace, which runs together.
+const WORD_TOKEN = /\s+|[\p{L}\p{N}_']+|[^\s\p{L}\p{N}_']/gu;
+
+// Below this share of words in common, a line reads as rewritten, and marking
+// its words would mark nearly all of them.
+const MIN_SHARED_WORDS = 0.35;
+
+function addCharRange(
+	ranges: CharRange[],
+	text: string,
+	from: number,
+	to: number,
+) {
+	const last = ranges[ranges.length - 1];
+	// Changed words with only unchanged whitespace between them read as one
+	// change.
+	if (last && /^\s*$/.test(text.slice(last[1], from))) {
+		last[1] = to;
+	} else {
+		ranges.push([from, to]);
+	}
+}
+
+/**
+ * The words that differ between an old and a new version of a line, as
+ * character ranges in each. Returns null when the two share too few words for
+ * marking the changed ones to help.
+ */
+export function getWordChanges(
+	before: string,
+	after: string,
+): { before: CharRange[]; after: CharRange[] } | null {
+	const beforeTokens = before.match(WORD_TOKEN) ?? [];
+	const afterTokens = after.match(WORD_TOKEN) ?? [];
+	const ops = getDiffOps(beforeTokens, afterTokens);
+	if (!ops) return null;
+
+	const changes: { before: CharRange[]; after: CharRange[] } = {
+		before: [],
+		after: [],
+	};
+	let beforeOffset = 0;
+	let afterOffset = 0;
+	let sharedWords = 0;
+	for (const { type, line: token } of ops) {
+		if (type === "equal") {
+			if (token.trim() !== "") sharedWords += 1;
+			beforeOffset += token.length;
+			afterOffset += token.length;
+		} else if (type === "delete") {
+			addCharRange(
+				changes.before,
+				before,
+				beforeOffset,
+				beforeOffset + token.length,
+			);
+			beforeOffset += token.length;
+		} else {
+			addCharRange(
+				changes.after,
+				after,
+				afterOffset,
+				afterOffset + token.length,
+			);
+			afterOffset += token.length;
+		}
+	}
+
+	const words = (tokens: string[]) =>
+		tokens.filter((token) => token.trim() !== "").length;
+	const totalWords = Math.max(words(beforeTokens), words(afterTokens));
+	return sharedWords < totalWords * MIN_SHARED_WORDS ? null : changes;
+}
+
 /**
  * Splits text, in the editor's `\n` terms, into git's lines and whether the
  * last of them ends with a newline.

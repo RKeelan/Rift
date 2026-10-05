@@ -11,6 +11,7 @@ import {
 	getChangeRegions,
 	getEditorChangeDecorations,
 	getLineChanges,
+	getWordMarks,
 	TextFileEditor,
 	WRITES_UNKNOWN_LABEL,
 } from "../components/TextFileEditor.tsx";
@@ -438,6 +439,63 @@ describe("getChangeRegions", () => {
 		);
 
 		expect(regions).toEqual([{ start: 4, end: 5 }]);
+	});
+});
+
+describe("getWordMarks", () => {
+	// Indexed by line number, so line 1 is "the quick red fox".
+	const lines = ["", "the quick red fox", "two", "lines", "same"];
+	const lineText = (lineNumber: number) => lines[lineNumber];
+
+	test("pairs a changed line with the line it replaced", () => {
+		const chunk = { anchorIndex: 0, lines: ["the quick brown fox"] };
+		const marks = getWordMarks(
+			{
+				lineHighlights: [{ kind: "added", lineNumber: 1 }],
+				deletedChunks: [chunk],
+			},
+			lineText,
+		);
+
+		expect([...marks.added]).toEqual([[1, [[10, 13]]]]);
+		expect(marks.deleted.get(chunk)).toEqual([[[10, 15]]]);
+	});
+
+	test("pairs the lines of a multi-line replacement in order", () => {
+		const chunk = { anchorIndex: 1, lines: ["one", "lines"] };
+		const marks = getWordMarks(
+			{
+				lineHighlights: [
+					{ kind: "added", lineNumber: 2 },
+					{ kind: "added", lineNumber: 3 },
+				],
+				deletedChunks: [chunk],
+			},
+			lineText,
+		);
+
+		// "one" and "two" share nothing, so that pair is left unmarked, and
+		// "lines" is unchanged, so it has nothing to mark.
+		expect(marks.deleted.get(chunk)).toEqual([null, []]);
+		expect(marks.added.has(2)).toBe(false);
+		expect(marks.added.get(3)).toEqual([]);
+	});
+
+	test("leaves a change that adds more lines than it removes unmarked", () => {
+		const chunk = { anchorIndex: 1, lines: ["one"] };
+		const marks = getWordMarks(
+			{
+				lineHighlights: [
+					{ kind: "added", lineNumber: 2 },
+					{ kind: "added", lineNumber: 3 },
+				],
+				deletedChunks: [chunk],
+			},
+			lineText,
+		);
+
+		expect(marks.added.size).toBe(0);
+		expect(marks.deleted.size).toBe(0);
 	});
 });
 
@@ -2026,6 +2084,57 @@ describe("change strips", () => {
 		});
 		expect(requests[0].url).toContain("/api/git/unstage");
 		expect(requests[0].body).toEqual({ path: "notes.txt", ranges: [[5, 6]] });
+	});
+});
+
+describe("word marks", () => {
+	const originalFetch = globalThis.fetch;
+
+	afterEach(() => {
+		cleanup();
+		globalThis.fetch = originalFetch;
+	});
+
+	function markedWords(container: HTMLElement, scope: string) {
+		return [...container.querySelectorAll(`${scope} .cm-changedWord`)].map(
+			(word) => word.textContent,
+		);
+	}
+
+	test("marks a modified line's changed words, in the line and in its deleted text", async () => {
+		globalThis.fetch = (async () =>
+			new Response("the quick red fox\nsame\n", {
+				headers: { "x-file-mtime-ms": "1" },
+			})) as unknown as typeof fetch;
+		const { container } = render(
+			<TextFileEditor
+				filePath="notes.txt"
+				repo="test-repo"
+				comparisonContent={"the quick brown fox\nsame\n"}
+				changeDiff={
+					"@@ -1,2 +1,2 @@\n-the quick brown fox\n+the quick red fox\n same\n"
+				}
+				changeType="modified"
+			/>,
+		);
+
+		await waitFor(() => {
+			expect(markedWords(container, ".cm-line")).toEqual(["red"]);
+			expect(markedWords(container, ".cm-deletedChunk")).toEqual(["brown"]);
+		});
+
+		// Unsaved edits are marked the same way.
+		const { EditorView } = await import("@codemirror/view");
+		const view = EditorView.findFromDOM(
+			container.querySelector(".cm-editor") as HTMLElement,
+		);
+		if (!view) throw new Error("editor view not found");
+		act(() => {
+			view.dispatch({ changes: { from: 10, to: 13, insert: "green" } });
+		});
+		await waitFor(() => {
+			expect(markedWords(container, ".cm-line")).toEqual(["green"]);
+		});
 	});
 });
 
