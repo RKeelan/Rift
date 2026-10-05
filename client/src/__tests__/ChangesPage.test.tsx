@@ -6,6 +6,7 @@ import {
 	render,
 	screen,
 	waitFor,
+	within,
 } from "@testing-library/react";
 import { useEffect } from "react";
 import {
@@ -179,6 +180,25 @@ function mockFetchForChanges(
 
 		return Promise.resolve(new Response("Not found", { status: 404 }));
 	}) as typeof fetch;
+}
+
+function editorBar(container: HTMLElement) {
+	const bar = container.querySelector<HTMLElement>(".text-file-editor-bar");
+	if (!bar) throw new Error("no editor bar");
+	return bar;
+}
+
+// Waits for an editable buffer, with the page's whole-file action offered in
+// the editor's bar.
+async function findEditableEditor(container: HTMLElement) {
+	await waitFor(() => {
+		expect(
+			container.querySelector(".cm-content")?.getAttribute("contenteditable"),
+		).toBe("true");
+		expect(
+			within(editorBar(container)).getByRole("button", { name: "Stage file" }),
+		).not.toBeNull();
+	});
 }
 
 describe("ChangesPage", () => {
@@ -370,9 +390,7 @@ describe("ChangesPage", () => {
 			);
 		});
 
-		await waitFor(() => {
-			expect(screen.getByRole("button", { name: "Save" })).not.toBeNull();
-		});
+		await findEditableEditor(container);
 		expect(screen.queryByRole("button", { name: "Show diff" })).toBeNull();
 
 		await waitFor(() => {
@@ -442,11 +460,13 @@ describe("ChangesPage", () => {
 			fireEvent.click(screen.getByText("src/utils.ts"));
 		});
 
-		await waitFor(() => {
-			expect(screen.getByRole("button", { name: "Save" })).not.toBeNull();
-			expect(screen.queryByRole("button", { name: "Show diff" })).toBeNull();
-			expect(screen.queryByRole("button", { name: "Show file" })).toBeNull();
-		});
+		await findEditableEditor(container);
+		expect(screen.queryByRole("button", { name: "Show diff" }) === null).toBe(
+			true,
+		);
+		expect(screen.queryByRole("button", { name: "Show file" }) === null).toBe(
+			true,
+		);
 
 		await waitFor(() => {
 			expect(container.querySelector(".cm-changedLine--added")).not.toBeNull();
@@ -488,9 +508,7 @@ describe("ChangesPage", () => {
 			fireEvent.click(screen.getByText("src/added.ts"));
 		});
 
-		await waitFor(() => {
-			expect(screen.getByRole("button", { name: "Save" })).not.toBeNull();
-		});
+		await findEditableEditor(container);
 
 		expect(screen.queryByRole("alert")).toBeNull();
 		expect(container.querySelector(".cm-deletedChunkLine")).toBeNull();
@@ -529,9 +547,7 @@ describe("ChangesPage", () => {
 			fireEvent.click(screen.getByText("README.md"));
 		});
 
-		await waitFor(() => {
-			expect(screen.getByRole("button", { name: "Save" })).not.toBeNull();
-		});
+		await findEditableEditor(container);
 
 		await waitFor(() => {
 			const deletedLines = Array.from(
@@ -725,8 +741,8 @@ describe("ChangesPage", () => {
 		fireEvent.click(container.querySelector(".changes-file-entry") as Element);
 
 		// The editor fetches the diff once to decorate its changes.
+		await findEditableEditor(container);
 		await waitFor(() => {
-			expect(screen.getByRole("button", { name: "Save" })).not.toBeNull();
 			expect(diffRequests).toBe(1);
 		});
 
@@ -777,12 +793,6 @@ describe("ChangesPage", () => {
 			return result;
 		}
 
-		function headerStage(container: HTMLElement) {
-			return container.querySelector(
-				".changes-diff-header .changes-header-button",
-			) as HTMLButtonElement;
-		}
-
 		test("asks before leaving the file", async () => {
 			const { container } = await openAndEdit();
 			const back = screen.getByRole("button", {
@@ -810,11 +820,18 @@ describe("ChangesPage", () => {
 			expect(container.querySelector(".cm-content") === null).toBe(true);
 		});
 
-		test("refuses to stage the saved file from the header", async () => {
+		test("offers Save rather than staging the file as saved", async () => {
 			const { container } = await openAndEdit();
 
-			// Staging from the header acts on the file as saved, not as shown.
-			expect(headerStage(container).disabled).toBe(true);
+			// Staging the whole file acts on the file as saved, not as shown, so
+			// the edits are saved first.
+			const bar = within(editorBar(container));
+			expect(
+				bar.getByRole("button", { name: "Save" }).hasAttribute("disabled"),
+			).toBe(false);
+			expect(screen.queryByRole("button", { name: /^Stage/ }) === null).toBe(
+				true,
+			);
 		});
 
 		async function reopen(container: HTMLElement) {
@@ -979,12 +996,235 @@ describe("ChangesPage", () => {
 			expect(diffRequests).toBe(1);
 		});
 
-		fireEvent.click(screen.getByRole("button", { name: "Reload" }));
+		fireEvent.click(screen.getByRole("button", { name: "More actions" }));
+		fireEvent.click(screen.getByRole("menuitem", { name: "Reload" }));
 
 		// The file was reread, so git's diff of it is reread too.
 		await waitFor(() => {
 			expect(diffRequests).toBe(2);
 		});
+	});
+
+	test("puts the editor's menu in its header", async () => {
+		mockFetchForChanges(
+			[{ path: "app.ts", status: "modified", staged: false }],
+			{
+				baseContent: { path: "app.ts", content: "previous\n" },
+				diff: {
+					path: "app.ts",
+					diff: "@@ -1 +1 @@\n-previous\n+current\n",
+					truncated: false,
+				},
+				fileContent: { path: "app.ts", content: "current\n" },
+			},
+		);
+
+		const { container } = renderChangesPage();
+		await waitFor(() => {
+			expect(container.querySelector(".changes-file-entry")).not.toBeNull();
+		});
+		fireEvent.click(container.querySelector(".changes-file-entry") as Element);
+		await findEditableEditor(container);
+
+		const slot = container.querySelector(
+			".changes-diff-header .changes-header-menu",
+		) as HTMLElement;
+		await waitFor(() => {
+			const more = screen.getByRole("button", { name: "More actions" });
+			expect(slot.contains(more)).toBe(true);
+			expect(editorBar(container).contains(more)).toBe(false);
+		});
+
+		fireEvent.click(screen.getByRole("button", { name: "More actions" }));
+		expect(slot.contains(screen.getByRole("menu"))).toBe(true);
+	});
+
+	test("offers the action on the whole file in the editor's bar", async () => {
+		for (const { status, staged, label } of [
+			{ status: "modified", staged: false, label: "Stage file" },
+			{ status: "modified", staged: true, label: "Unstage file" },
+			{ status: "deleted", staged: false, label: "Stage deletion" },
+			{ status: "deleted", staged: true, label: "Unstage deletion" },
+		]) {
+			mockFetchForChanges([{ path: "app.ts", status, staged }], {
+				baseContent: { path: "app.ts", content: "previous\n" },
+				diff: {
+					path: "app.ts",
+					diff: "@@ -1 +1 @@\n-previous\n+current\n",
+					truncated: false,
+				},
+				fileContent: { path: "app.ts", content: "current\n" },
+			});
+
+			const { container } = renderChangesPage();
+			await waitFor(() => {
+				expect(container.querySelector(".changes-file-entry")).not.toBeNull();
+			});
+			fireEvent.click(
+				container.querySelector(".changes-file-entry") as Element,
+			);
+			await waitFor(() => {
+				expect(container.querySelector(".cm-content")).not.toBeNull();
+			});
+
+			const action = within(editorBar(container)).getByRole("button", {
+				name: label,
+			}) as HTMLButtonElement;
+			expect(action.disabled).toBe(false);
+			// The header holds no action of its own.
+			const header = container.querySelector(
+				".changes-diff-header",
+			) as HTMLElement;
+			expect(
+				within(header).queryByRole("button", { name: /Stage|Unstage/ }) ===
+					null,
+			).toBe(true);
+			if (status === "deleted") {
+				expect(
+					container.querySelector(".changes-editor-note")?.textContent,
+				).toBe("Viewing the deleted file.");
+			}
+			cleanup();
+		}
+	});
+
+	test("stages the whole file from the editor's bar and returns to the list", async () => {
+		const stageBodies: string[] = [];
+		let files: StatusFile[] = [
+			{ path: "app.ts", status: "modified", staged: false },
+		];
+		let finishStage = () => {};
+
+		globalThis.fetch = mock(
+			(input: string | URL | Request, init?: RequestInit) => {
+				const url = typeof input === "string" ? input : input.toString();
+				const json = () =>
+					new Response(JSON.stringify({ files }), {
+						status: 200,
+						headers: { "Content-Type": "application/json" },
+					});
+
+				if (url.includes("/api/git/stage")) {
+					stageBodies.push(String(init?.body ?? ""));
+					return new Promise<Response>((resolve) => {
+						finishStage = () => {
+							files = [{ path: "app.ts", status: "modified", staged: true }];
+							resolve(json());
+						};
+					});
+				}
+				if (url.includes("/api/git/status")) {
+					return Promise.resolve(json());
+				}
+				if (url.includes("/api/files/content")) {
+					return Promise.resolve(
+						new Response("current\n", {
+							status: 200,
+							headers: { "x-file-mtime-ms": "1" },
+						}),
+					);
+				}
+				return Promise.resolve(new Response("Not found", { status: 404 }));
+			},
+		) as typeof fetch;
+
+		const { container } = renderChangesPage();
+		await waitFor(() => {
+			expect(container.querySelector(".changes-file-entry")).not.toBeNull();
+		});
+		fireEvent.click(container.querySelector(".changes-file-entry") as Element);
+		await findEditableEditor(container);
+
+		const stageFile = within(editorBar(container)).getByRole("button", {
+			name: "Stage file",
+		}) as HTMLButtonElement;
+		fireEvent.click(stageFile);
+
+		// The action waits for the server, rather than being sent twice.
+		await waitFor(() => {
+			expect(stageBodies.length).toBe(1);
+			expect(stageFile.disabled).toBe(true);
+		});
+		expect(JSON.parse(stageBodies[0])).toEqual({ path: "app.ts" });
+
+		await act(async () => {
+			finishStage();
+		});
+		await waitFor(() => {
+			expect(container.querySelector(".changes-page")).not.toBeNull();
+			expect(container.querySelector(".changes-diff-view") === null).toBe(true);
+		});
+		expect(screen.getByLabelText("Unstage app.ts")).not.toBeNull();
+	});
+
+	test("stages an untracked file as shown, then returns to the list", async () => {
+		const stageBodies: string[] = [];
+		let files: StatusFile[] = [
+			{ path: "new.ts", status: "untracked", staged: false },
+		];
+
+		globalThis.fetch = mock(
+			(input: string | URL | Request, init?: RequestInit) => {
+				const url = typeof input === "string" ? input : input.toString();
+				const json = () =>
+					new Response(JSON.stringify({ files }), {
+						status: 200,
+						headers: { "Content-Type": "application/json" },
+					});
+
+				if (url.includes("/api/git/stage")) {
+					stageBodies.push(String(init?.body ?? ""));
+					files = [{ path: "new.ts", status: "added", staged: true }];
+					return Promise.resolve(json());
+				}
+				if (url.includes("/api/git/status")) {
+					return Promise.resolve(json());
+				}
+				if (url.includes("/api/files/content")) {
+					return Promise.resolve(
+						new Response("current\n", {
+							status: 200,
+							headers: { "x-file-mtime-ms": "1" },
+						}),
+					);
+				}
+				return Promise.resolve(new Response("Not found", { status: 404 }));
+			},
+		) as typeof fetch;
+
+		const { container } = renderChangesPage();
+		await waitFor(() => {
+			expect(container.querySelector(".changes-file-entry")).not.toBeNull();
+		});
+		fireEvent.click(container.querySelector(".changes-file-entry") as Element);
+		await waitFor(() => {
+			expect(container.querySelector(".cm-content")).not.toBeNull();
+		});
+
+		const stageFile = await waitFor(() => {
+			const button = within(editorBar(container)).getByRole("button", {
+				name: "Stage file",
+			}) as HTMLButtonElement;
+			expect(button.disabled).toBe(false);
+			return button;
+		});
+		fireEvent.click(stageFile);
+
+		// The editor names the version on screen, so a file changed on disk
+		// since it loaded is refused rather than staged unseen.
+		await waitFor(() => {
+			expect(stageBodies.length).toBe(1);
+		});
+		expect(JSON.parse(stageBodies[0])).toEqual({
+			path: "new.ts",
+			expectedMtimeMs: 1,
+		});
+
+		await waitFor(() => {
+			expect(container.querySelector(".changes-page")).not.toBeNull();
+			expect(container.querySelector(".changes-diff-view") === null).toBe(true);
+		});
+		expect(screen.getByLabelText("Unstage new.ts")).not.toBeNull();
 	});
 
 	test("refresh button is present", async () => {
@@ -1064,7 +1304,7 @@ describe("ChangesPage", () => {
 		});
 	});
 
-	test("unstages a whole staged file from the detail header and returns to the list", async () => {
+	test("unstages a whole staged file from the editor's bar and returns to the list", async () => {
 		const unstageBodies: string[] = [];
 		let files: StatusFile[] = [
 			{ path: "app.ts", status: "modified", staged: true },
@@ -1122,20 +1362,19 @@ describe("ChangesPage", () => {
 			expect(container.querySelector(".changes-diff-view")).not.toBeNull();
 		});
 
-		// The editor also offers a line-level Unstage, so target the header's
-		// whole-file button, which returns to the list.
-		const header = container.querySelector(".changes-diff-header") as Element;
-		const unstageButton = Array.from(header.querySelectorAll("button")).find(
-			(button) => button.textContent === "Unstage",
-		) as HTMLButtonElement;
-		fireEvent.click(unstageButton);
+		fireEvent.click(
+			within(editorBar(container)).getByRole("button", {
+				name: "Unstage file",
+			}),
+		);
 
 		await waitFor(() => {
 			expect(unstageBodies.length).toBe(1);
-			expect(JSON.parse(unstageBodies[0]).path).toBe("app.ts");
 			expect(container.querySelector(".changes-page")).not.toBeNull();
 			expect(container.querySelector(".changes-diff-view")).toBeNull();
 		});
+		// The whole file unstages, so no lines are named.
+		expect(JSON.parse(unstageBodies[0])).toEqual({ path: "app.ts" });
 	});
 
 	test("disables staging and editing when the server refuses writes", async () => {
@@ -1179,14 +1418,16 @@ describe("ChangesPage", () => {
 		});
 		expect(screen.getByText("Read-only: writes are disabled")).not.toBeNull();
 		expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
-		const header = container.querySelector(".changes-diff-header") as Element;
 		const stageButtons = Array.from(
 			container.querySelectorAll("button"),
-		).filter((button) => button.textContent === "Stage");
-		// Only the header's whole-file button remains, and it is disabled.
+		).filter((button) => button.textContent?.startsWith("Stage"));
+		// Only the bar's whole-file action remains, and it is disabled.
 		expect(stageButtons.length).toBe(1);
-		expect(header.contains(stageButtons[0])).toBe(true);
-		expect((stageButtons[0] as HTMLButtonElement).disabled).toBe(true);
+		const [stageFile] = stageButtons;
+		expect(stageFile.textContent).toBe("Stage file");
+		expect(editorBar(container).contains(stageFile)).toBe(true);
+		expect(stageFile.disabled).toBe(true);
+		expect(stageFile.title).toBe("The server does not allow changes");
 	});
 
 	test("offers no changes until the server says whether it allows them", async () => {
@@ -1230,12 +1471,11 @@ describe("ChangesPage", () => {
 		expect(screen.queryByText("Read-only: writes are disabled")).toBeNull();
 		expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
 		expect(container.querySelectorAll(".cm-pickTarget").length).toBe(0);
-		const header = container.querySelector(".changes-diff-header") as Element;
-		const headerStage = Array.from(header.querySelectorAll("button")).find(
-			(button) => button.textContent === "Stage",
-		) as HTMLButtonElement;
-		expect(headerStage.disabled).toBe(true);
-		expect(headerStage.hasAttribute("title")).toBe(false);
+		const stageFile = within(editorBar(container)).getByRole("button", {
+			name: "Stage file",
+		}) as HTMLButtonElement;
+		expect(stageFile.disabled).toBe(true);
+		expect(stageFile.hasAttribute("title")).toBe(false);
 	});
 
 	test("shows the server's message when it refuses a write", async () => {
