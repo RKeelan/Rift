@@ -16,28 +16,6 @@
 	--editor-syntax-link: #7cc9ff;
 }
 
-.text-file-editor-toolbar {
-	display: flex;
-	align-items: center;
-	justify-content: space-between;
-	gap: 0.75rem;
-	padding: 0.5rem 0.75rem;
-	border-bottom: 1px solid var(--color-border);
-	background: var(--color-surface);
-	flex-shrink: 0;
-}
-
-.text-file-editor-status {
-	font-size: 0.8125rem;
-	color: var(--color-text-muted);
-}
-
-.text-file-editor-actions {
-	display: flex;
-	align-items: center;
-	gap: 0.5rem;
-}
-
 .text-file-editor-button {
 	border: 1px solid var(--color-border);
 	background: var(--color-surface);
@@ -60,15 +38,99 @@
 	padding: 0.375rem;
 }
 
-.text-file-editor-button--active {
-	border-color: var(--color-primary);
-	color: var(--color-primary);
-}
-
 .text-file-editor-button--primary {
 	background: var(--color-primary);
 	border-color: var(--color-primary);
 	color: var(--color-surface);
+}
+
+/* The action bar sits under the editor, just above the app's tabs. */
+.text-file-editor-bar {
+	display: flex;
+	align-items: center;
+	gap: 0.5rem;
+	padding: 0.5rem 0.75rem;
+	border-top: 1px solid var(--color-border);
+	background: var(--color-surface);
+	flex-shrink: 0;
+}
+
+.text-file-editor-bar .text-file-editor-button {
+	min-width: 48px;
+	min-height: 48px;
+	padding: 0 1rem;
+	font-size: 1rem;
+}
+
+.text-file-editor-bar .text-file-editor-button--icon {
+	padding: 0;
+}
+
+.text-file-editor-status {
+	flex: 1;
+	min-width: 0;
+	font-size: 0.875rem;
+	color: var(--color-text-muted);
+}
+
+/* The menu of less frequent actions, in the page's header or the bar. */
+.text-file-editor-menu {
+	position: relative;
+	flex-shrink: 0;
+}
+
+.text-file-editor-menu > .text-file-editor-button {
+	min-width: 48px;
+	min-height: 48px;
+	border: 0;
+	background: none;
+}
+
+.text-file-editor-menu-list {
+	position: absolute;
+	top: calc(100% + 4px);
+	right: 0;
+	/* Above CodeMirror's sticky gutters. */
+	z-index: 1000;
+	display: flex;
+	flex-direction: column;
+	min-width: 12rem;
+	padding: 0.25rem 0;
+	border: 1px solid var(--color-border);
+	border-radius: 8px;
+	background: var(--color-surface-raised);
+	box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
+}
+
+.text-file-editor-bar .text-file-editor-menu-list {
+	top: auto;
+	right: auto;
+	bottom: calc(100% + 4px);
+	left: 0;
+}
+
+.text-file-editor-menu-item {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	min-height: 48px;
+	padding: 0 1rem;
+	border: 0;
+	background: none;
+	color: var(--color-text);
+	font-size: 1rem;
+	text-align: left;
+	cursor: pointer;
+}
+
+.text-file-editor-menu-item:disabled {
+	opacity: 0.5;
+	cursor: default;
+}
+
+.text-file-editor-menu-item[aria-checked="true"]::after {
+	content: "\2713";
+	color: var(--color-primary);
 }
 
 .text-file-editor-message {

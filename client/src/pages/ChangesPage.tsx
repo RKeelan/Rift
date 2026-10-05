@@ -4,6 +4,7 @@ import { useSearchParams } from "react-router-dom";
 import { apiUrl } from "../apiUrl.ts";
 import { useErrorBanner } from "../components/ErrorBanner.tsx";
 import {
+	type FileAction,
 	TextFileEditor,
 	WRITES_DISABLED_LABEL,
 	WRITES_UNKNOWN_LABEL,
@@ -86,10 +87,12 @@ export function ChangesPage({
 	// Bumped after a save, which changes the working tree but not the index, so
 	// only git's diff needs refetching.
 	const [diffRefreshToken, setDiffRefreshToken] = useState(0);
-	// Whether the open editor holds unsaved edits, which leaving the file or
-	// staging it from the header would lose.
+	// Whether the open editor holds unsaved edits, which leaving the file would
+	// lose and staging the whole file would leave out.
 	const [editorDirty, setEditorDirty] = useState(false);
 	const [confirmingDiscard, setConfirmingDiscard] = useState(false);
+	// The header slot the open editor puts its menu in.
+	const [menuHost, setMenuHost] = useState<HTMLElement | null>(null);
 	const abortRef = useRef<AbortController | null>(null);
 	const diffAbortRef = useRef<AbortController | null>(null);
 	const comparisonAbortRef = useRef<AbortController | null>(null);
@@ -325,9 +328,17 @@ export function ChangesPage({
 		if (!editorDirty) setConfirmingDiscard(false);
 	}, [editorDirty]);
 
+	// An untracked file stages whole through the editor, which names the version
+	// on screen by its modification time. Like the page's own action on the
+	// whole file, staging it returns to the list.
+	const handleUntrackedStaged = useCallback(() => {
+		fetchStatus(true);
+		leaveDetail();
+	}, [fetchStatus, leaveDetail]);
+
 	const handleDetailStageToggle = useCallback(async () => {
-		// Staging from the header acts on the file as saved, not as shown, so it
-		// waits until the editor's edits are saved.
+		// Staging the whole file acts on it as saved, not as shown, so it waits
+		// until the editor's edits are saved.
 		if (!selected || editorDirty) return;
 		// Staging can move the file between sections, so the current selection may
 		// no longer exist afterwards; return to the list showing the new state.
@@ -473,6 +484,17 @@ export function ChangesPage({
 
 	// Detail view: every change type opens in the editor.
 	if (selected) {
+		// Staging or unstaging the whole file, offered in the editor's bar.
+		const fileAction = (label: string): FileAction => ({
+			label,
+			onClick: () => {
+				void handleDetailStageToggle();
+			},
+			// The bar offers Save in its place while the buffer has unsaved
+			// edits, so only refused writes need explaining.
+			disabled: actionPending || !canWrite || editorDirty,
+			title: writesRefused ? WRITES_DISABLED_TITLE : undefined,
+		});
 		return (
 			<div className="changes-diff-view">
 				<header className="changes-diff-header">
@@ -488,23 +510,7 @@ export function ChangesPage({
 					<span className="changes-diff-staged-label">
 						{selected.staged ? "staged" : "unstaged"}
 					</span>
-					<button
-						type="button"
-						className="changes-header-button"
-						onClick={() => {
-							void handleDetailStageToggle();
-						}}
-						disabled={actionPending || !canWrite || editorDirty}
-						title={
-							writesRefused
-								? WRITES_DISABLED_TITLE
-								: editorDirty
-									? "Save before staging"
-									: undefined
-						}
-					>
-						{selected.staged ? "Unstage" : "Stage"}
-					</button>
+					<div className="changes-header-menu" ref={setMenuHost} />
 				</header>
 				{confirmingDiscard && (
 					<div className="changes-discard-confirm" role="alert">
@@ -542,9 +548,19 @@ export function ChangesPage({
 								readOnly={!canWrite}
 								readOnlyLabel={editorReadOnlyLabel}
 								onSaved={handleEditorSaved}
-								onStaged={handleEditorStaged}
+								onStaged={
+									selectedStatus === "untracked"
+										? handleUntrackedStaged
+										: handleEditorStaged
+								}
 								onReload={handleEditorReload}
 								onDirtyChange={setEditorDirty}
+								fileAction={
+									selectedStatus === "untracked"
+										? undefined
+										: fileAction("Stage file")
+								}
+								menuHost={menuHost}
 							/>
 						</div>
 					)}
@@ -562,15 +578,15 @@ export function ChangesPage({
 								staged
 								onUnstaged={handleEditorUnstaged}
 								onReload={handleEditorReload}
+								fileAction={fileAction("Unstage file")}
+								menuHost={menuHost}
 							/>
 						</div>
 					)}
 					{selectedView === "deleted" && selectedDeleted && (
 						<div className="changes-editor-view">
 							<div className="changes-editor-note">
-								Viewing the deleted file. Use{" "}
-								{selected.staged ? "Unstage" : "Stage"} above to{" "}
-								{selected.staged ? "restore it" : "stage the deletion"}.
+								Viewing the deleted file.
 							</div>
 							<TextFileEditor
 								changeType="deleted"
@@ -578,6 +594,10 @@ export function ChangesPage({
 								repo={repoName as string}
 								staged={selected.staged}
 								deleted
+								fileAction={fileAction(
+									selected.staged ? "Unstage deletion" : "Stage deletion",
+								)}
+								menuHost={menuHost}
 							/>
 						</div>
 					)}
