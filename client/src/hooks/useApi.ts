@@ -57,7 +57,10 @@ export function useApi() {
 
 				const response = await fetch(apiUrl(url), {
 					...fetchOptions,
-					signal: controller.signal,
+					// A caller's own signal, such as a timeout, aborts the request too.
+					signal: fetchOptions.signal
+						? AbortSignal.any([controller.signal, fetchOptions.signal])
+						: controller.signal,
 					headers,
 				});
 

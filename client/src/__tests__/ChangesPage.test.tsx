@@ -24,6 +24,8 @@ const originalFetch = globalThis.fetch;
 afterEach(() => {
 	cleanup();
 	globalThis.fetch = originalFetch;
+	// Unsaved edits are kept as drafts in local storage.
+	globalThis.localStorage.clear();
 });
 
 // Test wrapper that selects a repository
@@ -52,7 +54,7 @@ function RouterHarness({ children }: { children: React.ReactNode }) {
 
 function renderChangesPage(
 	initialEntries = ["/changes"],
-	props: { writesAllowed?: boolean } = {},
+	props: { writesAllowed?: boolean | null } = {},
 ) {
 	return render(
 		<MemoryRouter initialEntries={initialEntries}>
@@ -737,6 +739,127 @@ describe("ChangesPage", () => {
 		});
 	});
 
+	describe("with unsaved edits", () => {
+		async function openAndEdit() {
+			mockFetchForChanges(
+				[{ path: "app.ts", status: "modified", staged: false }],
+				{
+					baseContent: { path: "app.ts", content: "previous\n" },
+					diff: {
+						path: "app.ts",
+						diff: "@@ -1 +1 @@\n-previous\n+current\n",
+						truncated: false,
+					},
+					fileContent: { path: "app.ts", content: "current\n" },
+				},
+			);
+			const result = renderChangesPage();
+			await waitFor(() => {
+				expect(
+					result.container.querySelectorAll(".changes-file-entry").length,
+				).toBe(1);
+			});
+			fireEvent.click(
+				result.container.querySelector(".changes-file-entry") as Element,
+			);
+			await waitFor(() => {
+				expect(result.container.querySelector(".cm-content")).not.toBeNull();
+			});
+
+			const { EditorView } = await import("@codemirror/view");
+			const view = EditorView.findFromDOM(
+				result.container.querySelector(".cm-editor") as HTMLElement,
+			);
+			act(() => {
+				view?.dispatch({ changes: { from: 0, insert: "edited " } });
+			});
+			await screen.findByText("Unsaved changes");
+			return result;
+		}
+
+		function headerStage(container: HTMLElement) {
+			return container.querySelector(
+				".changes-diff-header .changes-header-button",
+			) as HTMLButtonElement;
+		}
+
+		test("asks before leaving the file", async () => {
+			const { container } = await openAndEdit();
+			const back = screen.getByRole("button", {
+				name: "Back to changes list",
+			});
+
+			fireEvent.click(back);
+
+			expect(await screen.findByText("Discard unsaved changes?")).toBeDefined();
+			expect(container.querySelector(".cm-content") === null).toBe(false);
+
+			// Keeping the edits leaves the editor as it was.
+			fireEvent.click(screen.getByRole("button", { name: "Keep editing" }));
+			expect(screen.queryByText("Discard unsaved changes?") === null).toBe(
+				true,
+			);
+			expect(container.querySelector(".cm-content") === null).toBe(false);
+
+			fireEvent.click(back);
+			fireEvent.click(await screen.findByRole("button", { name: "Discard" }));
+
+			await waitFor(() => {
+				expect(screen.getByTestId("location-search").textContent).toBe("");
+			});
+			expect(container.querySelector(".cm-content") === null).toBe(true);
+		});
+
+		test("refuses to stage the saved file from the header", async () => {
+			const { container } = await openAndEdit();
+
+			// Staging from the header acts on the file as saved, not as shown.
+			expect(headerStage(container).disabled).toBe(true);
+		});
+
+		async function reopen(container: HTMLElement) {
+			await waitFor(() => {
+				expect(container.querySelector(".cm-content") === null).toBe(true);
+			});
+			fireEvent.click(
+				container.querySelector(".changes-file-entry") as Element,
+			);
+			await waitFor(() => {
+				expect(container.querySelector(".cm-content") === null).toBe(false);
+			});
+		}
+
+		test("offers the edits back after leaving by history", async () => {
+			const { container } = await openAndEdit();
+
+			// A back gesture pops the history entry without asking.
+			fireEvent.click(screen.getByRole("button", { name: "History back" }));
+			await reopen(container);
+
+			fireEvent.click(await screen.findByRole("button", { name: "Restore" }));
+
+			await waitFor(() => {
+				expect(container.querySelector(".cm-line")?.textContent).toBe(
+					"edited current",
+				);
+			});
+		});
+
+		test("drops the edits when leaving with Discard", async () => {
+			const { container } = await openAndEdit();
+
+			fireEvent.click(
+				screen.getByRole("button", { name: "Back to changes list" }),
+			);
+			fireEvent.click(await screen.findByRole("button", { name: "Discard" }));
+			await reopen(container);
+
+			expect(screen.queryByRole("button", { name: "Restore" }) === null).toBe(
+				true,
+			);
+		});
+	});
+
 	test("refetches the diff after the editor saves", async () => {
 		let diffRequests = 0;
 
@@ -1064,6 +1187,55 @@ describe("ChangesPage", () => {
 		expect(stageButtons.length).toBe(1);
 		expect(header.contains(stageButtons[0])).toBe(true);
 		expect((stageButtons[0] as HTMLButtonElement).disabled).toBe(true);
+	});
+
+	test("offers no changes until the server says whether it allows them", async () => {
+		mockFetchForChanges(
+			[{ path: "app.ts", status: "modified", staged: false }],
+			{
+				baseContent: { path: "app.ts", content: "const a = 0;\n" },
+				diff: {
+					path: "app.ts",
+					diff: "@@ -1 +1 @@\n-const a = 0;\n+const a = 1;\n",
+					truncated: false,
+				},
+				fileContent: { path: "app.ts", content: "const a = 1;\n" },
+			},
+		);
+
+		const { container } = renderChangesPage(["/changes"], {
+			writesAllowed: null,
+		});
+
+		await waitFor(() => {
+			expect(screen.getByLabelText("Stage app.ts")).not.toBeNull();
+		});
+		const listStage = screen.getByLabelText(
+			"Stage app.ts",
+		) as HTMLButtonElement;
+		expect(listStage.disabled).toBe(true);
+		expect(listStage.title).toBe("Stage");
+		expect(screen.queryByRole("note")).toBeNull();
+
+		await act(async () => {
+			fireEvent.click(screen.getByText("app.ts"));
+		});
+
+		// Once the change is drawn, a page that allowed writes would offer its
+		// lines for picking.
+		await waitFor(() => {
+			expect(container.querySelector(".cm-changedLine")).not.toBeNull();
+		});
+		expect(screen.getByText("Checking write access...")).not.toBeNull();
+		expect(screen.queryByText("Read-only: writes are disabled")).toBeNull();
+		expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
+		expect(container.querySelectorAll(".cm-pickTarget").length).toBe(0);
+		const header = container.querySelector(".changes-diff-header") as Element;
+		const headerStage = Array.from(header.querySelectorAll("button")).find(
+			(button) => button.textContent === "Stage",
+		) as HTMLButtonElement;
+		expect(headerStage.disabled).toBe(true);
+		expect(headerStage.hasAttribute("title")).toBe(false);
 	});
 
 	test("shows the server's message when it refuses a write", async () => {

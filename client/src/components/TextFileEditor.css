@@ -91,6 +91,17 @@
 	background: var(--color-surface);
 }
 
+.text-file-editor-notice--draft {
+	display: flex;
+	align-items: center;
+	gap: 0.5rem;
+	color: var(--color-text);
+}
+
+.text-file-editor-notice-text {
+	flex: 1;
+}
+
 .text-file-editor-surface {
 	flex: 1;
 	overflow: hidden;
