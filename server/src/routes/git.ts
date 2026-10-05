@@ -250,15 +250,38 @@ export function buildPartialPatch(
 	return `${out.join("\n")}\n`;
 }
 
+/**
+ * The `<from>..<to>` blob ids on a single-file diff's `index` line, or null
+ * when it has none, as an empty diff does. Two diffs that name the same blobs
+ * on both sides are the same diff, so their line numbers mean the same lines.
+ */
+function diffBlobs(diff: string): string | null {
+	return /^index ([0-9a-f]+\.\.[0-9a-f]+)/m.exec(diff)?.[1] ?? null;
+}
+
+// Thrown when the diff about to be acted on is not the one the caller read
+// its line numbers from.
+class StaleDiffError extends Error {}
+
+function checkDiffBlobs(diff: string, expectedBlobs: string | null): void {
+	if (expectedBlobs !== null && diffBlobs(diff) !== expectedBlobs) {
+		throw new StaleDiffError("The diff changed since it was read");
+	}
+}
+
 // Stages the selected lines of a change by rebuilding a partial patch and
 // applying it to the index. A no-op (returning false) when the selection
-// covers no change, so the caller can still return the current status.
+// covers no change, so the caller can still return the current status. The
+// diff it slices is the same output it checks against expectedBlobs, so the
+// patch holds exactly the lines the caller picked.
 async function applyPartialStage(
 	gitRoot: ReturnType<typeof simpleGit>,
 	relativePath: string,
 	ranges: LineRange[],
+	expectedBlobs: string | null,
 ): Promise<void> {
-	const diff = await gitRoot.diff(["--", relativePath]);
+	const diff = await gitRoot.diff(["--full-index", "--", relativePath]);
+	checkDiffBlobs(diff, expectedBlobs);
 	const patch = buildPartialPatch(diff, ranges);
 	if (patch === null) return;
 
@@ -279,8 +302,15 @@ async function applyPartialUnstage(
 	gitRoot: ReturnType<typeof simpleGit>,
 	relativePath: string,
 	ranges: LineRange[],
+	expectedBlobs: string | null,
 ): Promise<void> {
-	const diff = await gitRoot.diff(["--cached", "--", relativePath]);
+	const diff = await gitRoot.diff([
+		"--cached",
+		"--full-index",
+		"--",
+		relativePath,
+	]);
+	checkDiffBlobs(diff, expectedBlobs);
 	const patch = buildPartialPatch(diff, ranges, true);
 	if (patch === null) return;
 
@@ -346,6 +376,43 @@ async function handleStageAction(
 		}
 	}
 
+	// Line numbers only mean something against the diff they were read from,
+	// and a stale number applies cleanly to whatever line now sits there. So a
+	// caller may name that diff by the full blob ids on its `index` line, and
+	// the action is refused unless the diff about to be acted on names the same
+	// blobs. Staging an untracked file whole has no diff, so it may name the
+	// file's modification time instead.
+	const expectedBlobs: unknown = req.body?.expectedBlobs;
+	if (
+		expectedBlobs !== undefined &&
+		(typeof expectedBlobs !== "string" ||
+			!/^(?:[0-9a-f]{40}|[0-9a-f]{64})\.\.(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(
+				expectedBlobs,
+			))
+	) {
+		res.status(400).json({
+			error: {
+				code: "INVALID_BLOBS",
+				message: "expectedBlobs must name two full object ids, as <from>..<to>",
+			},
+		});
+		return;
+	}
+	const expectedMtimeMs: unknown = req.body?.expectedMtimeMs;
+	if (
+		action === "stage" &&
+		expectedMtimeMs !== undefined &&
+		(typeof expectedMtimeMs !== "number" || !Number.isFinite(expectedMtimeMs))
+	) {
+		res.status(400).json({
+			error: {
+				code: "INVALID_MTIME",
+				message: "expectedMtimeMs must be a number",
+			},
+		});
+		return;
+	}
+
 	// git status reports repo-root-relative paths, so validate and run against
 	// the repo root even when the server was started from a subdirectory.
 	const toplevel = (await git.revparse(["--show-toplevel"])).trim();
@@ -362,15 +429,44 @@ async function handleStageAction(
 
 	const gitRoot = simpleGit(toplevel);
 	const relativePath = path.relative(toplevel, resolved);
+
+	if (
+		action === "stage" &&
+		ranges === null &&
+		typeof expectedMtimeMs === "number"
+	) {
+		const stat = await fs.stat(resolved).catch(() => null);
+		if (stat?.mtimeMs !== expectedMtimeMs) {
+			res.status(409).json({
+				error: {
+					code: "FILE_MODIFIED",
+					message: "File changed on disk since it was loaded",
+				},
+			});
+			return;
+		}
+	}
+
+	const blobs = typeof expectedBlobs === "string" ? expectedBlobs : null;
 	try {
 		if (action === "stage") {
 			if (ranges !== null) {
 				// Line-level staging: an empty selection or one that touches no
 				// change stages nothing, falling through to the current status.
 				if (ranges.length > 0) {
-					await applyPartialStage(gitRoot, relativePath, ranges);
+					await applyPartialStage(gitRoot, relativePath, ranges, blobs);
 				}
 			} else {
+				// A whole-file action is checked and then run by separate commands,
+				// so a change landing between the two still goes through. It has no
+				// line numbers to misapply, so the window can only let through
+				// content the caller never saw, not stage the wrong lines.
+				if (blobs !== null) {
+					checkDiffBlobs(
+						await gitRoot.diff(["--full-index", "--", relativePath]),
+						blobs,
+					);
+				}
 				// `git add` stages additions, modifications, and deletions alike.
 				await gitRoot.raw(["add", "--", relativePath]);
 			}
@@ -380,9 +476,21 @@ async function handleStageAction(
 				// staged change unstages nothing, falling through to the current
 				// status.
 				if (ranges.length > 0) {
-					await applyPartialUnstage(gitRoot, relativePath, ranges);
+					await applyPartialUnstage(gitRoot, relativePath, ranges, blobs);
 				}
 			} else {
+				// Checked and then run separately, as staging a whole file is.
+				if (blobs !== null) {
+					checkDiffBlobs(
+						await gitRoot.diff([
+							"--cached",
+							"--full-index",
+							"--",
+							relativePath,
+						]),
+						blobs,
+					);
+				}
 				// A plain reset (no explicit HEAD) unstages the path whether or not
 				// the repo has any commits yet; `reset HEAD` would fail before the
 				// first commit.
@@ -390,6 +498,15 @@ async function handleStageAction(
 			}
 		}
 	} catch (err) {
+		if (err instanceof StaleDiffError) {
+			res.status(409).json({
+				error: {
+					code: "DIFF_CHANGED",
+					message: "The diff changed since it was read",
+				},
+			});
+			return;
+		}
 		res.status(500).json({
 			error: {
 				code: "GIT_ERROR",
@@ -426,12 +543,18 @@ export function gitRoutes(roots: RepoRoot[]): Router {
 		res.json({ files: buildStatusEntries(status) });
 	});
 
-	// POST /api/git/stage?repo=<name>  body: { path, ranges? }
+	// POST /api/git/stage?repo=<name>
+	//   body: { path, ranges?, expectedBlobs?, expectedMtimeMs? }
+	// Responds 409 DIFF_CHANGED when the diff's index line no longer names
+	// expectedBlobs, and FILE_MODIFIED when a whole-file stage finds the file's
+	// mtime is no longer expectedMtimeMs.
 	router.post("/stage", async (req, res) => {
 		await handleStageAction(roots, req, res, "stage");
 	});
 
-	// POST /api/git/unstage?repo=<name>  body: { path }
+	// POST /api/git/unstage?repo=<name>  body: { path, ranges?, expectedBlobs? }
+	// Responds 409 DIFF_CHANGED when the staged diff's index line no longer
+	// names expectedBlobs.
 	router.post("/unstage", async (req, res) => {
 		await handleStageAction(roots, req, res, "unstage");
 	});
@@ -755,9 +878,11 @@ export function gitRoutes(roots: RepoRoot[]): Router {
 		// consistent with git status output (both repo-root-relative).
 		const gitRoot = simpleGit(toplevel);
 		const relativePath = path.relative(toplevel, resolved);
+		// Full blob ids on the index line let a caller name this diff when it
+		// stages or unstages lines read from it.
 		const diffArgs = staged
-			? ["--cached", "--", relativePath]
-			: ["--", relativePath];
+			? ["--cached", "--full-index", "--", relativePath]
+			: ["--full-index", "--", relativePath];
 		const diff = await gitRoot.diff(diffArgs);
 
 		if (diff.length > MAX_DIFF_SIZE) {

@@ -624,6 +624,15 @@ function getErrorMessage(body: unknown, status: number): string {
 	return `Request failed (${status})`;
 }
 
+/**
+ * The `<from>..<to>` blob ids on a diff's `index` line, or null when it has
+ * none. They name the diff, so the server can refuse to act on line numbers
+ * read from a diff that has since changed.
+ */
+function diffBlobsOf(diff: string): string | null {
+	return /^index ([0-9a-f]+\.\.[0-9a-f]+)/m.exec(diff)?.[1] ?? null;
+}
+
 function describeLineCount(count: number): string {
 	return count === 1 ? "1 line" : `${count} lines`;
 }
@@ -727,6 +736,9 @@ export function TextFileEditor({
 	// toolbar, and the count labels the Stage and Unstage buttons.
 	const pickerRef = useRef<{
 		ranges: () => [number, number][] | null;
+		// The blob ids of the git diff that picks and selections currently name
+		// lines of, or null while git's diff does not describe the buffer.
+		diffBlobs: () => string | null;
 		clear: () => void;
 	} | null>(null);
 	const [pickedCount, setPickedCount] = useState(0);
@@ -949,7 +961,17 @@ export function TextFileEditor({
 					setMatchesGitDiff(changes.matchesGitDiff);
 				}
 
-				return { changes, targets: getPickTargets(changes, doc.lines) };
+				return {
+					changes,
+					targets: getPickTargets(changes, doc.lines),
+					// The blob ids of the git diff these targets were read from, kept
+					// beside them so a stage or unstage names the diff whose line
+					// numbers it sends, not one that has arrived since.
+					diffBlobs:
+						changes.matchesGitDiff && changeDiff !== null
+							? diffBlobsOf(changeDiff)
+							: null,
+				};
 			}
 
 			function buildChangeDecorations(
@@ -1191,6 +1213,7 @@ export function TextFileEditor({
 					);
 					return live.length > 0 ? pickedLinesToRanges(live) : null;
 				},
+				diffBlobs: () => view.state.field(changeField).diffBlobs,
 				clear: () => {
 					view.dispatch({ effects: clearPickedLines.of(null) });
 				},
@@ -1394,15 +1417,29 @@ export function TextFileEditor({
 		setError(null);
 
 		try {
-			const body: { path: string; ranges?: [number, number][] } = {
+			const body: {
+				path: string;
+				ranges?: [number, number][];
+				expectedBlobs?: string;
+				expectedMtimeMs?: number;
+			} = {
 				path: filePath,
 			};
 			// A tracked change stages exactly the picked lines, or the selected
-			// ones when nothing is picked.
+			// ones when nothing is picked. Either way it names the git diff those
+			// line numbers come from, so the server refuses rather than staging
+			// whatever lines now sit at them. An untracked file stages whole and
+			// names the version on screen by its modification time instead.
 			if (stagesByLine) {
 				body.ranges =
 					pickerRef.current?.ranges() ??
 					selectionToRanges(viewRef.current.state);
+				const blobs = pickerRef.current?.diffBlobs() ?? null;
+				if (blobs !== null) {
+					body.expectedBlobs = blobs;
+				}
+			} else if (mtimeMs !== null) {
+				body.expectedMtimeMs = mtimeMs;
 			}
 
 			const response = await fetch(
@@ -1414,6 +1451,11 @@ export function TextFileEditor({
 				},
 			);
 
+			if (response.status === 409) {
+				throw new Error(
+					"The file changed since it was loaded. Reload before staging.",
+				);
+			}
 			if (!response.ok) {
 				const errorBody = await response.json().catch(() => null);
 				throw new Error(getErrorMessage(errorBody, response.status));
@@ -1426,7 +1468,7 @@ export function TextFileEditor({
 		} finally {
 			setStaging(false);
 		}
-	}, [dirty, filePath, onStaged, readOnly, repo, stagesByLine]);
+	}, [dirty, filePath, mtimeMs, onStaged, readOnly, repo, stagesByLine]);
 
 	const handleUnstage = useCallback(async () => {
 		if (!staged || !viewRef.current) return;
@@ -1435,15 +1477,24 @@ export function TextFileEditor({
 		setError(null);
 
 		try {
-			const body: { path: string; ranges?: [number, number][] } = {
+			const body: {
+				path: string;
+				ranges?: [number, number][];
+				expectedBlobs?: string;
+			} = {
 				path: filePath,
 			};
 			// A staged modification unstages exactly the picked lines, or the
-			// selected ones when nothing is picked.
+			// selected ones when nothing is picked, and names the staged diff
+			// those line numbers come from, as staging does.
 			if (unstagesByLine) {
 				body.ranges =
 					pickerRef.current?.ranges() ??
 					selectionToRanges(viewRef.current.state);
+				const blobs = pickerRef.current?.diffBlobs() ?? null;
+				if (blobs !== null) {
+					body.expectedBlobs = blobs;
+				}
 			}
 
 			const response = await fetch(
@@ -1455,6 +1506,11 @@ export function TextFileEditor({
 				},
 			);
 
+			if (response.status === 409) {
+				throw new Error(
+					"The staged change is different now. Reload before unstaging.",
+				);
+			}
 			if (!response.ok) {
 				const errorBody = await response.json().catch(() => null);
 				throw new Error(getErrorMessage(errorBody, response.status));
