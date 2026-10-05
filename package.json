@@ -14,12 +14,12 @@
     "test": "bun test --cwd server && bun test --cwd client"
   },
   "overrides": {
-    "@codemirror/state": "6.7.4",
-    "@codemirror/view": "6.43.11",
+    "@codemirror/state": "6.7.6",
+    "@codemirror/view": "6.43.13",
     "@codemirror/language": "6.12.4"
   },
   "devDependencies": {
-    "@biomejs/biome": "2.5.12",
+    "@biomejs/biome": "2.5.15",
     "concurrently": "10.0.5",
     "npm-package-json-lint": "11.0.0",
     "typescript": "7.0.2"
