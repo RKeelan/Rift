@@ -47,6 +47,8 @@ function FileViewer({
 	repo: string;
 	writesAllowed: boolean | null;
 }) {
+	// The header slot the editor puts its menu in.
+	const [menuHost, setMenuHost] = useState<HTMLElement | null>(null);
 	return (
 		<div className="file-viewer">
 			<header className="files-header">
@@ -65,10 +67,12 @@ function FileViewer({
 					<ArrowLeft size={18} />
 				</button>
 				<Breadcrumbs path={filePath} onNavigate={onNavigate} />
+				<div className="files-header-menu" ref={setMenuHost} />
 			</header>
 			<TextFileEditor
 				filePath={filePath}
 				repo={repo}
+				menuHost={menuHost}
 				readOnly={writesAllowed !== true}
 				readOnlyLabel={
 					writesAllowed === false ? WRITES_DISABLED_LABEL : WRITES_UNKNOWN_LABEL

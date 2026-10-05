@@ -262,6 +262,32 @@ describe("FilesPage", () => {
 		expect(saveButton).not.toBeNull();
 	});
 
+	test("puts the editor's menu in the viewer's header", async () => {
+		mockFetchForTree([{ name: "hello.txt", type: "file", size: 20 }], {
+			fileContent: { path: "hello.txt", content: "Hello, world!" },
+		});
+
+		const { container } = renderFilesPage();
+		await waitFor(() => {
+			expect(container.querySelectorAll(".tree-entry").length).toBe(1);
+		});
+		await act(async () => {
+			fireEvent.click(container.querySelector(".tree-entry") as Element);
+		});
+
+		await waitFor(() => {
+			const more = screen.getByRole("button", { name: "More actions" });
+			expect(
+				container
+					.querySelector(".files-header .files-header-menu")
+					?.contains(more),
+			).toBe(true);
+			expect(
+				container.querySelector(".text-file-editor-bar")?.contains(more),
+			).toBe(false);
+		});
+	});
+
 	test("renders error message for binary file", async () => {
 		mockFetchForTree([{ name: "image.bin", type: "file", size: 500 }], {
 			fileError: {
