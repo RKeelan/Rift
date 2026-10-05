@@ -59,6 +59,31 @@
 	background: var(--color-surface-raised);
 }
 
+.changes-header-button:disabled {
+	opacity: 0.5;
+	cursor: default;
+}
+
+.changes-header-button--danger {
+	border-color: var(--color-error);
+	color: var(--color-error);
+}
+
+.changes-discard-confirm {
+	display: flex;
+	align-items: center;
+	gap: 0.5rem;
+	padding: 0.5rem 0.75rem;
+	border-bottom: 1px solid var(--color-border);
+	background: var(--color-error-bg);
+	flex-shrink: 0;
+}
+
+.changes-discard-confirm-text {
+	flex: 1;
+	font-size: 0.8125rem;
+}
+
 .changes-refresh-button--spinning svg {
 	animation: spin 0.8s linear infinite;
 }

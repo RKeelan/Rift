@@ -6,8 +6,10 @@ import { useErrorBanner } from "../components/ErrorBanner.tsx";
 import {
 	TextFileEditor,
 	WRITES_DISABLED_LABEL,
+	WRITES_UNKNOWN_LABEL,
 } from "../components/TextFileEditor.tsx";
 import { useSession } from "../contexts/SessionContext.tsx";
+import { clearDraft } from "../drafts.ts";
 import "./ChangesPage.css";
 
 type FileStatus = "added" | "modified" | "deleted" | "renamed" | "untracked";
@@ -56,8 +58,15 @@ const WRITES_DISABLED_TITLE = "The server does not allow changes";
 export function ChangesPage({
 	writesAllowed = true,
 }: {
-	writesAllowed?: boolean;
+	writesAllowed?: boolean | null;
 }) {
+	// Whether the server allows changes is unknown (null) until it answers,
+	// and nothing offers a change until then.
+	const canWrite = writesAllowed === true;
+	const writesRefused = writesAllowed === false;
+	const editorReadOnlyLabel = writesRefused
+		? WRITES_DISABLED_LABEL
+		: WRITES_UNKNOWN_LABEL;
 	const { showError } = useErrorBanner();
 	const { repoName } = useSession();
 	const [searchParams, setSearchParams] = useSearchParams();
@@ -77,6 +86,10 @@ export function ChangesPage({
 	// Bumped after a save, which changes the working tree but not the index, so
 	// only git's diff needs refetching.
 	const [diffRefreshToken, setDiffRefreshToken] = useState(0);
+	// Whether the open editor holds unsaved edits, which leaving the file or
+	// staging it from the header would lose.
+	const [editorDirty, setEditorDirty] = useState(false);
+	const [confirmingDiscard, setConfirmingDiscard] = useState(false);
 	const abortRef = useRef<AbortController | null>(null);
 	const diffAbortRef = useRef<AbortController | null>(null);
 	const comparisonAbortRef = useRef<AbortController | null>(null);
@@ -280,24 +293,50 @@ export function ChangesPage({
 		setRefreshToken((value) => value + 1);
 	}, []);
 
-	const handleBack = useCallback(() => {
+	const leaveDetail = useCallback(() => {
 		diffAbortRef.current?.abort();
 		comparisonAbortRef.current?.abort();
 		setDiff(null);
 		setComparisonContent(undefined);
+		setConfirmingDiscard(false);
+		setEditorDirty(false);
 		setSearchParams({}, { replace: true });
 	}, [setSearchParams]);
 
+	// Leaving through the back button asks first when there are unsaved edits.
+	// Other ways out, such as a back gesture, cannot be held up, so the editor
+	// keeps the edits as a draft and offers them back when the file reopens.
+	const handleBack = useCallback(() => {
+		if (editorDirty) {
+			setConfirmingDiscard(true);
+			return;
+		}
+		leaveDetail();
+	}, [editorDirty, leaveDetail]);
+
+	const discardAndLeave = useCallback(() => {
+		if (repoName && selectedPath !== null) {
+			clearDraft(repoName, selectedPath);
+		}
+		leaveDetail();
+	}, [leaveDetail, repoName, selectedPath]);
+
+	useEffect(() => {
+		if (!editorDirty) setConfirmingDiscard(false);
+	}, [editorDirty]);
+
 	const handleDetailStageToggle = useCallback(async () => {
-		if (!selected) return;
+		// Staging from the header acts on the file as saved, not as shown, so it
+		// waits until the editor's edits are saved.
+		if (!selected || editorDirty) return;
 		// Staging can move the file between sections, so the current selection may
 		// no longer exist afterwards; return to the list showing the new state.
 		const ok = await applyStageAction(
 			selected.path,
 			selected.staged ? "unstage" : "stage",
 		);
-		if (ok) handleBack();
-	}, [applyStageAction, handleBack, selected]);
+		if (ok) leaveDetail();
+	}, [applyStageAction, editorDirty, leaveDetail, selected]);
 
 	useEffect(() => {
 		comparisonAbortRef.current?.abort();
@@ -455,12 +494,39 @@ export function ChangesPage({
 						onClick={() => {
 							void handleDetailStageToggle();
 						}}
-						disabled={actionPending || !writesAllowed}
-						title={writesAllowed ? undefined : WRITES_DISABLED_TITLE}
+						disabled={actionPending || !canWrite || editorDirty}
+						title={
+							writesRefused
+								? WRITES_DISABLED_TITLE
+								: editorDirty
+									? "Save before staging"
+									: undefined
+						}
 					>
 						{selected.staged ? "Unstage" : "Stage"}
 					</button>
 				</header>
+				{confirmingDiscard && (
+					<div className="changes-discard-confirm" role="alert">
+						<span className="changes-discard-confirm-text">
+							Discard unsaved changes?
+						</span>
+						<button
+							type="button"
+							className="changes-header-button"
+							onClick={() => setConfirmingDiscard(false)}
+						>
+							Keep editing
+						</button>
+						<button
+							type="button"
+							className="changes-header-button changes-header-button--danger"
+							onClick={discardAndLeave}
+						>
+							Discard
+						</button>
+					</div>
+				)}
 				<div className="changes-diff-content">
 					{selectedView === "edit" && selectedEditable && (
 						<div className="changes-editor-view">
@@ -473,11 +539,12 @@ export function ChangesPage({
 								changeType={selectedStatus}
 								filePath={selected.path}
 								repo={repoName as string}
-								readOnly={!writesAllowed}
-								readOnlyLabel={WRITES_DISABLED_LABEL}
+								readOnly={!canWrite}
+								readOnlyLabel={editorReadOnlyLabel}
 								onSaved={handleEditorSaved}
 								onStaged={handleEditorStaged}
 								onReload={handleEditorReload}
+								onDirtyChange={setEditorDirty}
 							/>
 						</div>
 					)}
@@ -490,8 +557,8 @@ export function ChangesPage({
 								changeType={selectedStatus}
 								filePath={selected.path}
 								repo={repoName as string}
-								readOnly={!writesAllowed}
-								readOnlyLabel={WRITES_DISABLED_LABEL}
+								readOnly={!canWrite}
+								readOnlyLabel={editorReadOnlyLabel}
 								staged
 								onUnstaged={handleEditorUnstaged}
 								onReload={handleEditorReload}
@@ -546,7 +613,7 @@ export function ChangesPage({
 				</div>
 			)}
 
-			{!writesAllowed && (
+			{writesRefused && (
 				<div className="changes-readonly-note" role="note">
 					Read-only: the server does not allow changes, so staging and editing
 					are disabled.
@@ -589,9 +656,9 @@ export function ChangesPage({
 											type="button"
 											className="changes-file-action"
 											onClick={() => handleToggleStage(entry)}
-											disabled={actionPending || !writesAllowed}
+											disabled={actionPending || !canWrite}
 											aria-label={`Unstage ${entry.path}`}
-											title={writesAllowed ? "Unstage" : WRITES_DISABLED_TITLE}
+											title={writesRefused ? WRITES_DISABLED_TITLE : "Unstage"}
 										>
 											<Minus size={18} />
 										</button>
@@ -625,9 +692,9 @@ export function ChangesPage({
 											type="button"
 											className="changes-file-action"
 											onClick={() => handleToggleStage(entry)}
-											disabled={actionPending || !writesAllowed}
+											disabled={actionPending || !canWrite}
 											aria-label={`Stage ${entry.path}`}
-											title={writesAllowed ? "Stage" : WRITES_DISABLED_TITLE}
+											title={writesRefused ? WRITES_DISABLED_TITLE : "Stage"}
 										>
 											<Plus size={18} />
 										</button>

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, mock, test } from "bun:test";
-import { cleanup, renderHook, waitFor } from "@testing-library/react";
+import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { ErrorBannerProvider } from "../components/ErrorBanner.tsx";
 import { useGitRepo } from "../hooks/useGitRepo.ts";
@@ -36,6 +36,64 @@ describe("useGitRepo", () => {
 		expect(result.current.isGitRepo).toBe(true);
 		expect(result.current.repoMissing).toBe(false);
 		expect(result.current.writesAllowed).toBe(true);
+	});
+
+	test("leaves writes unknown until the server answers", async () => {
+		let answer = () => {};
+		globalThis.fetch = mock(
+			() =>
+				new Promise((resolve) => {
+					answer = () =>
+						resolve({
+							ok: true,
+							status: 200,
+							json: async () => ({ status: "ok", gitRepo: true }),
+						});
+				}),
+		) as unknown as typeof fetch;
+		const { result } = renderHook(() => useGitRepo("RKeelan/Rift"), {
+			wrapper,
+		});
+
+		await waitFor(() => expect(globalThis.fetch).toHaveBeenCalled());
+		expect(result.current.writesAllowed).toBeNull();
+
+		await act(async () => answer());
+		await waitFor(() => expect(result.current.writesAllowed).toBe(true));
+	});
+
+	test("gives up on a health check that hangs, and assumes writes allowed", async () => {
+		const timeout = new AbortController();
+		const requested: number[] = [];
+		const originalTimeout = AbortSignal.timeout;
+		AbortSignal.timeout = (ms: number) => {
+			requested.push(ms);
+			return timeout.signal;
+		};
+		try {
+			globalThis.fetch = mock(
+				(_input: string, init?: RequestInit) =>
+					new Promise((_resolve, reject) => {
+						init?.signal?.addEventListener("abort", () =>
+							reject(init.signal?.reason),
+						);
+					}),
+			) as unknown as typeof fetch;
+			const { result } = renderHook(() => useGitRepo("RKeelan/Rift"), {
+				wrapper,
+			});
+
+			await waitFor(() => expect(globalThis.fetch).toHaveBeenCalled());
+			expect(requested).toEqual([5000]);
+			expect(result.current.writesAllowed).toBeNull();
+
+			act(() => {
+				timeout.abort(new DOMException("Timed out", "TimeoutError"));
+			});
+			await waitFor(() => expect(result.current.writesAllowed).toBe(true));
+		} finally {
+			AbortSignal.timeout = originalTimeout;
+		}
 	});
 
 	test("reports when the server refuses writes", async () => {
@@ -78,5 +136,8 @@ describe("useGitRepo", () => {
 		await waitFor(() => expect(result.current.loading).toBe(false));
 		expect(result.current.isGitRepo).toBe(true);
 		expect(result.current.repoMissing).toBe(false);
+		// The server refuses writes itself, so an unreachable one is not taken
+		// to refuse them.
+		expect(result.current.writesAllowed).toBe(true);
 	});
 });

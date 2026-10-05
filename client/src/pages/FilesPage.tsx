@@ -9,6 +9,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
 	TextFileEditor,
 	WRITES_DISABLED_LABEL,
+	WRITES_UNKNOWN_LABEL,
 } from "../components/TextFileEditor.tsx";
 import { useApi } from "../hooks/useApi.ts";
 import { useSession } from "../contexts/SessionContext.tsx";
@@ -44,7 +45,7 @@ function FileViewer({
 	filePath: string;
 	onNavigate: (dir: string) => void;
 	repo: string;
-	writesAllowed: boolean;
+	writesAllowed: boolean | null;
 }) {
 	return (
 		<div className="file-viewer">
@@ -68,8 +69,10 @@ function FileViewer({
 			<TextFileEditor
 				filePath={filePath}
 				repo={repo}
-				readOnly={!writesAllowed}
-				readOnlyLabel={WRITES_DISABLED_LABEL}
+				readOnly={writesAllowed !== true}
+				readOnlyLabel={
+					writesAllowed === false ? WRITES_DISABLED_LABEL : WRITES_UNKNOWN_LABEL
+				}
 			/>
 		</div>
 	);
@@ -188,7 +191,7 @@ function TreeEntry({
 export function FilesPage({
 	writesAllowed = true,
 }: {
-	writesAllowed?: boolean;
+	writesAllowed?: boolean | null;
 }) {
 	const { request } = useApi();
 	const { repoName } = useSession();

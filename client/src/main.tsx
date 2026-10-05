@@ -3,12 +3,15 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { BrowserRouter } from "react-router-dom";
 import { App } from "./App.tsx";
+import { pruneDrafts } from "./drafts.ts";
 import { installStaleChunkReload } from "./staleChunk.ts";
 
 // With `registerType: "autoUpdate"` the registration reloads the page once a
 // new service worker activates, so the open bundle never outlives its chunks.
 registerSW({ immediate: true });
 installStaleChunkReload();
+// Drafts of unsaved edits last a week; clear out older ones as the app starts.
+pruneDrafts();
 
 const root = document.getElementById("root");
 if (!root) throw new Error("Root element not found");

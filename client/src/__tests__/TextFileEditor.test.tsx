@@ -12,7 +12,9 @@ import {
 	getEditorChangeDecorations,
 	getLineChanges,
 	TextFileEditor,
+	WRITES_UNKNOWN_LABEL,
 } from "../components/TextFileEditor.tsx";
+import { clearDraft, hashText, readDraft, writeDraft } from "../drafts.ts";
 import { GIT_DIFF_CASES } from "./gitDiffCases.ts";
 
 // git's diff for "a\nb\nc\n" becoming "a\nB\nc\n".
@@ -26,6 +28,13 @@ function gitCase(name: string) {
 	if (!found) throw new Error(`no case named ${name}`);
 	return found;
 }
+
+// An editor closed with unsaved edits keeps them as a draft in local storage,
+// which a later test opening the same file would be offered. This runs after
+// each block's own cleanup, which closes the editors.
+afterEach(() => {
+	globalThis.localStorage.clear();
+});
 
 describe("getEditorChangeDecorations", () => {
 	test("removes a prior addition when the editor returns to the git baseline", () => {
@@ -1358,6 +1367,62 @@ describe("line picking", () => {
 		}
 	});
 
+	describe("with a draft from earlier", () => {
+		// The draft changes line 3, which is otherwise unchanged.
+		const DRAFT = "a\nB\nC\nD\ne\n";
+
+		beforeEach(() => {
+			writeDraft("test-repo", "notes.txt", {
+				text: DRAFT,
+				baseHash: hashText(MODIFIED.file),
+			});
+		});
+
+		test("offers no targets and no Stage until the offer is answered", async () => {
+			const { container } = await renderForPicking();
+			await screen.findByRole("button", { name: "Restore" });
+			await waitFor(() => {
+				expect(container.querySelector(".cm-changedLine")).not.toBeNull();
+			});
+
+			expect(pickTargets(container)).toEqual([]);
+			const stage = screen.getByRole("button", { name: "Stage" });
+			expect(stage.hasAttribute("disabled")).toBe(true);
+			expect(stage.title).toBe("Restore or discard the earlier edits first");
+
+			fireEvent.click(screen.getByRole("button", { name: "Discard" }));
+
+			await waitFor(() => {
+				expect(pickTargets(container).length).toBe(4);
+			});
+			await screen.findByRole("button", { name: "Pick lines" });
+		});
+
+		test("restoring it edits the buffer in place, as typing would", async () => {
+			const { container, view } = await renderForPicking();
+			await screen.findByRole("button", { name: "Restore" });
+			// The cursor sits on line 4, past the line the draft changes.
+			const cursor = view.state.doc.line(4).from + 1;
+			act(() => {
+				view.dispatch({ selection: { anchor: cursor } });
+			});
+
+			fireEvent.click(screen.getByRole("button", { name: "Restore" }));
+
+			await screen.findByText("Unsaved changes");
+			expect(view.state.doc.toString()).toBe(DRAFT);
+			expect(view.state.selection.main.head).toBe(cursor);
+			await waitFor(() => {
+				expect(
+					contentLine(container, 3).classList.contains("cm-changedLine"),
+				).toBe(true);
+			});
+			expect(screen.getByRole("button", { name: "Stage" }).title).toBe(
+				"Save before staging",
+			);
+		});
+	});
+
 	test("waits for the refetched context after a save rather than reporting a mismatch", async () => {
 		const { container, view } = await renderForPicking({ onSaved: () => {} });
 		globalThis.fetch = (async (_input: string, init?: RequestInit) =>
@@ -1790,6 +1855,666 @@ describe("saving", () => {
 		expect(await editAndSave("alpha\r\nbeta\r\n")).toBe(
 			"new line\r\nalpha\r\nbeta\r\n",
 		);
+	});
+
+	describe("drafts", () => {
+		const REPO = "test-repo";
+		const PATH = "notes.md";
+		// Drafts are written once typing pauses for half a second.
+		const PAUSE_MS = 650;
+
+		beforeEach(() => {
+			globalThis.localStorage.clear();
+		});
+
+		function saved() {
+			return new Response(JSON.stringify({ mtimeMs: 2 }), {
+				headers: { "Content-Type": "application/json" },
+			});
+		}
+
+		async function renderEditable(
+			onDisk: string,
+			save: () => Promise<Response> = async () => saved(),
+		) {
+			globalThis.fetch = (async (_input: string, init?: RequestInit) => {
+				if (init?.method === "PUT") {
+					return save();
+				}
+				return new Response(onDisk, { headers: { "x-file-mtime-ms": "1" } });
+			}) as unknown as typeof fetch;
+
+			const rendered = render(<TextFileEditor filePath={PATH} repo={REPO} />);
+			await waitFor(() => {
+				expect(rendered.container.querySelector(".cm-content")).not.toBeNull();
+			});
+			const { EditorView } = await import("@codemirror/view");
+			const view = EditorView.findFromDOM(
+				rendered.container.querySelector(".cm-editor") as HTMLElement,
+			);
+			if (!view) throw new Error("editor view not found");
+			return { ...rendered, view };
+		}
+
+		function pause(ms: number) {
+			return new Promise((resolve) => setTimeout(resolve, ms));
+		}
+
+		test("keeps unsaved edits as a draft once typing pauses, until they are saved", async () => {
+			const { view } = await renderEditable("alpha\n");
+
+			act(() => {
+				view.dispatch({ changes: { from: 0, insert: "x" } });
+			});
+			expect(readDraft(REPO, PATH)).toBeNull();
+			await pause(PAUSE_MS);
+			expect(readDraft(REPO, PATH)).toEqual({
+				text: "xalpha\n",
+				baseHash: hashText("alpha\n"),
+			});
+
+			const save = screen.getByRole("button", { name: "Save" });
+			await waitFor(() => {
+				expect(save.hasAttribute("disabled")).toBe(false);
+			});
+			fireEvent.click(save);
+			await waitFor(() => {
+				expect(readDraft(REPO, PATH)).toBeNull();
+			});
+		});
+
+		test("keeps edits made while a save is in flight unsaved, as a draft of the saved text", async () => {
+			let finishSave = () => {};
+			const { view } = await renderEditable(
+				"alpha\n",
+				() =>
+					new Promise<Response>((resolve) => {
+						finishSave = () => resolve(saved());
+					}),
+			);
+
+			act(() => {
+				view.dispatch({ changes: { from: 0, insert: "x" } });
+			});
+			const save = screen.getByRole("button", { name: "Save" });
+			await waitFor(() => {
+				expect(save.hasAttribute("disabled")).toBe(false);
+			});
+			fireEvent.click(save);
+			await screen.findByRole("button", { name: "Saving..." });
+			act(() => {
+				view.dispatch({ changes: { from: 0, insert: "y" } });
+			});
+			await act(async () => {
+				finishSave();
+			});
+
+			await screen.findByRole("button", { name: "Save" });
+			expect(view.state.doc.toString()).toBe("yxalpha\n");
+			expect(screen.getByText("Unsaved changes")).toBeDefined();
+			await pause(PAUSE_MS);
+			expect(readDraft(REPO, PATH)).toEqual({
+				text: "yxalpha\n",
+				baseHash: hashText("xalpha\n"),
+			});
+		});
+
+		describe("a save answered after the buffer is loaded afresh", () => {
+			const OTHER = "other.md";
+
+			// Serves each file with its own mtime, holding every save until the
+			// test lets it finish.
+			function mockFiles(
+				files: Record<string, { text: string; mtime: number }>,
+			) {
+				const saves: { path: string; expectedMtimeMs: number }[] = [];
+				let finishSave = () => {};
+				globalThis.fetch = (async (input: string, init?: RequestInit) => {
+					const path = new URL(input, "http://rift.test").searchParams.get(
+						"path",
+					) as string;
+					if (init?.method === "PUT") {
+						const { expectedMtimeMs } = JSON.parse(init.body as string);
+						saves.push({ path, expectedMtimeMs });
+						return new Promise<Response>((resolve) => {
+							finishSave = () => resolve(saved());
+						});
+					}
+					return new Response(files[path].text, {
+						headers: { "x-file-mtime-ms": String(files[path].mtime) },
+					});
+				}) as unknown as typeof fetch;
+				return { saves, finishSave: () => finishSave() };
+			}
+
+			async function currentView(container: HTMLElement) {
+				const { EditorView } = await import("@codemirror/view");
+				return await waitFor(() => {
+					const editor = container.querySelector<HTMLElement>(".cm-editor");
+					const view = editor ? EditorView.findFromDOM(editor) : null;
+					if (!view) throw new Error("editor view not found");
+					return view;
+				});
+			}
+
+			async function editAndStartSave(container: HTMLElement) {
+				const view = await currentView(container);
+				act(() => {
+					view.dispatch({ changes: { from: 0, insert: "x" } });
+				});
+				const save = screen.getByRole("button", { name: "Save" });
+				await waitFor(() => {
+					expect(save.hasAttribute("disabled")).toBe(false);
+				});
+				fireEvent.click(save);
+				await screen.findByRole("button", { name: "Saving..." });
+			}
+
+			async function opened(container: HTMLElement, text: string) {
+				await waitFor(async () => {
+					expect((await currentView(container)).state.doc.toString()).toBe(
+						text,
+					);
+				});
+			}
+
+			test("leaves another file opened meanwhile alone", async () => {
+				const server = mockFiles({
+					[PATH]: { text: "alpha\n", mtime: 1 },
+					[OTHER]: { text: "bravo\n", mtime: 7 },
+				});
+				const { container, rerender } = render(
+					<TextFileEditor filePath={PATH} repo={REPO} />,
+				);
+				await editAndStartSave(container);
+
+				rerender(<TextFileEditor filePath={OTHER} repo={REPO} />);
+				await opened(container, "bravo\n");
+				await act(async () => {
+					server.finishSave();
+				});
+				await pause(PAUSE_MS);
+
+				expect(screen.getByText("No unsaved changes")).toBeDefined();
+				expect(readDraft(REPO, OTHER)).toBeNull();
+				// The saved file's draft, kept as it was left, held just what was
+				// saved.
+				expect(readDraft(REPO, PATH)).toBeNull();
+
+				// The other file saves against its own mtime.
+				await editAndStartSave(container);
+				expect(server.saves.at(-1)).toEqual({
+					path: OTHER,
+					expectedMtimeMs: 7,
+				});
+			});
+
+			test("keeps no draft of the text from before the save when the file loads again", async () => {
+				// The server has not written the save when the file loads again, so
+				// the buffer holds the text from before it.
+				const server = mockFiles({
+					[PATH]: { text: "alpha\n", mtime: 1 },
+					[OTHER]: { text: "bravo\n", mtime: 7 },
+				});
+				const { container, rerender } = render(
+					<TextFileEditor filePath={PATH} repo={REPO} />,
+				);
+				await editAndStartSave(container);
+				rerender(<TextFileEditor filePath={OTHER} repo={REPO} />);
+				await opened(container, "bravo\n");
+				rerender(<TextFileEditor filePath={PATH} repo={REPO} />);
+				await opened(container, "alpha\n");
+
+				await act(async () => {
+					server.finishSave();
+				});
+				await pause(PAUSE_MS);
+
+				expect(screen.getByText("No unsaved changes")).toBeDefined();
+				expect(readDraft(REPO, PATH)?.text).not.toBe("alpha\n");
+			});
+		});
+
+		describe("a save answered after its editor closed", () => {
+			// Holds each save's response until the test releases it, as a stalled
+			// connection would. The save reaches the disk as it arrives, or, when
+			// the request itself stalled, only with the response.
+			function slowServer(initial: string, { writesOnArrival = true } = {}) {
+				let disk = initial;
+				let mtime = 1;
+				let release = () => {};
+				globalThis.fetch = (async (_input: string, init?: RequestInit) => {
+					if (init?.method === "PUT") {
+						const { content } = JSON.parse(init.body as string);
+						const write = () => {
+							disk = content;
+							mtime += 1;
+							return mtime;
+						};
+						const written = writesOnArrival ? write() : null;
+						return new Promise<Response>((resolve) => {
+							release = () =>
+								resolve(
+									new Response(
+										JSON.stringify({ mtimeMs: written ?? write() }),
+										{ headers: { "Content-Type": "application/json" } },
+									),
+								);
+						});
+					}
+					return new Response(disk, {
+						headers: { "x-file-mtime-ms": String(mtime) },
+					});
+				}) as unknown as typeof fetch;
+				return { release: () => release() };
+			}
+
+			async function openEditor() {
+				const rendered = render(<TextFileEditor filePath={PATH} repo={REPO} />);
+				const { EditorView } = await import("@codemirror/view");
+				const view = await waitFor(() => {
+					const editor =
+						rendered.container.querySelector<HTMLElement>(".cm-editor");
+					const found = editor ? EditorView.findFromDOM(editor) : null;
+					if (!found) throw new Error("editor view not found");
+					return found;
+				});
+				return { ...rendered, view };
+			}
+
+			async function typeAndStartSave(
+				view: Awaited<ReturnType<typeof openEditor>>["view"],
+			) {
+				act(() => {
+					view.dispatch({ changes: { from: 0, insert: "x" } });
+				});
+				const save = screen.getByRole("button", { name: "Save" });
+				await waitFor(() => {
+					expect(save.hasAttribute("disabled")).toBe(false);
+				});
+				fireEvent.click(save);
+				await screen.findByRole("button", { name: "Saving..." });
+			}
+
+			test("keeps the edits of the editor that reopened the file", async () => {
+				const server = slowServer("alpha\n");
+				const first = await openEditor();
+				await typeAndStartSave(first.view);
+				// A back gesture closes the editor while it saves.
+				first.unmount();
+
+				const second = await openEditor();
+				await waitFor(() => {
+					expect(second.view.state.doc.toString()).toBe("xalpha\n");
+				});
+				act(() => {
+					second.view.dispatch({ changes: { from: 0, insert: "Q" } });
+				});
+				await screen.findByText("Unsaved changes");
+
+				await act(async () => {
+					server.release();
+				});
+				window.dispatchEvent(new Event("pagehide"));
+
+				expect(readDraft(REPO, PATH)?.text).toBe("Qxalpha\n");
+			});
+
+			test("keeps its own older edits out of the reopened editor's draft", async () => {
+				const server = slowServer("alpha\n");
+				const first = await openEditor();
+				await typeAndStartSave(first.view);
+				act(() => {
+					first.view.dispatch({ changes: { from: 0, insert: "y" } });
+				});
+				first.unmount();
+
+				const second = await openEditor();
+				fireEvent.click(await screen.findByRole("button", { name: "Restore" }));
+				await waitFor(() => {
+					expect(second.view.state.doc.toString()).toBe("yxalpha\n");
+				});
+				act(() => {
+					second.view.dispatch({ changes: { from: 0, insert: "Q" } });
+				});
+
+				await act(async () => {
+					server.release();
+				});
+				window.dispatchEvent(new Event("pagehide"));
+
+				expect(readDraft(REPO, PATH)?.text).toBe("Qyxalpha\n");
+			});
+
+			test("keeps the reopened editor's newer edits when its older draft is what was saved", async () => {
+				const server = slowServer("alpha\n", { writesOnArrival: false });
+				const first = await openEditor();
+				await typeAndStartSave(first.view);
+				first.unmount();
+
+				// The file reopens before the save reaches the disk, so the closed
+				// editor's edits come back as a draft.
+				const second = await openEditor();
+				fireEvent.click(await screen.findByRole("button", { name: "Restore" }));
+				await waitFor(() => {
+					expect(second.view.state.doc.toString()).toBe("xalpha\n");
+				});
+				act(() => {
+					second.view.dispatch({ changes: { from: 0, insert: "Q" } });
+				});
+
+				await act(async () => {
+					server.release();
+				});
+				window.dispatchEvent(new Event("pagehide"));
+
+				expect(readDraft(REPO, PATH)?.text).toBe("Qxalpha\n");
+			});
+
+			test("leaves a discarded draft discarded", async () => {
+				const server = slowServer("alpha\n");
+				const first = await openEditor();
+				await typeAndStartSave(first.view);
+				act(() => {
+					first.view.dispatch({ changes: { from: 0, insert: "y" } });
+				});
+				// As the page's Discard does: drop the draft, then close the editor.
+				clearDraft(REPO, PATH);
+				first.unmount();
+
+				await act(async () => {
+					server.release();
+				});
+				await pause(PAUSE_MS);
+
+				expect(readDraft(REPO, PATH)).toBeNull();
+			});
+		});
+
+		test("keeps the draft at once when the page hides", async () => {
+			const { view } = await renderEditable("alpha\n");
+			act(() => {
+				view.dispatch({ changes: { from: 0, insert: "x" } });
+			});
+
+			const visibility = Object.getOwnPropertyDescriptor(
+				document,
+				"visibilityState",
+			);
+			Object.defineProperty(document, "visibilityState", {
+				configurable: true,
+				get: () => "hidden",
+			});
+			try {
+				document.dispatchEvent(new Event("visibilitychange"));
+			} finally {
+				if (visibility) {
+					Object.defineProperty(document, "visibilityState", visibility);
+				} else {
+					delete (document as { visibilityState?: unknown }).visibilityState;
+				}
+			}
+
+			expect(readDraft(REPO, PATH)?.text).toBe("xalpha\n");
+		});
+
+		test("keeps the draft at once when the page is left", async () => {
+			const { view } = await renderEditable("alpha\n");
+			act(() => {
+				view.dispatch({ changes: { from: 0, insert: "x" } });
+			});
+
+			window.dispatchEvent(new Event("pagehide"));
+
+			expect(readDraft(REPO, PATH)?.text).toBe("xalpha\n");
+		});
+
+		test("keeps the draft at once when the editor closes", async () => {
+			const { view, unmount } = await renderEditable("alpha\n");
+			act(() => {
+				view.dispatch({ changes: { from: 0, insert: "x" } });
+			});
+
+			unmount();
+
+			expect(readDraft(REPO, PATH)?.text).toBe("xalpha\n");
+		});
+
+		test("says so when a draft cannot be kept", async () => {
+			// A full store: reads find nothing and every write is refused.
+			const full = {
+				length: 0,
+				key: () => null,
+				getItem: () => null,
+				removeItem: () => {},
+				setItem: () => {
+					throw new DOMException("Storage is full", "QuotaExceededError");
+				},
+			};
+			const original = Object.getOwnPropertyDescriptor(window, "localStorage");
+			Object.defineProperty(window, "localStorage", {
+				configurable: true,
+				value: full,
+			});
+			try {
+				const { view } = await renderEditable("alpha\n");
+				act(() => {
+					view.dispatch({ changes: { from: 0, insert: "x" } });
+				});
+				act(() => {
+					window.dispatchEvent(new Event("pagehide"));
+				});
+
+				expect(
+					await screen.findByText(
+						"This browser couldn't keep a copy of your unsaved edits, so save before leaving the file.",
+					),
+				).toBeDefined();
+			} finally {
+				if (original) {
+					Object.defineProperty(window, "localStorage", original);
+				} else {
+					delete (window as { localStorage?: Storage }).localStorage;
+				}
+			}
+		});
+
+		test("offers a draft back when the file is reopened", async () => {
+			writeDraft(REPO, PATH, {
+				text: "edited\n",
+				baseHash: hashText("alpha\n"),
+			});
+
+			const { view } = await renderEditable("alpha\n");
+
+			await screen.findByText(
+				"Unsaved edits from earlier are kept for this file. Restore or discard them to keep editing.",
+			);
+			fireEvent.click(screen.getByRole("button", { name: "Restore" }));
+
+			await waitFor(() => {
+				expect(view.state.doc.toString()).toBe("edited\n");
+			});
+			await screen.findByText("Unsaved changes");
+		});
+
+		test("keeps the buffer read-only and the draft untouched until the offer is answered", async () => {
+			const draft = { text: "edited\n", baseHash: hashText("alpha\n") };
+			writeDraft(REPO, PATH, draft);
+
+			const { view } = await renderEditable("alpha\n");
+			await screen.findByRole("button", { name: "Restore" });
+			await waitFor(() => {
+				expect(view.state.readOnly).toBe(true);
+			});
+			expect(view.contentDOM.getAttribute("contenteditable")).toBe("false");
+
+			// Even a change that gets through leaves the older draft alone.
+			act(() => {
+				view.dispatch({ changes: { from: 0, insert: "y" } });
+			});
+			await pause(PAUSE_MS);
+			expect(readDraft(REPO, PATH)).toEqual(draft);
+			expect(screen.queryByRole("button", { name: "Restore" }) === null).toBe(
+				false,
+			);
+
+			fireEvent.click(screen.getByRole("button", { name: "Restore" }));
+			await waitFor(() => {
+				expect(view.state.readOnly).toBe(false);
+			});
+		});
+
+		test("says so when the file has changed since the draft", async () => {
+			writeDraft(REPO, PATH, {
+				text: "edited\n",
+				baseHash: hashText("alpha\n"),
+			});
+
+			await renderEditable("alpha, as an agent left it\n");
+
+			expect(
+				await screen.findByText(
+					"Unsaved edits from earlier are kept for this file, but the file has changed since. Restoring puts your edited version in place of the current one.",
+				),
+			).toBeDefined();
+		});
+
+		test("offers no draft when the server refuses writes, and keeps it for later", async () => {
+			const draft = { text: "edited\n", baseHash: hashText("alpha\n") };
+			writeDraft(REPO, PATH, draft);
+			globalThis.fetch = (async () =>
+				new Response("alpha\n", {
+					headers: { "x-file-mtime-ms": "1" },
+				})) as unknown as typeof fetch;
+
+			const props = { filePath: PATH, repo: REPO };
+			const { container, rerender } = render(<TextFileEditor {...props} />);
+			// The server's refusal can arrive after the file has loaded.
+			await screen.findByRole("button", { name: "Restore" });
+
+			rerender(
+				<TextFileEditor
+					{...props}
+					readOnly
+					readOnlyLabel="Read-only: writes are disabled"
+				/>,
+			);
+
+			await waitFor(() => {
+				expect(screen.queryByRole("button", { name: "Restore" }) === null).toBe(
+					true,
+				);
+			});
+			expect(container.querySelector(".text-file-editor-notice") === null).toBe(
+				true,
+			);
+			expect(readDraft(REPO, PATH)).toEqual(draft);
+		});
+
+		test("waits for the server to allow writes before offering a draft", async () => {
+			const draft = { text: "edited\n", baseHash: hashText("alpha\n") };
+			writeDraft(REPO, PATH, draft);
+			globalThis.fetch = (async () =>
+				new Response("alpha\n", {
+					headers: { "x-file-mtime-ms": "1" },
+				})) as unknown as typeof fetch;
+			const { EditorView } = await import("@codemirror/view");
+			function isReadOnly(container: HTMLElement) {
+				const editor = container.querySelector<HTMLElement>(".cm-editor");
+				return editor ? EditorView.findFromDOM(editor)?.state.readOnly : null;
+			}
+
+			// Until the server answers, the file opens read-only, without
+			// claiming that writes are disabled.
+			const props = { filePath: PATH, repo: REPO };
+			const { container, rerender } = render(
+				<TextFileEditor
+					{...props}
+					readOnly
+					readOnlyLabel={WRITES_UNKNOWN_LABEL}
+				/>,
+			);
+			await waitFor(() => {
+				expect(isReadOnly(container)).toBe(true);
+			});
+			expect(screen.getByText(WRITES_UNKNOWN_LABEL)).toBeDefined();
+			expect(screen.queryByRole("button", { name: "Restore" }) === null).toBe(
+				true,
+			);
+			expect(screen.queryByRole("button", { name: "Save" }) === null).toBe(
+				true,
+			);
+
+			// An answer that allows writes brings the offer, which holds the
+			// buffer until it is answered.
+			rerender(<TextFileEditor {...props} />);
+			await screen.findByRole("button", { name: "Restore" });
+			await waitFor(() => {
+				expect(isReadOnly(container)).toBe(true);
+			});
+			expect(readDraft(REPO, PATH)).toEqual(draft);
+		});
+
+		test("discarding the offer drops the draft and unlocks the buffer", async () => {
+			writeDraft(REPO, PATH, {
+				text: "edited\n",
+				baseHash: hashText("alpha\n"),
+			});
+
+			const { view } = await renderEditable("alpha\n");
+
+			fireEvent.click(await screen.findByRole("button", { name: "Discard" }));
+
+			expect(readDraft(REPO, PATH)).toBeNull();
+			expect(view.state.doc.toString()).toBe("alpha\n");
+			await waitFor(() => {
+				expect(view.state.readOnly).toBe(false);
+			});
+		});
+	});
+
+	test("reports unsaved edits to its page", async () => {
+		const reports: boolean[] = [];
+		globalThis.fetch = (async (_input: string, init?: RequestInit) => {
+			if (init?.method === "PUT") {
+				return new Response(JSON.stringify({ mtimeMs: 2 }), {
+					headers: { "Content-Type": "application/json" },
+				});
+			}
+			return new Response("alpha\n", { headers: { "x-file-mtime-ms": "1" } });
+		}) as unknown as typeof fetch;
+
+		const { container } = render(
+			<TextFileEditor
+				filePath="notes.md"
+				repo="test-repo"
+				onDirtyChange={(dirty) => reports.push(dirty)}
+			/>,
+		);
+		await waitFor(() => {
+			expect(container.querySelector(".cm-content")).not.toBeNull();
+		});
+		const { EditorView } = await import("@codemirror/view");
+		const view = EditorView.findFromDOM(
+			container.querySelector(".cm-editor") as HTMLElement,
+		);
+
+		act(() => {
+			view?.dispatch({ changes: { from: 0, insert: "x" } });
+		});
+		await waitFor(() => {
+			expect(reports.at(-1)).toBe(true);
+		});
+
+		const save = screen.getByRole("button", { name: "Save" });
+		await waitFor(() => {
+			expect(save.hasAttribute("disabled")).toBe(false);
+		});
+		fireEvent.click(save);
+		await waitFor(() => {
+			expect(reports.at(-1)).toBe(false);
+		});
 	});
 
 	test("keeps an LF file in LF", async () => {

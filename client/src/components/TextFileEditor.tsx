@@ -2,6 +2,14 @@ import { ChevronDown, ChevronUp, WrapText } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { apiUrl } from "../apiUrl.ts";
 import { applyDiff, getDiffOps } from "../diff.ts";
+import {
+	clearDraft,
+	clearDraftIfText,
+	flushDraft,
+	hashText,
+	readDraft,
+	scheduleDraft,
+} from "../drafts.ts";
 import { isChunkLoadError, reloadForStaleChunk } from "../staleChunk.ts";
 import "./TextFileEditor.css";
 
@@ -639,6 +647,12 @@ function describeLineCount(count: number): string {
 
 // Shown in place of the edit status when the server refuses changes.
 export const WRITES_DISABLED_LABEL = "Read-only: writes are disabled";
+// Shown in place of the edit status until the server says whether it allows
+// changes, while the editor stays read-only.
+export const WRITES_UNKNOWN_LABEL = "Checking write access...";
+
+// The file a draft is kept for.
+type DraftTarget = { repo: string; path: string };
 
 export interface TextFileEditorProps {
 	filePath: string;
@@ -665,6 +679,9 @@ export interface TextFileEditorProps {
 	// Called when the user reloads the file, so the page can refetch the change
 	// context that git's line numbers come from along with it.
 	onReload?: () => void;
+	// Reports whether the buffer holds unsaved edits, so the page can ask before
+	// leaving the file or acting on it from outside the editor.
+	onDirtyChange?: (dirty: boolean) => void;
 }
 
 export function TextFileEditor({
@@ -681,6 +698,7 @@ export function TextFileEditor({
 	onStaged,
 	onUnstaged,
 	onReload,
+	onDirtyChange,
 }: TextFileEditorProps) {
 	const editorRef = useRef<HTMLDivElement>(null);
 	const viewRef = useRef<import("@codemirror/view").EditorView | null>(null);
@@ -710,6 +728,91 @@ export function TextFileEditor({
 	// The buffer's latest text, so an editor rebuilt for any reason starts from
 	// it rather than from text that a save or an edit has since replaced.
 	const docTextRef = useRef("");
+	// Unsaved edits to the working tree are kept as a draft, so that leaving the
+	// editor by any route does not lose them. The draft is written once typing
+	// pauses and cleared on save or discard, and reopening the file offers it
+	// back. Until that offer is answered the buffer is read-only and the draft
+	// is left alone, so a stray keystroke cannot replace it.
+	const draftsEnabled = !readOnly && !staged && !deleted;
+	const draftsEnabledRef = useRef(draftsEnabled);
+	// The file whose text the buffer holds, set once it has loaded, so that
+	// edits are only ever kept under the name of the file they were made to.
+	const loadedFileRef = useRef<DraftTarget | null>(null);
+	// Counts the loads that replace the buffer, and the editor closing, so a
+	// save answered after either can tell that the buffer it saved is gone.
+	const loadCountRef = useRef(0);
+	// Where the buffer's edits are kept: the loaded file, while drafts are on.
+	const draftTargetRef = useRef<DraftTarget | null>(null);
+	// A hash of the text the buffer's edits start from: the file as loaded or
+	// last saved.
+	const baseHashRef = useRef("");
+	type DraftOffer = { text: string; fileChanged: boolean };
+	const [draftOffer, setDraftOffer] = useState<DraftOffer | null>(null);
+	const draftOfferRef = useRef<DraftOffer | null>(null);
+	const applyDraftLockRef = useRef<((locked: boolean) => void) | null>(null);
+	const [draftNotKept, setDraftNotKept] = useState(false);
+
+	const offerDraft = useCallback((offer: DraftOffer | null) => {
+		draftOfferRef.current = offer;
+		setDraftOffer(offer);
+		applyDraftLockRef.current?.(offer !== null);
+	}, []);
+
+	// Offers back a draft left from an earlier visit, saying so if the file has
+	// changed since it was taken. A buffer with edits of its own already holds
+	// its draft, and a draft of exactly the file holds no edits.
+	const offerStoredDraft = useCallback(() => {
+		const target = draftTargetRef.current;
+		if (
+			!target ||
+			draftOfferRef.current !== null ||
+			docTextRef.current !== originalContentRef.current
+		) {
+			return;
+		}
+		const draft = readDraft(target.repo, target.path);
+		if (!draft) return;
+		if (draft.text === docTextRef.current) {
+			clearDraft(target.repo, target.path);
+			return;
+		}
+		offerDraft({
+			text: draft.text,
+			fileChanged: draft.baseHash !== baseHashRef.current,
+		});
+	}, [offerDraft]);
+
+	// Keeps the buffer's text as the file's draft once typing pauses.
+	const keepDraft = useCallback((target: DraftTarget, text: string) => {
+		scheduleDraft(
+			target.repo,
+			target.path,
+			{ text, baseHash: baseHashRef.current },
+			(kept) => {
+				const current = draftTargetRef.current;
+				if (current?.repo === target.repo && current.path === target.path) {
+					setDraftNotKept(!kept);
+				}
+			},
+		);
+	}, []);
+
+	useEffect(() => {
+		if (!draftsEnabled) return;
+		// Leaving the file writes a draft still waiting for a pause.
+		return () => flushDraft(repo, filePath);
+	}, [draftsEnabled, repo, filePath]);
+
+	// A save answered after the editor closes finds its buffer gone, as after a
+	// load. The file may be open in another editor by then, with a draft of its
+	// own.
+	useEffect(
+		() => () => {
+			loadCountRef.current += 1;
+		},
+		[],
+	);
+
 	// The change context is refetched independently of the buffer, as after a
 	// stage or a save. The editor reads it through this ref and redraws its
 	// decorations in place, keeping the buffer, its selection, and its scroll
@@ -763,10 +866,14 @@ export function TextFileEditor({
 	const matchesGitDiffRef = useRef(false);
 	const [matchesGitDiff, setMatchesGitDiff] = useState(false);
 	const byLineReady = !changeContextLoading && matchesGitDiff;
+	// While a draft from earlier waits for an answer the buffer is locked, and
+	// nothing acts on its lines: restoring the draft would replace them.
+	const draftOfferPending = draftOffer !== null;
 	// Picking lines only makes sense where a Stage or Unstage acts on them.
 	const linePickingEnabled =
 		!readOnly &&
 		!deleted &&
+		!draftOfferPending &&
 		(staged
 			? onUnstaged !== undefined && unstagesByLine
 			: onStaged !== undefined && stagesByLine);
@@ -779,6 +886,7 @@ export function TextFileEditor({
 	// Stage and Unstage would act on nothing. They wait for a pick and say so.
 	const needsPick =
 		byLineReady &&
+		!draftOfferPending &&
 		changeCount > 0 &&
 		pickedCount === 0 &&
 		!selectionCoversChange;
@@ -808,6 +916,11 @@ export function TextFileEditor({
 		setChangeCount(0);
 		matchesGitDiffRef.current = false;
 		setMatchesGitDiff(false);
+		offerDraft(null);
+		setDraftNotKept(false);
+		loadCountRef.current += 1;
+		loadedFileRef.current = null;
+		draftTargetRef.current = null;
 
 		(async () => {
 			try {
@@ -845,8 +958,14 @@ export function TextFileEditor({
 				lineSeparatorRef.current = detectLineSeparator(text);
 				originalContentRef.current = normalized;
 				docTextRef.current = normalized;
+				baseHashRef.current = hashText(normalized);
+				loadedFileRef.current = { repo, path: filePath };
+				draftTargetRef.current = draftsEnabledRef.current
+					? loadedFileRef.current
+					: null;
 				setContent(normalized);
 				setMtimeMs(Number.isFinite(nextMtimeMs) ? nextMtimeMs : null);
+				offerStoredDraft();
 			} catch (err) {
 				if (err instanceof DOMException && err.name === "AbortError") return;
 				if (active) {
@@ -863,7 +982,33 @@ export function TextFileEditor({
 			active = false;
 			controller.abort();
 		};
-	}, [filePath, repo, reloadToken, staged, deleted]);
+	}, [
+		filePath,
+		repo,
+		reloadToken,
+		staged,
+		deleted,
+		offerDraft,
+		offerStoredDraft,
+	]);
+
+	// Runs after the load above, so a change that also reloads the file, such
+	// as moving between the staged and working views, finds no loaded file to
+	// offer a draft for.
+	useEffect(() => {
+		draftsEnabledRef.current = draftsEnabled;
+		draftTargetRef.current = draftsEnabled ? loadedFileRef.current : null;
+		if (draftsEnabled) {
+			// Writes allowed only after the file loaded, as when the server's
+			// answer arrives late, still bring the offer.
+			offerStoredDraft();
+		} else {
+			// A view that cannot be edited has no draft to offer. Any draft stays
+			// stored for when the file can be edited again.
+			offerDraft(null);
+			setDraftNotKept(false);
+		}
+	}, [draftsEnabled, offerDraft, offerStoredDraft]);
 
 	useEffect(() => {
 		if (content === null || !editorRef.current) return;
@@ -1100,7 +1245,13 @@ export function TextFileEditor({
 
 			const lineWrapCompartment = new Compartment();
 			const linePickingCompartment = new Compartment();
+			const draftLockCompartment = new Compartment();
+			const draftLock = [
+				EditorView.editable.of(false),
+				EditorState.readOnly.of(true),
+			];
 			const baseExtensions = [
+				draftLockCompartment.of(draftOfferRef.current ? draftLock : []),
 				lineNumbers(),
 				linePickingCompartment.of(
 					linePickingEnabledRef.current ? pickerGutter : [],
@@ -1123,8 +1274,19 @@ export function TextFileEditor({
 				EditorView.updateListener.of((update) => {
 					if (!update.docChanged) return;
 					docTextRef.current = update.state.doc.toString();
-					setDirty(docTextRef.current !== originalContentRef.current);
+					const nowDirty = docTextRef.current !== originalContentRef.current;
+					setDirty(nowDirty);
 					setError(null);
+					const target = draftTargetRef.current;
+					// An older draft waiting for an answer is left untouched.
+					if (target && draftOfferRef.current === null) {
+						if (nowDirty) {
+							keepDraft(target, docTextRef.current);
+						} else {
+							clearDraft(target.repo, target.path);
+							setDraftNotKept(false);
+						}
+					}
 				}),
 				EditorView.updateListener.of((update) => {
 					const picks = update.state.field(pickedLines);
@@ -1218,6 +1380,11 @@ export function TextFileEditor({
 					view.dispatch({ effects: clearPickedLines.of(null) });
 				},
 			};
+			applyDraftLockRef.current = (locked: boolean) => {
+				view.dispatch({
+					effects: draftLockCompartment.reconfigure(locked ? draftLock : []),
+				});
+			};
 			applyLineWrapRef.current = (wrap: boolean) => {
 				view.dispatch({
 					effects: lineWrapCompartment.reconfigure(
@@ -1266,6 +1433,7 @@ export function TextFileEditor({
 					// keep any lines picked while the language loaded.
 					applyLineWrapRef.current(lineWrapRef.current);
 					applyLinePickingRef.current(linePickingEnabledRef.current);
+					applyDraftLockRef.current(draftOfferRef.current !== null);
 					if (picks.size > 0) {
 						view.dispatch({
 							effects: [...picks].map((line) => togglePickedLine.of(line)),
@@ -1292,6 +1460,7 @@ export function TextFileEditor({
 			refreshDecorationsRef.current = null;
 			applyLineWrapRef.current = null;
 			applyLinePickingRef.current = null;
+			applyDraftLockRef.current = null;
 			scrollToLineRef.current = null;
 			replaceDocRef.current = null;
 			pickerRef.current = null;
@@ -1304,7 +1473,7 @@ export function TextFileEditor({
 		};
 		// The change context is deliberately absent: it reaches the editor through
 		// changeContextRef, and a change to it redraws the decorations in place.
-	}, [content, filePath, readOnly, staged, deleted]);
+	}, [content, filePath, readOnly, staged, deleted, keepDraft]);
 
 	useEffect(() => {
 		lineWrapRef.current = lineWrap;
@@ -1353,16 +1522,52 @@ export function TextFileEditor({
 		};
 	}, [dirty]);
 
+	const onDirtyChangeRef = useRef(onDirtyChange);
+	useEffect(() => {
+		onDirtyChangeRef.current = onDirtyChange;
+	}, [onDirtyChange]);
+	useEffect(() => {
+		onDirtyChangeRef.current?.(dirty);
+	}, [dirty]);
+	// An editor that is gone holds no edits.
+	useEffect(() => () => onDirtyChangeRef.current?.(false), []);
+
 	const handleReload = useCallback(() => {
 		if (dirty && !window.confirm("Discard unsaved changes?")) {
 			return;
+		}
+		if (dirty && draftTargetRef.current) {
+			clearDraft(draftTargetRef.current.repo, draftTargetRef.current.path);
 		}
 		setReloadToken((value) => value + 1);
 		onReload?.();
 	}, [dirty, onReload]);
 
+	const restoreDraft = useCallback(() => {
+		const replaceDoc = replaceDocRef.current;
+		const offer = draftOfferRef.current;
+		if (!replaceDoc || !offer) return;
+		// Answering the offer unlocks the buffer first, so the restored text is
+		// kept as this file's draft like any other edit. Only the lines that
+		// differ are replaced, so the selection and scroll position carry through.
+		offerDraft(null);
+		replaceDoc(offer.text);
+	}, [offerDraft]);
+
+	const discardDraft = useCallback(() => {
+		if (draftTargetRef.current) {
+			clearDraft(draftTargetRef.current.repo, draftTargetRef.current.path);
+		}
+		offerDraft(null);
+	}, [offerDraft]);
+
 	const handleSave = useCallback(async () => {
 		if (readOnly || staged || !viewRef.current || mtimeMs === null) return;
+		// The file being saved and the load its buffer came from, since another
+		// load, of another file or of this one again, can start before the
+		// server answers.
+		const target = draftTargetRef.current;
+		const load = loadCountRef.current;
 
 		setSaving(true);
 		setError(null);
@@ -1395,9 +1600,31 @@ export function TextFileEditor({
 			}
 
 			const body = (await response.json()) as { mtimeMs?: number };
+			if (loadCountRef.current !== load) {
+				// The buffer was loaded afresh, or the editor closed, while the save
+				// was in flight, so nothing below describes what is open now, and
+				// the save keeps no draft. The saved file's draft is dropped only if
+				// its latest text is just what was saved; any other draft holds
+				// edits made since, in this editor or another.
+				if (target) {
+					clearDraftIfText(target.repo, target.path, nextContent);
+				}
+				onSaved?.();
+				return;
+			}
 			originalContentRef.current = nextContent;
 			setContextStale(true);
-			setDirty(false);
+			baseHashRef.current = hashText(nextContent);
+			// Edits made while the save was in flight are not on disk, so they
+			// stay unsaved, kept as a draft of the text just saved.
+			const stillDirty = docTextRef.current !== nextContent;
+			if (target && stillDirty) {
+				keepDraft(target, docTextRef.current);
+			} else if (target) {
+				clearDraft(target.repo, target.path);
+			}
+			if (!stillDirty) setDraftNotKept(false);
+			setDirty(stillDirty);
 			refreshDecorationsRef.current?.();
 			if (typeof body.mtimeMs === "number" && Number.isFinite(body.mtimeMs)) {
 				setMtimeMs(body.mtimeMs);
@@ -1408,10 +1635,17 @@ export function TextFileEditor({
 		} finally {
 			setSaving(false);
 		}
-	}, [filePath, mtimeMs, onSaved, readOnly, repo, staged]);
+	}, [filePath, keepDraft, mtimeMs, onSaved, readOnly, repo, staged]);
 
 	const handleStage = useCallback(async () => {
-		if (readOnly || !viewRef.current || dirty) return;
+		if (
+			readOnly ||
+			!viewRef.current ||
+			dirty ||
+			draftOfferRef.current !== null
+		) {
+			return;
+		}
 
 		setStaging(true);
 		setError(null);
@@ -1613,6 +1847,7 @@ export function TextFileEditor({
 								saving ||
 								staging ||
 								dirty ||
+								draftOfferPending ||
 								changeCount === 0 ||
 								(stagesByLine && !byLineReady) ||
 								stageNeedsPick
@@ -1620,13 +1855,15 @@ export function TextFileEditor({
 							title={
 								dirty
 									? "Save before staging"
-									: stagesByLine && gitDiffMismatch
-										? "Git's diff doesn't match this file"
-										: stageNeedsPick
-											? "Pick changed lines in the gutter, or select them"
-											: pickedCount > 0
-												? "Stage the picked lines"
-												: "Stage the selected lines"
+									: draftOfferPending
+										? "Restore or discard the earlier edits first"
+										: stagesByLine && gitDiffMismatch
+											? "Git's diff doesn't match this file"
+											: stageNeedsPick
+												? "Pick changed lines in the gutter, or select them"
+												: pickedCount > 0
+													? "Stage the picked lines"
+													: "Stage the selected lines"
 							}
 						>
 							{staging
@@ -1683,6 +1920,35 @@ export function TextFileEditor({
 			</div>
 			{loading && <div className="text-file-editor-message">Loading...</div>}
 			{error && <div className="text-file-editor-error">{error}</div>}
+			{draftNotKept && (
+				<div className="text-file-editor-notice">
+					This browser couldn't keep a copy of your unsaved edits, so save
+					before leaving the file.
+				</div>
+			)}
+			{draftOffer && (
+				<div className="text-file-editor-notice text-file-editor-notice--draft">
+					<span className="text-file-editor-notice-text">
+						{draftOffer.fileChanged
+							? "Unsaved edits from earlier are kept for this file, but the file has changed since. Restoring puts your edited version in place of the current one."
+							: "Unsaved edits from earlier are kept for this file. Restore or discard them to keep editing."}
+					</span>
+					<button
+						type="button"
+						className="text-file-editor-button text-file-editor-button--primary"
+						onClick={restoreDraft}
+					>
+						Restore
+					</button>
+					<button
+						type="button"
+						className="text-file-editor-button"
+						onClick={discardDraft}
+					>
+						Discard
+					</button>
+				</div>
+			)}
 			{gitDiffMismatch && (
 				<div className="text-file-editor-notice">
 					{staged
