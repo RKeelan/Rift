@@ -69,7 +69,7 @@ The loopback binding is what makes the first rule safe. Bound to loopback, the s
 $env:RIFT_ALLOWED_LOGINS = "you@example.com,partner@example.com"
 ```
 
-`RIFT_ALLOW_WRITES` decides whether Rift may change anything. Unless it is `1`, `true`, `yes`, or `on`, every request that would change the filesystem or a repository (saving a file, staging, unstaging) gets a 403, from local callers as well as proxied ones. The switch treats every method other than `GET`, `HEAD`, and `OPTIONS` as a write. The client reads the setting from `/api/health` and disables its editing and staging controls when writes are refused.
+`RIFT_ALLOW_WRITES` decides whether Rift may change anything. Unless it is `1`, `true`, `yes`, or `on`, every request that would change the filesystem or a repository (saving a file, staging, unstaging, committing) gets a 403, from local callers as well as proxied ones. The switch treats every method other than `GET`, `HEAD`, and `OPTIONS` as a write. The client reads the setting from `/api/health` and disables its editing, staging and commit controls when writes are refused.
 
 ```powershell
 $env:RIFT_ALLOW_WRITES = "1"

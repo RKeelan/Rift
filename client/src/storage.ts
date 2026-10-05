@@ -20,3 +20,19 @@ export function writeStringArray(key: string, values: string[]): void {
 	if (typeof window === "undefined") return;
 	window.localStorage.setItem(key, JSON.stringify(values));
 }
+
+/** Reads a string from `localStorage`, treating a missing value as empty. */
+export function readString(key: string): string {
+	if (typeof window === "undefined") return "";
+	return window.localStorage.getItem(key) ?? "";
+}
+
+/** Writes a string to `localStorage`, removing the key for an empty one. */
+export function writeString(key: string, value: string): void {
+	if (typeof window === "undefined") return;
+	if (value === "") {
+		window.localStorage.removeItem(key);
+	} else {
+		window.localStorage.setItem(key, value);
+	}
+}

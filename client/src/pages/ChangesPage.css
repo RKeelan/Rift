@@ -208,6 +208,57 @@
 	cursor: default;
 }
 
+/* The commit box under the staged files */
+
+.changes-commit {
+	display: flex;
+	flex-direction: column;
+	gap: 0.5rem;
+	padding: 0.5rem 0.75rem 0.75rem;
+	border-bottom: 1px solid var(--color-border);
+}
+
+.changes-commit-message {
+	width: 100%;
+	padding: 0.5rem 0.75rem;
+	border: 1px solid var(--color-border);
+	border-radius: 6px;
+	background: var(--color-bg);
+	color: var(--color-text);
+	font: inherit;
+	font-size: 1rem;
+	line-height: 1.5;
+	resize: vertical;
+}
+
+.changes-commit-message:focus {
+	border-color: var(--color-primary);
+	outline: none;
+}
+
+.changes-commit-message:disabled {
+	opacity: 0.5;
+}
+
+.changes-commit-button {
+	align-self: flex-end;
+	min-width: 48px;
+	min-height: 48px;
+	padding: 0 1.25rem;
+	border: 1px solid var(--color-primary);
+	border-radius: 6px;
+	background: var(--color-primary);
+	color: var(--color-surface);
+	font-size: 1rem;
+	font-weight: 600;
+	cursor: pointer;
+}
+
+.changes-commit-button:disabled {
+	opacity: 0.5;
+	cursor: default;
+}
+
 /* Status badges */
 
 .changes-badge {

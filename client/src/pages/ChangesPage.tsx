@@ -11,6 +11,7 @@ import {
 } from "../components/TextFileEditor.tsx";
 import { useSession } from "../contexts/SessionContext.tsx";
 import { clearDraft } from "../drafts.ts";
+import { readString, writeString } from "../storage.ts";
 import "./ChangesPage.css";
 
 type FileStatus = "added" | "modified" | "deleted" | "renamed" | "untracked";
@@ -24,6 +25,13 @@ interface StatusEntry {
 interface StatusResponse {
 	files: StatusEntry[];
 }
+
+interface CommitResponse extends StatusResponse {
+	commit: string;
+}
+
+// How long the new commit's hash stands in for the refresh time.
+const COMMIT_NOTE_MS = 10_000;
 
 interface DiffResponse {
 	diff: string;
@@ -93,6 +101,15 @@ export function ChangesPage({
 	const [confirmingDiscard, setConfirmingDiscard] = useState(false);
 	// The header slot the open editor puts its menu in.
 	const [menuHost, setMenuHost] = useState<HTMLElement | null>(null);
+	// The commit message being written, kept per repo so that opening a file or
+	// leaving the tab doesn't lose a message typed on a phone.
+	const commitDraftKey = `rift:commit-draft:${repoName}`;
+	const [commitMessage, setCommitMessage] = useState(() =>
+		readString(commitDraftKey),
+	);
+	const [committing, setCommitting] = useState(false);
+	// The short hash of the commit just made, shown for a while after it.
+	const [lastCommit, setLastCommit] = useState<string | null>(null);
 	const abortRef = useRef<AbortController | null>(null);
 	const diffAbortRef = useRef<AbortController | null>(null);
 	const comparisonAbortRef = useRef<AbortController | null>(null);
@@ -274,6 +291,63 @@ export function ChangesPage({
 		},
 		[applyStageAction],
 	);
+
+	// The box takes the stored draft each time it appears, so a message that
+	// was committed while the box was gone, as when the page was left and
+	// reopened during a commit, is not offered again.
+	const hasStaged = files.some((entry) => entry.staged);
+	useEffect(() => {
+		if (hasStaged) setCommitMessage(readString(commitDraftKey));
+	}, [commitDraftKey, hasStaged]);
+
+	const handleCommitMessageChange = useCallback(
+		(message: string) => {
+			setCommitMessage(message);
+			writeString(commitDraftKey, message);
+		},
+		[commitDraftKey],
+	);
+
+	const handleCommit = useCallback(async () => {
+		if (commitMessage.trim() === "") return;
+		setActionPending(true);
+		setCommitting(true);
+		try {
+			const res = await fetch(
+				apiUrl(
+					`/api/git/commit?repo=${encodeURIComponent(repoName as string)}`,
+				),
+				{
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify({ message: commitMessage }),
+				},
+			);
+			if (!res.ok) {
+				const body = await res.json().catch(() => null);
+				showError(body?.error?.message ?? `Request failed (${res.status})`);
+				return;
+			}
+			const data: CommitResponse = await res.json();
+			setFiles(data.files);
+			setLastRefreshed(new Date());
+			// The box is read-only while the commit is in flight, so the draft
+			// cleared here is the message that was committed.
+			handleCommitMessageChange("");
+			setLastCommit(data.commit.slice(0, 7));
+		} catch (err) {
+			showError(err instanceof Error ? err.message : "Network error");
+		} finally {
+			setActionPending(false);
+			setCommitting(false);
+		}
+	}, [commitMessage, handleCommitMessageChange, repoName, showError]);
+
+	useEffect(() => {
+		if (lastCommit === null) return;
+		const timer = setTimeout(() => setLastCommit(null), COMMIT_NOTE_MS);
+		return () => clearTimeout(timer);
+	}, [lastCommit]);
 
 	const handleEditorSaved = useCallback(() => {
 		setDiffRefreshToken((value) => value + 1);
@@ -627,10 +701,16 @@ export function ChangesPage({
 				</button>
 			</header>
 
-			{lastRefreshed && (
-				<div className="changes-timestamp">
-					Last refreshed {formatTimestamp(lastRefreshed)}
+			{lastCommit !== null ? (
+				<div className="changes-timestamp" role="status">
+					Committed {lastCommit}
 				</div>
+			) : (
+				lastRefreshed && (
+					<div className="changes-timestamp">
+						Last refreshed {formatTimestamp(lastRefreshed)}
+					</div>
+				)
 			)}
 
 			{writesRefused && (
@@ -684,6 +764,33 @@ export function ChangesPage({
 										</button>
 									</div>
 								))}
+								<div className="changes-commit">
+									<textarea
+										className="changes-commit-message"
+										value={commitMessage}
+										onChange={(event) =>
+											handleCommitMessageChange(event.target.value)
+										}
+										placeholder="Commit message"
+										aria-label="Commit message"
+										rows={3}
+										disabled={!canWrite}
+										readOnly={committing}
+									/>
+									<button
+										type="button"
+										className="changes-commit-button"
+										onClick={() => {
+											void handleCommit();
+										}}
+										disabled={
+											actionPending || !canWrite || commitMessage.trim() === ""
+										}
+										title={writesRefused ? WRITES_DISABLED_TITLE : undefined}
+									>
+										{committing ? "Committing..." : "Commit"}
+									</button>
+								</div>
 							</>
 						)}
 
