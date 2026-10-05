@@ -559,6 +559,78 @@ export function gitRoutes(roots: RepoRoot[]): Router {
 		await handleStageAction(roots, req, res, "unstage");
 	});
 
+	// POST /api/git/commit?repo=<name>  body: { message }
+	// Commits whatever the index holds. The message goes to git whole, so its
+	// first line is the subject and the rest the body, as git reads it.
+	// Responds 400 MISSING_MESSAGE for a blank message and NO_STAGED_CHANGES
+	// when nothing is staged, and with the new commit's hash on success.
+	router.post("/commit", async (req, res) => {
+		const git = await resolveGitRepo(roots, req, res);
+		if (!git) return;
+
+		const isRepo = await git.checkIsRepo();
+		if (!isRepo) {
+			res.status(400).json({
+				error: {
+					code: "NOT_GIT_REPO",
+					message: "The working directory is not a git repository",
+				},
+			});
+			return;
+		}
+
+		const message: unknown = req.body?.message;
+		if (typeof message !== "string" || message.trim() === "") {
+			res.status(400).json({
+				error: {
+					code: "MISSING_MESSAGE",
+					message: "A commit message is required",
+				},
+			});
+			return;
+		}
+
+		const toplevel = (await git.revparse(["--show-toplevel"])).trim();
+		const gitRoot = simpleGit(toplevel);
+		const before = buildStatusEntries(await gitRoot.status());
+		if (!before.some((entry) => entry.staged)) {
+			res.status(400).json({
+				error: {
+					code: "NO_STAGED_CHANGES",
+					message: "There are no staged changes to commit",
+				},
+			});
+			return;
+		}
+
+		// The message goes through a file, as a patch does, because a command
+		// line has a length limit that a long message can pass.
+		const messageFile = path.join(
+			os.tmpdir(),
+			`rift-commit-${randomUUID()}.txt`,
+		);
+		let commit: string;
+		try {
+			await fs.writeFile(messageFile, message);
+			await gitRoot.raw(["commit", "-F", messageFile]);
+			commit = (await gitRoot.revparse(["HEAD"])).trim();
+		} catch (err) {
+			// A failing hook or a missing identity reads best in git's own words.
+			res.status(500).json({
+				error: {
+					code: "GIT_ERROR",
+					message: err instanceof Error ? err.message : "Git command failed",
+				},
+			});
+			return;
+		} finally {
+			await fs.rm(messageFile, { force: true });
+		}
+
+		const status = await gitRoot.status();
+		res.json({ commit, files: buildStatusEntries(status) });
+	});
+
 	// GET /api/git/log?repo=<name>&limit=<n>&offset=<n>
 	router.get("/log", async (req, res) => {
 		const git = await resolveGitRepo(roots, req, res);

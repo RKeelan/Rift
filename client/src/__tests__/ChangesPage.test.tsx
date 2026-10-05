@@ -1516,3 +1516,196 @@ describe("ChangesPage", () => {
 		});
 	});
 });
+
+describe("committing", () => {
+	const STAGED: StatusFile[] = [
+		{ path: "app.ts", status: "modified", staged: true },
+	];
+	const COMMIT = "0123456789abcdef0123456789abcdef01234567";
+
+	// Serves the status as `files`, and answers a commit with `commit`, which
+	// leaves nothing staged.
+	function mockFetchForCommit(
+		files: StatusFile[],
+		commit: { status: number; body: unknown } = {
+			status: 200,
+			body: { commit: COMMIT, files: [] },
+		},
+	) {
+		const commitBodies: unknown[] = [];
+		globalThis.fetch = mock(
+			(input: string | URL | Request, init?: RequestInit) => {
+				const url = typeof input === "string" ? input : input.toString();
+				if (url.includes("/api/git/commit")) {
+					commitBodies.push(JSON.parse(String(init?.body)));
+					return Promise.resolve(
+						new Response(JSON.stringify(commit.body), {
+							status: commit.status,
+							headers: { "Content-Type": "application/json" },
+						}),
+					);
+				}
+				if (url.includes("/api/git/status")) {
+					return Promise.resolve(
+						new Response(JSON.stringify({ files }), {
+							status: 200,
+							headers: { "Content-Type": "application/json" },
+						}),
+					);
+				}
+				return Promise.resolve(new Response("Not found", { status: 404 }));
+			},
+		) as typeof fetch;
+		return commitBodies;
+	}
+
+	function messageBox() {
+		return screen.findByRole("textbox", { name: "Commit message" });
+	}
+
+	function commitButton() {
+		return screen.getByRole("button", { name: "Commit" });
+	}
+
+	test("offers a commit box only while changes are staged", async () => {
+		mockFetchForCommit([{ path: "app.ts", status: "modified", staged: false }]);
+		renderChangesPage();
+		await screen.findByLabelText("Stage app.ts");
+		expect(
+			screen.queryByRole("textbox", { name: "Commit message" }),
+		).toBeNull();
+
+		cleanup();
+		mockFetchForCommit(STAGED);
+		renderChangesPage();
+		expect(await messageBox()).toBeDefined();
+	});
+
+	test("offers Commit only once the message has some text", async () => {
+		mockFetchForCommit(STAGED);
+		renderChangesPage();
+		const box = await messageBox();
+		expect(commitButton().hasAttribute("disabled")).toBe(true);
+
+		fireEvent.change(box, { target: { value: " \n " } });
+		expect(commitButton().hasAttribute("disabled")).toBe(true);
+
+		fireEvent.change(box, { target: { value: "Change the app" } });
+		expect(commitButton().hasAttribute("disabled")).toBe(false);
+	});
+
+	test("commits the message, then clears it and shows the new commit", async () => {
+		const commitBodies = mockFetchForCommit(STAGED);
+		renderChangesPage();
+		const message = "Change the app\n\n- Explain why.";
+		fireEvent.change(await messageBox(), { target: { value: message } });
+
+		fireEvent.click(commitButton());
+
+		await screen.findByText("Committed 0123456");
+		expect(commitBodies).toEqual([{ message }]);
+		expect(screen.getByText("Working tree clean")).toBeDefined();
+		expect(
+			globalThis.localStorage.getItem("rift:commit-draft:test-repo"),
+		).toBeNull();
+	});
+
+	test("keeps an unsent message for when the list comes back", async () => {
+		mockFetchForCommit(STAGED);
+		renderChangesPage();
+		fireEvent.change(await messageBox(), {
+			target: { value: "Change the app" },
+		});
+
+		cleanup();
+		renderChangesPage();
+
+		expect(((await messageBox()) as HTMLTextAreaElement).value).toBe(
+			"Change the app",
+		);
+	});
+
+	test("shows git's message when the commit fails, and keeps the message", async () => {
+		const failure = "pre-commit hook refused the commit";
+		mockFetchForCommit(STAGED, {
+			status: 500,
+			body: { error: { code: "GIT_ERROR", message: failure } },
+		});
+		renderChangesPage();
+		const box = await messageBox();
+		fireEvent.change(box, { target: { value: "Change the app" } });
+
+		fireEvent.click(commitButton());
+
+		await waitFor(() => {
+			expect(screen.getByRole("alert").textContent).toContain(failure);
+		});
+		expect((box as HTMLTextAreaElement).value).toBe("Change the app");
+		expect(commitButton().hasAttribute("disabled")).toBe(false);
+	});
+
+	test("keeps the message when the request fails", async () => {
+		mockFetchForCommit(STAGED);
+		const answer = globalThis.fetch;
+		globalThis.fetch = mock((input: string | URL | Request) =>
+			String(input).includes("/api/git/commit")
+				? Promise.reject(new TypeError("Failed to fetch"))
+				: answer(input),
+		) as typeof fetch;
+		renderChangesPage();
+		const box = await messageBox();
+		fireEvent.change(box, { target: { value: "Change the app" } });
+
+		fireEvent.click(commitButton());
+
+		await waitFor(() => {
+			expect(screen.getByRole("alert").textContent).toContain(
+				"Failed to fetch",
+			);
+		});
+		expect((box as HTMLTextAreaElement).value).toBe("Change the app");
+		expect(globalThis.localStorage.getItem("rift:commit-draft:test-repo")).toBe(
+			"Change the app",
+		);
+	});
+
+	test("takes the stored draft each time the box appears", async () => {
+		let files = STAGED;
+		globalThis.fetch = mock((input: string | URL | Request) =>
+			Promise.resolve(
+				String(input).includes("/api/git/status")
+					? new Response(JSON.stringify({ files }), {
+							status: 200,
+							headers: { "Content-Type": "application/json" },
+						})
+					: new Response("Not found", { status: 404 }),
+			),
+		) as typeof fetch;
+		renderChangesPage();
+		fireEvent.change(await messageBox(), {
+			target: { value: "Change the app" },
+		});
+
+		// The message is committed from elsewhere, as by this page before it
+		// was left and reopened, which clears the stored draft.
+		globalThis.localStorage.removeItem("rift:commit-draft:test-repo");
+		files = [];
+		fireEvent.click(screen.getByLabelText("Refresh status"));
+		await screen.findByText("Working tree clean");
+
+		files = STAGED;
+		fireEvent.click(screen.getByLabelText("Refresh status"));
+
+		expect(((await messageBox()) as HTMLTextAreaElement).value).toBe("");
+	});
+
+	test("offers no commit when the server refuses writes", async () => {
+		mockFetchForCommit(STAGED);
+		renderChangesPage(["/changes"], { writesAllowed: false });
+		const box = await messageBox();
+		fireEvent.change(box, { target: { value: "Change the app" } });
+
+		expect(box.hasAttribute("disabled")).toBe(true);
+		expect(commitButton().hasAttribute("disabled")).toBe(true);
+	});
+});
