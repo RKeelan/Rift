@@ -1,7 +1,6 @@
 import os from "node:os";
 import path from "node:path";
 import express from "express";
-import { simpleGit } from "simple-git";
 import {
 	identityGate,
 	parseAllowedLogins,
@@ -9,6 +8,7 @@ import {
 	writeGate,
 } from "./access.js";
 import { type RepoRoot, resolveRepoInRoots } from "./pathUtils.js";
+import { repoGit } from "./repoGit.js";
 import { fileRoutes } from "./routes/files.js";
 import { gitRoutes } from "./routes/git.js";
 import { repoRoutes } from "./routes/repos.js";
@@ -190,7 +190,7 @@ export function createApp(config: AppConfig): express.Express {
 		}
 		let gitRepo = false;
 		try {
-			const git = simpleGit(result.path);
+			const git = repoGit(result.path);
 			gitRepo = await git.checkIsRepo();
 		} catch {
 			// Not a git repo
