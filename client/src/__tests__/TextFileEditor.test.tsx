@@ -17,6 +17,9 @@ import { GIT_DIFF_CASES } from "./gitDiffCases.ts";
 
 // git's diff for "a\nb\nc\n" becoming "a\nB\nc\n".
 const B_MODIFIED_DIFF = "@@ -1,3 +1,3 @@\n a\n-b\n+B\n c\n";
+// The same diff with its headers, as `git diff --full-index` prints it.
+const B_MODIFIED_BLOBS = `${"1".repeat(40)}..${"2".repeat(40)}`;
+const B_MODIFIED_DIFF_WITH_BLOBS = `diff --git a/notes.txt b/notes.txt\nindex ${B_MODIFIED_BLOBS} 100644\n--- a/notes.txt\n+++ b/notes.txt\n${B_MODIFIED_DIFF}`;
 
 function gitCase(name: string) {
 	const found = GIT_DIFF_CASES.find((candidate) => candidate.name === name);
@@ -498,6 +501,66 @@ describe("staging", () => {
 		});
 	});
 
+	test("names the diff its line numbers come from", async () => {
+		const { view, requests } = await renderForStaging({
+			changeDiff: B_MODIFIED_DIFF_WITH_BLOBS,
+		});
+		act(() => {
+			view.dispatch({ selection: { anchor: view.state.doc.line(2).from } });
+		});
+
+		const stage = await screen.findByRole("button", { name: "Stage" });
+		await waitFor(() => {
+			expect(stage.hasAttribute("disabled")).toBe(false);
+		});
+		fireEvent.click(stage);
+
+		await waitFor(() => {
+			expect(requests.length).toBe(1);
+		});
+		expect(JSON.parse(requests[0].body as string)).toEqual({
+			path: "notes.txt",
+			ranges: [[2, 2]],
+			expectedBlobs: B_MODIFIED_BLOBS,
+		});
+	});
+
+	test("explains a refusal because the file changed since it was loaded", async () => {
+		let staged = 0;
+		const { view } = await renderForStaging({
+			changeDiff: B_MODIFIED_DIFF_WITH_BLOBS,
+			onStaged: () => {
+				staged += 1;
+			},
+		});
+		globalThis.fetch = (async () =>
+			new Response(
+				JSON.stringify({
+					error: {
+						code: "DIFF_CHANGED",
+						message: "The diff changed since it was read",
+					},
+				}),
+				{ status: 409, headers: { "Content-Type": "application/json" } },
+			)) as unknown as typeof fetch;
+		act(() => {
+			view.dispatch({ selection: { anchor: view.state.doc.line(2).from } });
+		});
+
+		const stage = await screen.findByRole("button", { name: "Stage" });
+		await waitFor(() => {
+			expect(stage.hasAttribute("disabled")).toBe(false);
+		});
+		fireEvent.click(stage);
+
+		expect(
+			await screen.findByText(
+				"The file changed since it was loaded. Reload before staging.",
+			),
+		).toBeDefined();
+		expect(staged).toBe(0);
+	});
+
 	test("stages an untracked file whole, without ranges", async () => {
 		const { requests } = await renderForStaging({
 			changeType: "untracked",
@@ -516,6 +579,7 @@ describe("staging", () => {
 		});
 		expect(JSON.parse(requests[0].body as string)).toEqual({
 			path: "notes.txt",
+			expectedMtimeMs: 1,
 		});
 	});
 
@@ -673,6 +737,158 @@ describe("unstaging", () => {
 		expect(JSON.parse(requests[0].body as string)).toEqual({
 			path: "notes.txt",
 			ranges: [[2, 2]],
+		});
+	});
+
+	test("names the staged diff its line numbers come from", async () => {
+		const { view, requests } = await renderForUnstaging({
+			changeDiff: B_MODIFIED_DIFF_WITH_BLOBS,
+		});
+
+		const line2 = view.state.doc.line(2);
+		act(() => {
+			view.dispatch({ selection: { anchor: line2.from } });
+		});
+		const unstage = await screen.findByRole("button", { name: "Unstage" });
+		await waitFor(() => {
+			expect(unstage.hasAttribute("disabled")).toBe(false);
+		});
+		fireEvent.click(unstage);
+
+		await waitFor(() => {
+			expect(requests.length).toBe(1);
+		});
+		expect(JSON.parse(requests[0].body as string)).toEqual({
+			path: "notes.txt",
+			ranges: [[2, 2]],
+			expectedBlobs: B_MODIFIED_BLOBS,
+		});
+	});
+
+	test("explains a refusal because the staged change is different now", async () => {
+		let unstaged = 0;
+		const { view } = await renderForUnstaging({
+			changeDiff: B_MODIFIED_DIFF_WITH_BLOBS,
+			onUnstaged: () => {
+				unstaged += 1;
+			},
+		});
+		globalThis.fetch = (async () =>
+			new Response(
+				JSON.stringify({
+					error: {
+						code: "DIFF_CHANGED",
+						message: "The diff changed since it was read",
+					},
+				}),
+				{ status: 409, headers: { "Content-Type": "application/json" } },
+			)) as unknown as typeof fetch;
+		act(() => {
+			view.dispatch({ selection: { anchor: view.state.doc.line(2).from } });
+		});
+
+		const unstage = await screen.findByRole("button", { name: "Unstage" });
+		await waitFor(() => {
+			expect(unstage.hasAttribute("disabled")).toBe(false);
+		});
+		fireEvent.click(unstage);
+
+		expect(
+			await screen.findByText(
+				"The staged change is different now. Reload before unstaging.",
+			),
+		).toBeDefined();
+		// Nothing was unstaged, so the buffer still shows the staged content.
+		expect(unstaged).toBe(0);
+		expect(view.state.doc.toString()).toBe("a\nB\nc\n");
+	});
+
+	test("names the refetched staged diff after unstaging in place", async () => {
+		const header = (blobs: string) =>
+			`diff --git a/notes.txt b/notes.txt\nindex ${blobs} 100644\n--- a/notes.txt\n+++ b/notes.txt\n`;
+		const before = `${"1".repeat(40)}..${"2".repeat(40)}`;
+		const after = `${"1".repeat(40)}..${"3".repeat(40)}`;
+		let index = "a\nB\nc\nD\n";
+		const requests: unknown[] = [];
+		globalThis.fetch = (async (_input: string, init?: RequestInit) => {
+			if (init?.method === "POST") {
+				requests.push(JSON.parse(init.body as string));
+				index = "a\nb\nc\nD\n";
+				return new Response(JSON.stringify({ files: [] }), {
+					headers: { "Content-Type": "application/json" },
+				});
+			}
+			return new Response(index);
+		}) as unknown as typeof fetch;
+
+		const props = {
+			filePath: "notes.txt",
+			repo: "test-repo",
+			comparisonContent: "a\nb\nc\nd\n",
+			changeType: "modified" as const,
+			staged: true,
+			onUnstaged: () => {},
+		};
+		const { container, rerender } = render(
+			<TextFileEditor
+				{...props}
+				changeDiff={`${header(before)}@@ -1,4 +1,4 @@\n a\n-b\n+B\n c\n-d\n+D\n`}
+			/>,
+		);
+		await waitFor(() => {
+			expect(container.querySelector(".cm-content")).not.toBeNull();
+		});
+		const { EditorView } = await import("@codemirror/view");
+		const view = EditorView.findFromDOM(
+			container.querySelector(".cm-editor") as HTMLElement,
+		);
+		if (!view) throw new Error("editor view not found");
+
+		act(() => {
+			view.dispatch({ selection: { anchor: view.state.doc.line(2).from } });
+		});
+		const unstage = await screen.findByRole("button", { name: "Unstage" });
+		await waitFor(() => {
+			expect(unstage.hasAttribute("disabled")).toBe(false);
+		});
+		fireEvent.click(unstage);
+		await waitFor(() => {
+			expect(view.state.doc.toString()).toBe("a\nb\nc\nD\n");
+		});
+		expect(requests[0]).toEqual({
+			path: "notes.txt",
+			ranges: [[2, 2]],
+			expectedBlobs: before,
+		});
+
+		// The buffer now holds the new staged content, which the old diff no
+		// longer describes, so nothing is unstaged by line until the page hands
+		// over the diff it refetches.
+		act(() => {
+			view.dispatch({ selection: { anchor: view.state.doc.line(4).from } });
+		});
+		expect(
+			screen.getByRole("button", { name: "Unstage" }).hasAttribute("disabled"),
+		).toBe(true);
+
+		rerender(
+			<TextFileEditor
+				{...props}
+				changeDiff={`${header(after)}@@ -1,4 +1,4 @@\n a\n b\n c\n-d\n+D\n`}
+			/>,
+		);
+		const refreshed = await screen.findByRole("button", { name: "Unstage" });
+		await waitFor(() => {
+			expect(refreshed.hasAttribute("disabled")).toBe(false);
+		});
+		fireEvent.click(refreshed);
+		await waitFor(() => {
+			expect(requests.length).toBe(2);
+		});
+		expect(requests[1]).toEqual({
+			path: "notes.txt",
+			ranges: [[4, 4]],
+			expectedBlobs: after,
 		});
 	});
 
@@ -964,6 +1180,29 @@ describe("line picking", () => {
 				[2, 2],
 				[4, 4],
 			],
+		});
+	});
+
+	test("names the diff the picked lines come from", async () => {
+		const blobs = `${"a".repeat(40)}..${"b".repeat(40)}`;
+		const { container, requests } = await renderForPicking(
+			{},
+			{
+				...MODIFIED,
+				diff: `diff --git a/notes.txt b/notes.txt\nindex ${blobs} 100644\n--- a/notes.txt\n+++ b/notes.txt\n${MODIFIED.diff}`,
+			},
+		);
+
+		await tap(container, 4);
+		fireEvent.click(await enabledButton("Stage 1 line"));
+
+		await waitFor(() => {
+			expect(requests.length).toBe(1);
+		});
+		expect(requests[0]).toEqual({
+			path: "notes.txt",
+			ranges: [[4, 4]],
+			expectedBlobs: blobs,
 		});
 	});
 
