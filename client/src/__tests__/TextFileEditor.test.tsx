@@ -1271,8 +1271,8 @@ describe("line picking", () => {
 		);
 	});
 
-	test("swallows the press so picking does not move focus", async () => {
-		const { container } = await renderForPicking();
+	test("swallows the press, and takes focus from the editor", async () => {
+		const { container, view } = await renderForPicking();
 
 		const target = await waitFor(() => {
 			const found = container.querySelector(".cm-pickTarget");
@@ -1282,6 +1282,16 @@ describe("line picking", () => {
 
 		// fireEvent returns false when the handler prevented the default.
 		expect(fireEvent.mouseDown(target)).toBe(false);
+
+		// A tap while the editor has focus would raise Android's keyboard. The
+		// selection outlasts the focus.
+		act(() => view.focus());
+		selectLines(view, 1, 2);
+		const selection = view.state.selection;
+		expect(document.activeElement === view.contentDOM).toBe(true);
+		fireEvent.mouseDown(target);
+		expect(document.activeElement === view.contentDOM).toBe(false);
+		expect(view.state.selection.eq(selection)).toBe(true);
 	});
 
 	test("stages the picked lines in place of the selection", async () => {
