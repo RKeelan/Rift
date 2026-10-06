@@ -182,8 +182,11 @@ function mockFetchForChanges(
 	}) as typeof fetch;
 }
 
+// The action bar of the editor on screen.
 function editorBar(container: HTMLElement) {
-	const bar = container.querySelector<HTMLElement>(".text-file-editor-bar");
+	const bar = container.querySelector<HTMLElement>(
+		".changes-editor-view:not(.changes-editor-view--hidden) .text-file-editor-bar",
+	);
 	if (!bar) throw new Error("no editor bar");
 	return bar;
 }
@@ -399,7 +402,7 @@ describe("ChangesPage", () => {
 		expect(container.querySelector(".diff-viewer")).toBeNull();
 	});
 
-	test("shows filename and staged/unstaged label in diff header", async () => {
+	test("shows the file's name, and which side of it is open", async () => {
 		mockFetchForChanges(
 			[{ path: "src/utils.ts", status: "modified", staged: true }],
 			{
@@ -425,9 +428,9 @@ describe("ChangesPage", () => {
 			expect(filename?.textContent).toBe("src/utils.ts");
 		});
 
-		const label = container.querySelector(".changes-diff-staged-label");
-		expect(label).not.toBeNull();
-		expect(label?.textContent).toBe("staged");
+		expect(
+			screen.getByRole("tab", { name: "Staged" }).getAttribute("aria-selected"),
+		).toBe("true");
 	});
 
 	test("opens editable files directly in the editor", async () => {
@@ -1079,8 +1082,8 @@ describe("ChangesPage", () => {
 			).toBe(true);
 			if (status === "deleted") {
 				expect(
-					container.querySelector(".changes-editor-note")?.textContent,
-				).toBe("Viewing the deleted file.");
+					container.querySelector(".text-file-editor-status")?.textContent,
+				).toBe("Deleted file");
 			}
 			cleanup();
 		}
@@ -1417,7 +1420,7 @@ describe("ChangesPage", () => {
 		expect(screen.getByText("Read-only: writes are disabled")).not.toBeNull();
 		expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
 		const stageButtons = Array.from(
-			container.querySelectorAll("button"),
+			container.querySelectorAll("button:not([role=tab])"),
 		).filter((button) => button.textContent?.startsWith("Stage"));
 		// Only the bar's whole-file action remains, and it is disabled.
 		expect(stageButtons.length).toBe(1);
@@ -1707,5 +1710,260 @@ describe("committing", () => {
 
 		expect(box.hasAttribute("disabled")).toBe(true);
 		expect(commitButton().hasAttribute("disabled")).toBe(true);
+	});
+});
+
+describe("switching between a file's unstaged and staged changes", () => {
+	const BOTH: StatusFile[] = [
+		{ path: "app.ts", status: "modified", staged: false },
+		{ path: "app.ts", status: "modified", staged: true },
+	];
+
+	function mockFile(files: StatusFile[]) {
+		mockFetchForChanges(files, {
+			baseContent: { path: "app.ts", content: "previous\n" },
+			diff: {
+				path: "app.ts",
+				diff: "@@ -1 +1 @@\n-previous\n+current\n",
+				truncated: false,
+			},
+			fileContent: { path: "app.ts", content: "current\n" },
+		});
+	}
+
+	function tabs() {
+		return screen.getAllByRole("tab").map((tab) => {
+			const marks = [
+				tab.getAttribute("aria-selected") === "true" ? "selected" : "",
+				tab.hasAttribute("disabled") ? "disabled" : "",
+			].filter(Boolean);
+			return `${tab.textContent}${marks.length ? ` (${marks.join(", ")})` : ""}`;
+		});
+	}
+
+	// Each side's editor, and whether it is the one on screen.
+	function editors(container: HTMLElement) {
+		return [...container.querySelectorAll(".changes-editor-view")].map(
+			(view) =>
+				view.classList.contains("changes-editor-view--hidden")
+					? "hidden"
+					: "shown",
+		);
+	}
+
+	test("offers both sides, greying out a side with no changes", async () => {
+		mockFile([{ path: "app.ts", status: "modified", staged: false }]);
+		const { container } = renderChangesPage([
+			"/changes?path=app.ts&staged=false",
+		]);
+
+		await screen.findByRole("tablist", { name: "Changes to show" });
+		expect(tabs()).toEqual(["Unstaged (selected)", "Staged (disabled)"]);
+		expect(editors(container)).toEqual(["shown"]);
+	});
+
+	test("shows the other side at once, without loading it again", async () => {
+		mockFile(BOTH);
+		const { container } = renderChangesPage([
+			"/changes",
+			"/changes?path=app.ts&staged=false",
+		]);
+		await waitFor(() => {
+			expect(container.querySelectorAll(".cm-content").length).toBe(2);
+		});
+		expect(tabs()).toEqual(["Unstaged (selected)", "Staged"]);
+		expect(editors(container)).toEqual(["shown", "hidden"]);
+		const { calls } = (
+			globalThis.fetch as unknown as { mock: { calls: unknown[] } }
+		).mock;
+		const before = calls.length;
+
+		fireEvent.click(screen.getByRole("tab", { name: "Staged" }));
+
+		expect(tabs()).toEqual(["Unstaged", "Staged (selected)"]);
+		expect(editors(container)).toEqual(["hidden", "shown"]);
+		expect(screen.getByTestId("location-search").textContent).toBe(
+			"?path=app.ts&staged=true",
+		);
+		expect(calls.length).toBe(before);
+
+		// The switch replaced the file's history entry, so Back leaves the file.
+		fireEvent.click(screen.getByRole("button", { name: "History back" }));
+		await waitFor(() => {
+			expect(screen.getByTestId("location-search").textContent).toBe("");
+		});
+	});
+
+	// Answers every request the open file makes, and a stage with `files`.
+	function mockFileRequests(files: StatusFile[], urls: string[] = []) {
+		globalThis.fetch = mock(
+			(input: string | URL | Request, init?: RequestInit) => {
+				const url = typeof input === "string" ? input : input.toString();
+				urls.push(url);
+				const json = (body: unknown) =>
+					Promise.resolve(
+						new Response(JSON.stringify(body), {
+							status: 200,
+							headers: { "Content-Type": "application/json" },
+						}),
+					);
+				if (init?.method === "POST") return json({ files });
+				if (url.includes("/api/git/status")) return json({ files });
+				if (url.includes("/api/git/diff")) {
+					return json({
+						diff: "@@ -1 +1 @@\n-previous\n+current\n",
+						truncated: false,
+					});
+				}
+				if (url.includes("/api/git/base-content")) {
+					return Promise.resolve(new Response("previous\n"));
+				}
+				return Promise.resolve(
+					new Response("current\n", { headers: { "x-file-mtime-ms": "1" } }),
+				);
+			},
+		) as typeof fetch;
+		return urls;
+	}
+
+	async function enabledStrip(name: string) {
+		const strip = await screen.findByRole("button", { name });
+		await waitFor(() => {
+			expect(strip.getAttribute("aria-disabled")).toBe("false");
+		});
+		return strip;
+	}
+
+	test("reloads the staged side when the working tree stages lines", async () => {
+		const urls = mockFileRequests(BOTH);
+		renderChangesPage(["/changes?path=app.ts&staged=false"]);
+		const strip = await enabledStrip("Stage the change at line 1");
+		// The staged side's content is the index blob, read through
+		// base-content with staged=false, and keyed by its reload count.
+		const stagedContentReloads = () =>
+			urls.filter(
+				(url) =>
+					url.includes("/api/git/base-content") &&
+					url.includes("staged=false") &&
+					url.includes("_reload=0.1"),
+			).length;
+		expect(stagedContentReloads()).toBe(0);
+
+		fireEvent.click(strip);
+
+		await waitFor(() => {
+			expect(stagedContentReloads()).toBe(1);
+		});
+	});
+
+	test("keeps an edited working tree on offer when git sees no change in it", async () => {
+		// Everything is staged, so git reports no unstaged change, but the
+		// working tree is open and edited.
+		mockFileRequests([{ path: "app.ts", status: "modified", staged: true }]);
+		const { container } = renderChangesPage([
+			"/changes?path=app.ts&staged=false",
+		]);
+		await waitFor(() => {
+			expect(container.querySelector(".cm-content")).not.toBeNull();
+		});
+		const { EditorView } = await import("@codemirror/view");
+		const view = EditorView.findFromDOM(
+			container.querySelector(".cm-editor") as HTMLElement,
+		);
+		act(() => {
+			view?.dispatch({ changes: { from: 0, insert: "edited " } });
+		});
+		await screen.findByText("Unsaved changes");
+
+		fireEvent.click(screen.getByRole("tab", { name: "Staged" }));
+
+		expect(tabs()).toEqual(["Unstaged", "Staged (selected)"]);
+		expect(editors(container)).toEqual(["hidden", "shown"]);
+		fireEvent.click(screen.getByRole("tab", { name: "Unstaged" }));
+		expect(view?.state.doc.toString()).toBe("edited current\n");
+	});
+
+	test("shows the edited working tree after unstaging the whole file", async () => {
+		const urls = mockFileRequests(BOTH);
+		const { container } = renderChangesPage([
+			"/changes?path=app.ts&staged=false",
+		]);
+		await waitFor(() => {
+			expect(container.querySelectorAll(".cm-content").length).toBe(2);
+		});
+		const { EditorView } = await import("@codemirror/view");
+		const view = EditorView.findFromDOM(
+			container.querySelector(".cm-editor") as HTMLElement,
+		);
+		act(() => {
+			view?.dispatch({ changes: { from: 0, insert: "edited " } });
+		});
+		await screen.findByText("Unsaved changes");
+		fireEvent.click(screen.getByRole("tab", { name: "Staged" }));
+
+		fireEvent.click(
+			within(editorBar(container)).getByRole("button", {
+				name: "Unstage file",
+			}),
+		);
+
+		await waitFor(() => {
+			expect(urls.some((url) => url.includes("/api/git/unstage"))).toBe(true);
+			expect(tabs()).toEqual(["Unstaged (selected)", "Staged"]);
+		});
+		expect(screen.getByTestId("location-search").textContent).toBe(
+			"?path=app.ts&staged=false",
+		);
+		expect(view?.state.doc.toString()).toBe("edited current\n");
+	});
+
+	test("rereads the status on a reload", async () => {
+		const urls = mockFileRequests(BOTH);
+		const { container } = renderChangesPage([
+			"/changes?path=app.ts&staged=false",
+		]);
+		await waitFor(() => {
+			expect(container.querySelectorAll(".cm-content").length).toBe(2);
+		});
+		const statusReads = () =>
+			urls.filter((url) => url.includes("/api/git/status")).length;
+		const before = statusReads();
+
+		// The menu of the side on screen sits in the header.
+		const header = container.querySelector(
+			".changes-diff-header",
+		) as HTMLElement;
+		fireEvent.click(
+			within(header).getByRole("button", { name: "More actions" }),
+		);
+		fireEvent.click(within(header).getByRole("menuitem", { name: "Reload" }));
+
+		await waitFor(() => {
+			expect(statusReads()).toBe(before + 1);
+		});
+	});
+
+	test("keeps unsaved edits across a switch", async () => {
+		mockFile(BOTH);
+		const { container } = renderChangesPage([
+			"/changes?path=app.ts&staged=false",
+		]);
+		await waitFor(() => {
+			expect(container.querySelectorAll(".cm-content").length).toBe(2);
+		});
+		const { EditorView } = await import("@codemirror/view");
+		const view = EditorView.findFromDOM(
+			container.querySelector(".cm-editor") as HTMLElement,
+		);
+		act(() => {
+			view?.dispatch({ changes: { from: 0, insert: "edited " } });
+		});
+		await screen.findByText("Unsaved changes");
+
+		fireEvent.click(screen.getByRole("tab", { name: "Staged" }));
+		fireEvent.click(screen.getByRole("tab", { name: "Unstaged" }));
+
+		expect(view?.state.doc.toString()).toBe("edited current\n");
+		expect(screen.getByText("Unsaved changes")).toBeDefined();
 	});
 });

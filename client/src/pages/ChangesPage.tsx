@@ -5,16 +5,14 @@ import { apiUrl } from "../apiUrl.ts";
 import { useErrorBanner } from "../components/ErrorBanner.tsx";
 import {
 	type FileAction,
-	TextFileEditor,
 	WRITES_DISABLED_LABEL,
 	WRITES_UNKNOWN_LABEL,
 } from "../components/TextFileEditor.tsx";
 import { useSession } from "../contexts/SessionContext.tsx";
 import { clearDraft } from "../drafts.ts";
 import { readString, writeString } from "../storage.ts";
+import { type FileStatus, FileSideView } from "./FileSideView.tsx";
 import "./ChangesPage.css";
-
-type FileStatus = "added" | "modified" | "deleted" | "renamed" | "untracked";
 
 interface StatusEntry {
 	path: string;
@@ -32,11 +30,6 @@ interface CommitResponse extends StatusResponse {
 
 // How long the new commit's hash stands in for the refresh time.
 const COMMIT_NOTE_MS = 10_000;
-
-interface DiffResponse {
-	diff: string;
-	truncated: boolean;
-}
 
 const BADGE_LABELS: Record<FileStatus, string> = {
 	added: "A",
@@ -85,13 +78,15 @@ export function ChangesPage({
 	const [notGitRepo, setNotGitRepo] = useState(false);
 	const [actionPending, setActionPending] = useState(false);
 	const [lastRefreshed, setLastRefreshed] = useState<Date | null>(null);
-	const [diff, setDiff] = useState<string | null>(null);
-	const [comparisonContent, setComparisonContent] = useState<
-		string | undefined
-	>(undefined);
-	// Bumped after a stage so the base-content and diff effects refetch, shrinking
-	// the editor's change decorations to whatever remains unstaged.
+	// Bumped after a stage so each side refetches its comparison and diff,
+	// shrinking the editor's change decorations to whatever remains unstaged.
 	const [refreshToken, setRefreshToken] = useState(0);
+	// Bumped when the working tree stages lines or reloads, either of which can
+	// change the index the staged side shows.
+	const [stagedContentToken, setStagedContentToken] = useState(0);
+	// Bumped on a reload, which can find a new commit, so the staged side
+	// refetches HEAD, which nothing in Rift changes while a file is open.
+	const [headToken, setHeadToken] = useState(0);
 	// Bumped after a save, which changes the working tree but not the index, so
 	// only git's diff needs refetching.
 	const [diffRefreshToken, setDiffRefreshToken] = useState(0);
@@ -111,8 +106,6 @@ export function ChangesPage({
 	// The short hash of the commit just made, shown for a while after it.
 	const [lastCommit, setLastCommit] = useState<string | null>(null);
 	const abortRef = useRef<AbortController | null>(null);
-	const diffAbortRef = useRef<AbortController | null>(null);
-	const comparisonAbortRef = useRef<AbortController | null>(null);
 	const selectedPath = searchParams.get("path");
 	const selectedStaged = searchParams.get("staged");
 	const hasSelectedFile =
@@ -124,36 +117,18 @@ export function ChangesPage({
 				staged: selectedStaged === "true",
 			}
 		: null;
-	const selectedStatus = selected
-		? (files.find(
-				(file) =>
-					file.path === selected.path && file.staged === selected.staged,
-			)?.status ?? null)
-		: null;
-	const isDeleted = selectedStatus === "deleted";
-	// An unstaged, non-deleted change opens in the working-tree editor; a staged,
-	// non-deleted change opens read-only against the index for line-level
-	// unstaging; a deleted file opens read-only against the version being removed.
-	// Every change type now opens in the editor, so there is no separate diff view.
-	const selectedEditable = selected !== null && !selected.staged && !isDeleted;
-	const selectedUnstageable = selected?.staged === true && !isDeleted;
-	const selectedDeleted = selected !== null && isDeleted;
-	const selectedInEditor = selectedEditable || selectedUnstageable;
-	const selectedView =
-		selected === null
-			? null
-			: selectedEditable
-				? "edit"
-				: selectedUnstageable
-					? "unstage"
-					: "deleted";
+	const fileOpen = selected !== null;
+	// The sides of the open file with changes: the working tree's unstaged
+	// ones, the index's staged ones, or both.
+	const statusOf = (staged: boolean) =>
+		files.find(
+			(entry) => entry.path === selectedPath && entry.staged === staged,
+		)?.status ?? null;
 
 	// Abort any in-flight requests on unmount
 	useEffect(() => {
 		return () => {
 			abortRef.current?.abort();
-			diffAbortRef.current?.abort();
-			comparisonAbortRef.current?.abort();
 		};
 	}, []);
 
@@ -214,10 +189,10 @@ export function ChangesPage({
 
 	// Poll every 3 seconds while the tab is visible
 	useEffect(() => {
-		// Every selected file now opens in the editor, so skip the poll whenever one
+		// Every selected file opens in the editor, so skip the poll whenever one
 		// is open: a refetch would disrupt the buffer being edited, or flip a
 		// read-only view out from under the reader.
-		const inEditor = selectedView !== null;
+		const inEditor = fileOpen;
 
 		function handleVisibilityChange() {
 			if (document.visibilityState === "visible" && !inEditor) {
@@ -236,7 +211,7 @@ export function ChangesPage({
 			document.removeEventListener("visibilitychange", handleVisibilityChange);
 			clearInterval(interval);
 		};
-	}, [fetchStatus, selectedView]);
+	}, [fetchStatus, fileOpen]);
 
 	const handleRefresh = useCallback(() => {
 		fetchStatus(true);
@@ -356,6 +331,7 @@ export function ChangesPage({
 
 	const handleEditorStaged = useCallback(() => {
 		setRefreshToken((value) => value + 1);
+		setStagedContentToken((value) => value + 1);
 		fetchStatus(true);
 	}, [fetchStatus]);
 
@@ -365,16 +341,21 @@ export function ChangesPage({
 	}, [fetchStatus]);
 
 	// Reloading rereads the file, and git's diff and the comparison have to be
-	// reread with it for the editor's line numbers to match git's again.
-	const handleEditorReload = useCallback(() => {
-		setRefreshToken((value) => value + 1);
-	}, []);
+	// reread with it for the editor's line numbers to match git's again. The
+	// status is reread too, since the poll is off while a file is open, and
+	// changes from outside Rift decide which sides have changes. A reload of
+	// the working tree also reloads the staged side, which reloads itself.
+	const handleEditorReload = useCallback(
+		(staged: boolean) => {
+			setRefreshToken((value) => value + 1);
+			setHeadToken((value) => value + 1);
+			if (!staged) setStagedContentToken((value) => value + 1);
+			fetchStatus(true);
+		},
+		[fetchStatus],
+	);
 
 	const leaveDetail = useCallback(() => {
-		diffAbortRef.current?.abort();
-		comparisonAbortRef.current?.abort();
-		setDiff(null);
-		setComparisonContent(undefined);
 		setConfirmingDiscard(false);
 		setEditorDirty(false);
 		setSearchParams({}, { replace: true });
@@ -410,165 +391,67 @@ export function ChangesPage({
 		leaveDetail();
 	}, [fetchStatus, leaveDetail]);
 
-	const handleDetailStageToggle = useCallback(async () => {
-		// Staging the whole file acts on it as saved, not as shown, so it waits
-		// until the editor's edits are saved.
-		if (!selected || editorDirty) return;
-		// Staging can move the file between sections, so the current selection may
-		// no longer exist afterwards; return to the list showing the new state.
-		const ok = await applyStageAction(
-			selected.path,
-			selected.staged ? "unstage" : "stage",
-		);
-		if (ok) leaveDetail();
-	}, [applyStageAction, editorDirty, leaveDetail, selected]);
-
-	useEffect(() => {
-		comparisonAbortRef.current?.abort();
-
-		if (
-			!hasSelectedFile ||
-			!repoName ||
-			selectedPath === null ||
-			!selectedInEditor
-		) {
-			setComparisonContent(undefined);
-			return;
-		}
-
-		if (selectedStatus === "untracked") {
-			setComparisonContent("");
-			return;
-		}
-
-		const controller = new AbortController();
-		comparisonAbortRef.current = controller;
-		setComparisonContent(undefined);
-
-		void (async () => {
-			try {
-				const params = new URLSearchParams({
-					repo: repoName,
-					path: selectedPath,
-					staged: selectedStaged ?? "false",
-					// Changes after a stage so the index base is refetched fresh.
-					_refresh: String(refreshToken),
-				});
-				const res = await fetch(apiUrl(`/api/git/base-content?${params}`), {
-					signal: controller.signal,
-				});
-				if (!res.ok) {
-					// A file with no committed or staged version has no base to
-					// compare against; treat it like an untracked file rather
-					// than failing the edit.
-					if (res.status === 404) {
-						setComparisonContent("");
-						return;
-					}
-					const body = await res.json().catch(() => null);
-					showError(body?.error?.message ?? `Request failed (${res.status})`);
-					return;
-				}
-
-				setComparisonContent(await res.text());
-			} catch (err) {
-				if (err instanceof DOMException && err.name === "AbortError") {
-					return;
-				}
-				showError(err instanceof Error ? err.message : "Network error");
+	const handleWholeFileAction = useCallback(
+		async (staged: boolean) => {
+			// Staging the whole file acts on it as saved, not as shown, so it
+			// waits until the editor's edits are saved.
+			if (selectedPath === null || (!staged && editorDirty)) return;
+			// Staging can move the file between sections, so the current
+			// selection may no longer exist afterwards; return to the list
+			// showing the new state. Unstaging while the working tree holds
+			// unsaved edits shows the working tree instead, so the edits stay
+			// on screen.
+			const ok = await applyStageAction(
+				selectedPath,
+				staged ? "unstage" : "stage",
+			);
+			if (!ok) return;
+			if (staged && editorDirty) {
+				setRefreshToken((value) => value + 1);
+				setSearchParams(
+					{ path: selectedPath, staged: "false" },
+					{ replace: true },
+				);
+			} else {
+				leaveDetail();
 			}
-		})();
-
-		return () => {
-			controller.abort();
-		};
-	}, [
-		hasSelectedFile,
-		repoName,
-		selectedInEditor,
-		selectedPath,
-		selectedStaged,
-		selectedStatus,
-		showError,
-		refreshToken,
-	]);
-
-	useEffect(() => {
-		diffAbortRef.current?.abort();
-
-		// The editor only needs a diff to decorate a tracked modification it is
-		// editing or unstaging. Untracked and deleted files decorate straight from
-		// their content, so they need no diff.
-		if (
-			!hasSelectedFile ||
-			!repoName ||
-			selectedPath === null ||
-			selectedStatus === "untracked" ||
-			selectedStatus === "deleted" ||
-			selectedStatus === null
-		) {
-			setDiff(null);
-			return;
-		}
-
-		const controller = new AbortController();
-		diffAbortRef.current = controller;
-		setDiff(null);
-
-		void (async () => {
-			try {
-				const params = new URLSearchParams({
-					repo: repoName,
-					path: selectedPath,
-					staged: selectedStaged ?? "false",
-					_refresh: `${refreshToken}.${diffRefreshToken}`,
-				});
-				const res = await fetch(apiUrl(`/api/git/diff?${params}`), {
-					signal: controller.signal,
-				});
-				if (!res.ok) {
-					const body = await res.json().catch(() => null);
-					showError(body?.error?.message ?? `Request failed (${res.status})`);
-					return;
-				}
-
-				const data: DiffResponse = await res.json();
-				setDiff(data.diff);
-			} catch (err) {
-				if (err instanceof DOMException && err.name === "AbortError") {
-					return;
-				}
-				showError(err instanceof Error ? err.message : "Network error");
-			}
-		})();
-
-		return () => {
-			controller.abort();
-		};
-	}, [
-		hasSelectedFile,
-		repoName,
-		selectedPath,
-		selectedStaged,
-		selectedStatus,
-		showError,
-		refreshToken,
-		diffRefreshToken,
-	]);
+		},
+		[applyStageAction, editorDirty, leaveDetail, selectedPath, setSearchParams],
+	);
 
 	// Detail view: every change type opens in the editor.
 	if (selected) {
-		// Staging or unstaging the whole file, offered in the editor's bar.
-		const fileAction = (label: string): FileAction => ({
-			label,
-			onClick: () => {
-				void handleDetailStageToggle();
-			},
-			// The bar offers Save in its place while the buffer has unsaved
-			// edits, so only refused writes need explaining.
-			disabled: actionPending || !canWrite || editorDirty,
-			title: writesRefused ? WRITES_DISABLED_TITLE : undefined,
-		});
+		// Staging or unstaging the whole file, offered in each side's bar.
+		const fileActionFor =
+			(staged: boolean) =>
+			(label: string): FileAction => ({
+				label,
+				onClick: () => {
+					void handleWholeFileAction(staged);
+				},
+				// The working tree's bar offers Save in its place while the
+				// buffer has unsaved edits, so only refused writes need
+				// explaining.
+				disabled: actionPending || !canWrite || (!staged && editorDirty),
+				title: writesRefused ? WRITES_DISABLED_TITLE : undefined,
+			});
+		// Both sides are always offered, so the bar never comes or goes, and a
+		// side with no changes is greyed out. Each side with changes stays built,
+		// so switching between them is immediate; switching replaces the history
+		// entry, so Back still returns to the list. The working tree counts as
+		// having changes while it holds unsaved edits, even ones git hasn't seen.
+		const sideIsLive = (staged: boolean) =>
+			statusOf(staged) !== null || (!staged && editorDirty);
+		const sides = [false, true].filter(
+			(staged) => staged === selected.staged || sideIsLive(staged),
+		);
+		const switchTo = (staged: boolean) => {
+			if (staged === selected.staged) return;
+			setSearchParams(
+				{ path: selected.path, staged: String(staged) },
+				{ replace: true },
+			);
+		};
 		return (
 			<div className="changes-diff-view">
 				<header className="changes-diff-header">
@@ -581,9 +464,6 @@ export function ChangesPage({
 						<ArrowLeft size={18} />
 					</button>
 					<span className="changes-diff-filename">{selected.path}</span>
-					<span className="changes-diff-staged-label">
-						{selected.staged ? "staged" : "unstaged"}
-					</span>
 					<div className="changes-header-menu" ref={setMenuHost} />
 				</header>
 				{confirmingDiscard && (
@@ -607,74 +487,51 @@ export function ChangesPage({
 						</button>
 					</div>
 				)}
+				<div
+					className="changes-view-switch"
+					role="tablist"
+					aria-label="Changes to show"
+				>
+					{[false, true].map((staged) => (
+						<button
+							key={String(staged)}
+							type="button"
+							role="tab"
+							aria-selected={selected.staged === staged}
+							className="changes-view-switch-tab"
+							onClick={() => switchTo(staged)}
+							disabled={selected.staged !== staged && !sideIsLive(staged)}
+						>
+							{staged ? "Staged" : "Unstaged"}
+						</button>
+					))}
+				</div>
 				<div className="changes-diff-content">
-					{selectedView === "edit" && selectedEditable && (
-						<div className="changes-editor-view">
-							<div className="changes-editor-note">
-								Editing the working tree file.
-							</div>
-							<TextFileEditor
-								comparisonContent={comparisonContent}
-								changeDiff={selectedStatus === "untracked" ? null : diff}
-								changeType={selectedStatus}
-								filePath={selected.path}
-								repo={repoName as string}
-								readOnly={!canWrite}
-								readOnlyLabel={editorReadOnlyLabel}
-								onSaved={handleEditorSaved}
-								onStaged={
-									selectedStatus === "untracked"
-										? handleUntrackedStaged
-										: handleEditorStaged
-								}
-								onReload={handleEditorReload}
-								onDirtyChange={setEditorDirty}
-								fileAction={
-									selectedStatus === "untracked"
-										? undefined
-										: fileAction("Stage file")
-								}
-								menuHost={menuHost}
-							/>
-						</div>
-					)}
-					{selectedView === "unstage" && selectedUnstageable && (
-						<div className="changes-editor-view">
-							<div className="changes-editor-note">Viewing staged content.</div>
-							<TextFileEditor
-								comparisonContent={comparisonContent}
-								changeDiff={diff}
-								changeType={selectedStatus}
-								filePath={selected.path}
-								repo={repoName as string}
-								readOnly={!canWrite}
-								readOnlyLabel={editorReadOnlyLabel}
-								staged
-								onUnstaged={handleEditorUnstaged}
-								onReload={handleEditorReload}
-								fileAction={fileAction("Unstage file")}
-								menuHost={menuHost}
-							/>
-						</div>
-					)}
-					{selectedView === "deleted" && selectedDeleted && (
-						<div className="changes-editor-view">
-							<div className="changes-editor-note">
-								Viewing the deleted file.
-							</div>
-							<TextFileEditor
-								changeType="deleted"
-								filePath={selected.path}
-								repo={repoName as string}
-								staged={selected.staged}
-								deleted
-								fileAction={fileAction(
-									selected.staged ? "Unstage deletion" : "Stage deletion",
-								)}
-								menuHost={menuHost}
-							/>
-						</div>
-					)}
+					{sides.map((staged) => (
+						<FileSideView
+							key={String(staged)}
+							repoName={repoName as string}
+							path={selected.path}
+							staged={staged}
+							status={statusOf(staged)}
+							active={staged === selected.staged}
+							refreshToken={refreshToken}
+							diffRefreshToken={diffRefreshToken}
+							headToken={headToken}
+							contentToken={stagedContentToken}
+							showError={showError}
+							canWrite={canWrite}
+							readOnlyLabel={editorReadOnlyLabel}
+							menuHost={menuHost}
+							fileAction={fileActionFor(staged)}
+							onSaved={handleEditorSaved}
+							onStaged={handleEditorStaged}
+							onUntrackedStaged={handleUntrackedStaged}
+							onUnstaged={handleEditorUnstaged}
+							onReload={() => handleEditorReload(staged)}
+							onDirtyChange={setEditorDirty}
+						/>
+					))}
 				</div>
 			</div>
 		);

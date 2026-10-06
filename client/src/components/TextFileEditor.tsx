@@ -1,5 +1,11 @@
 import { ChevronDown, ChevronUp, EllipsisVertical, X } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+	useCallback,
+	useEffect,
+	useRef,
+	useState,
+	useSyncExternalStore,
+} from "react";
 import { createPortal } from "react-dom";
 import { apiUrl } from "../apiUrl.ts";
 import {
@@ -27,6 +33,20 @@ function readLineWrapPreference(): boolean {
 		return true;
 	}
 	return window.localStorage.getItem(LINE_WRAP_STORAGE_KEY) !== "false";
+}
+
+// Every open editor follows the one preference, as both sides of a file are
+// open at once, so a change to it reaches them all.
+const lineWrapListeners = new Set<() => void>();
+
+function subscribeToLineWrap(listener: () => void): () => void {
+	lineWrapListeners.add(listener);
+	return () => lineWrapListeners.delete(listener);
+}
+
+function writeLineWrapPreference(wrap: boolean): void {
+	window.localStorage.setItem(LINE_WRAP_STORAGE_KEY, String(wrap));
+	for (const listener of lineWrapListeners) listener();
 }
 
 /**
@@ -744,6 +764,9 @@ export interface TextFileEditorProps {
 	// every line struck through. Staging or unstaging the deletion is whole-file and
 	// handled by the page's file action, so this mode exposes no edit controls.
 	deleted?: boolean;
+	// Changing it reloads the file, as when the index changes under a staged
+	// view from elsewhere.
+	reloadKey?: number;
 	onSaved?: () => void;
 	onStaged?: () => void;
 	onUnstaged?: () => void;
@@ -771,6 +794,7 @@ export function TextFileEditor({
 	changeType = null,
 	staged = false,
 	deleted = false,
+	reloadKey = 0,
 	onSaved,
 	onStaged,
 	onUnstaged,
@@ -807,7 +831,10 @@ export function TextFileEditor({
 	const [dirty, setDirty] = useState(false);
 	const [mtimeMs, setMtimeMs] = useState<number | null>(null);
 	const [reloadToken, setReloadToken] = useState(0);
-	const [lineWrap, setLineWrap] = useState(readLineWrapPreference);
+	const lineWrap = useSyncExternalStore(
+		subscribeToLineWrap,
+		readLineWrapPreference,
+	);
 	const lineWrapRef = useRef(lineWrap);
 	// The buffer's latest text, so an editor rebuilt for any reason starts from
 	// it rather than from text that a save or an edit has since replaced.
@@ -1016,16 +1043,17 @@ export function TextFileEditor({
 				// (`git show :path`), exposed by base-content with staged=false, so the
 				// lines the user selects match what `git diff --cached` reports for
 				// unstaging.
+				const reload = `${reloadToken}.${reloadKey}`;
 				const contentUrl = deleted
 					? apiUrl(
-							`/api/git/base-content?repo=${encodeURIComponent(repo)}&path=${encodeURIComponent(filePath)}&staged=${staged}&_reload=${reloadToken}`,
+							`/api/git/base-content?repo=${encodeURIComponent(repo)}&path=${encodeURIComponent(filePath)}&staged=${staged}&_reload=${reload}`,
 						)
 					: staged
 						? apiUrl(
-								`/api/git/base-content?repo=${encodeURIComponent(repo)}&path=${encodeURIComponent(filePath)}&staged=false&_reload=${reloadToken}`,
+								`/api/git/base-content?repo=${encodeURIComponent(repo)}&path=${encodeURIComponent(filePath)}&staged=false&_reload=${reload}`,
 							)
 						: apiUrl(
-								`/api/files/content?repo=${encodeURIComponent(repo)}&path=${encodeURIComponent(filePath)}&_reload=${reloadToken}`,
+								`/api/files/content?repo=${encodeURIComponent(repo)}&path=${encodeURIComponent(filePath)}&_reload=${reload}`,
 							);
 				const response = await fetch(contentUrl, {
 					signal: controller.signal,
@@ -1071,6 +1099,7 @@ export function TextFileEditor({
 		filePath,
 		repo,
 		reloadToken,
+		reloadKey,
 		staged,
 		deleted,
 		offerDraft,
@@ -1755,11 +1784,7 @@ export function TextFileEditor({
 	}, [lineWrap]);
 
 	const toggleLineWrap = useCallback(() => {
-		setLineWrap((value) => {
-			const next = !value;
-			window.localStorage.setItem(LINE_WRAP_STORAGE_KEY, String(next));
-			return next;
-		});
+		writeLineWrapPreference(!readLineWrapPreference());
 	}, []);
 
 	// The menu of less frequent actions closes on any tap outside it.

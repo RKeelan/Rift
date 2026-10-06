@@ -6,6 +6,7 @@ import {
 	render,
 	screen,
 	waitFor,
+	within,
 } from "@testing-library/react";
 import {
 	getChangeRegions,
@@ -2671,6 +2672,37 @@ describe("line wrapping", () => {
 		const container = await renderEditor();
 
 		expect(isWrapping(container)).toBe(true);
+	});
+
+	test("every open editor follows the choice", async () => {
+		// Both sides of a file are open at once, one of them out of sight.
+		const { container } = render(
+			<>
+				<div data-testid="first">
+					<TextFileEditor filePath="notes.md" repo="test-repo" />
+				</div>
+				<div data-testid="second">
+					<TextFileEditor filePath="notes.md" repo="test-repo" staged />
+				</div>
+			</>,
+		);
+		await waitFor(() => {
+			expect(container.querySelectorAll(".cm-content").length).toBe(2);
+		});
+		const first = screen.getByTestId("first");
+		const second = screen.getByTestId("second");
+
+		fireEvent.click(
+			within(first).getByRole("button", { name: "More actions" }),
+		);
+		fireEvent.click(
+			within(first).getByRole("menuitemcheckbox", { name: "Wrap lines" }),
+		);
+
+		await waitFor(() => {
+			expect(isWrapping(first)).toBe(false);
+			expect(isWrapping(second)).toBe(false);
+		});
 	});
 
 	test("toggling off reconfigures the editor and stores the choice", async () => {
