@@ -6,7 +6,7 @@ Read `README.md` first for the product overview, environment behaviour, and the 
 
 - Give every endpoint that changes a file or a repo a method other than `GET`, `HEAD`, or `OPTIONS`. The `RIFT_ALLOW_WRITES` switch refuses requests by method, so a mutating `GET` would bypass it.
 - Validate API changes with tests, and UI changes in the real client on Android (see Testing on Android).
-- Hold every change to the speed requirements, and measure one that could slow an interaction or an endpoint (see Speed requirements).
+- Hold every change to the speed requirements, and measure one that could slow an interaction (see Speed requirements).
 - Run `bun run lint`, `bun run format:check`, and `bun test` before handing work off.
 
 ## Testing on Android
@@ -32,14 +32,20 @@ Decided departures:
 
 ## Speed requirements
 
-Every interaction should answer so quickly that the wait goes unnoticed. Rift is used from Chrome on an Android phone, as an installed PWA, over Tailscale to the server machine, so the requirements on interactions hold on the phone. Each figure is a 90th percentile.
+The requirements are on the UI, as a user experiences it on a phone: every interaction should answer so quickly that the wait goes unnoticed. Rift is used from Chrome on Android phones, as an installed PWA, over Tailscale to the server machine, so each figure holds on a phone, with its network hop and its CPU included. Each is a 90th percentile.
 
 * Every interaction shows its result within 100 ms of the finger lifting, the long-standing limit for a response to feel instantaneous ([Nielsen](https://www.nngroup.com/articles/response-times-3-important-limits/)). Opening a file is done once its changes are marked and the Stage strips above them can act. Staging, unstaging and saving are done once the editor shows the new state and its strips can act again.
 * An interaction that needs nothing from the server—picking a line, typing, moving between changes, the Unstaged/Staged switch, going back to the list—draws its result within 50 ms. Chrome's RAIL model gives input handling 50 ms so that the result reaches the screen within 100 ms even when the input arrives while the page is busy ([RAIL](https://web.dev/articles/rail)).
-* An interaction waits on at most one round trip to the server: the requests it needs go out together, or as one. Each further round trip adds the phone's network hop, which no work on the server can shorten.
-* Each endpoint the client waits on answers within 50 ms, writes included, timed on loopback on the server machine while it is otherwise quiet. That leaves half of the 100 ms for the phone's network hop and for Chrome to handle the response and draw it.
 
 Times run from the finger lifting, or the key going down, to the end of the main thread's work on the frame that first draws the result. The display shows that frame a refresh or two later.
+
+### Meeting them
+
+Nothing below is a requirement in itself. Each is a way to keep an interaction within its time on a phone, and a change that meets the requirements another way needs none of them.
+
+- Wait on at most one round trip to the server: send the requests an interaction needs together, or as one. Each further round trip adds another hop over the network, which no work on the server can shorten.
+- Keep each endpoint the client waits on within about 50 ms on loopback on the server machine, writes included, which leaves the rest of the 100 ms for the hop and for Chrome to handle the response and draw it.
+- Draw what the client already knows without waiting for the server, and fetch or build ahead what the next tap will need, as the Unstaged/Staged switch keeps both sides of a file built.
 
 ### Where the server's time goes
 
@@ -61,11 +67,11 @@ bun scripts/measure-speed.ts --repo <root>/<scratch repo>
 
 - `--mode server` times each endpoint the client waits on, straight to `127.0.0.1:13000`.
 - `--mode spawn` times starting git from Bun, through the launcher and directly, with `node:child_process` and with `Bun.spawn`.
-- `--mode client` drives headless Chrome at the phone's width through the proxy: opening a file from the Changes list, picking a line, staging a change from its strip, the switch, going back to the list, opening the Changes tab, typing, and saving.
+- `--mode client` drives headless Chrome at a phone's width through the proxy: opening a file from the Changes list, picking a line, staging a change from its strip, the switch, going back to the list, opening the Changes tab, typing, and saving.
 
 Without `--mode` it runs all three. It stages, unstages and saves one file in the repo named, one with unstaged changes in two or more places and nothing staged (`--file` chooses it), then puts the file and its index entry back as they were, so name a scratch repository. `--runs` sets the count, and `--cpu-slowdown 4` runs Chrome's CPU four times slower.
 
-These figures leave out the phone's network hop and its slower CPU, so they are a floor: a requirement missed on the server machine is missed on the phone too, but one met there may still be missed on the phone. `tailscale ping <phone>` from the server machine times the hop.
+The requirements hold on a phone, and these figures leave out its network hop and its slower CPU, so they are a floor: a requirement missed on the server machine is missed on a phone too, but one met there may still be missed on one. `tailscale ping <phone>` from the server machine times the hop.
 
 ## Deployment
 

@@ -40,7 +40,7 @@ describe("PWA build output", () => {
 	});
 
 	// The app is mounted under a sub-path. An install started from the wrong
-	// scope, or icons resolved against the host root, fails on the phone rather
+	// scope, or icons resolved against the host root, fails on a phone rather
 	// than at build time — so pin the base path here.
 	describe("sub-path deployment", () => {
 		const manifest = JSON.parse(
