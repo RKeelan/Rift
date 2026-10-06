@@ -101,7 +101,7 @@ export default defineConfig({
 		host: "0.0.0.0",
 		proxy: {
 			// Mirrors what `tailscale serve --set-path` does in production, so a
-			// base-path mistake shows up in dev rather than only on the phone.
+			// base-path mistake shows up in dev rather than only on a phone.
 			[`${BASE_PATH}/api`]: {
 				target: "http://localhost:13000",
 				changeOrigin: true,

@@ -917,8 +917,8 @@ async function measureClient(file: string, restore: () => Promise<void>) {
 	);
 	const browser = await Browser.launch(findBrowser());
 	try {
-		// The phone's width in CSS pixels, and Chrome on Android's user agent,
-		// which CodeMirror reads to choose how to take input.
+		// A large Android phone's width in CSS pixels, and Chrome on Android's
+		// user agent, which CodeMirror reads to choose how to take input.
 		await browser.send("Emulation.setDeviceMetricsOverride", {
 			width: 443,
 			height: 960,
