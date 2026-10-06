@@ -352,19 +352,8 @@
 	white-space: nowrap;
 }
 
-.changes-diff-staged-label {
-	font-size: 0.6875rem;
-	font-weight: 600;
-	text-transform: uppercase;
-	letter-spacing: 0.05em;
-	color: var(--color-text-muted);
-	padding: 0.125rem 0.375rem;
-	border: 1px solid var(--color-border);
-	border-radius: 3px;
-	flex-shrink: 0;
-}
-
 .changes-diff-content {
+	position: relative;
 	flex: 1;
 	display: flex;
 	flex-direction: column;
@@ -380,12 +369,42 @@
 	min-height: 100%;
 }
 
-.changes-editor-note {
-	padding: 0.75rem;
-	font-size: 0.8125rem;
-	color: var(--color-text-muted);
+/* The side of a file not on screen stays laid out behind the one that is, so
+   its editor keeps its measurements and shows at once when switched to. */
+.changes-editor-view--hidden {
+	position: absolute;
+	inset: 0;
+	visibility: hidden;
+}
+
+/* Unstaged and Staged, with a side greyed out when it has no changes. */
+.changes-view-switch {
+	display: flex;
+	flex-shrink: 0;
 	border-bottom: 1px solid var(--color-border);
 	background: var(--color-surface);
+}
+
+.changes-view-switch-tab {
+	flex: 1;
+	min-height: 48px;
+	border: 0;
+	border-bottom: 3px solid transparent;
+	background: none;
+	color: var(--color-text-muted);
+	font-size: 0.9375rem;
+	cursor: pointer;
+}
+
+.changes-view-switch-tab[aria-selected="true"] {
+	border-bottom-color: var(--color-primary);
+	color: var(--color-text);
+	font-weight: 600;
+}
+
+.changes-view-switch-tab:disabled {
+	opacity: 0.5;
+	cursor: default;
 }
 
 /* Messages and states */
