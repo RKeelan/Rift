@@ -68,10 +68,36 @@ bun scripts/measure-speed.ts --repo <root>/<scratch repo>
 - `--mode server` times each endpoint the client waits on, straight to `127.0.0.1:13000`.
 - `--mode spawn` times starting git from Bun, through the launcher and directly, with `node:child_process` and with `Bun.spawn`.
 - `--mode client` drives headless Chrome at a phone's width through the proxy: opening a file from the Changes list, picking a line, staging a change from its strip, the switch, going back to the list, opening the Changes tab, typing, and saving.
+- `--mode device` times the same interactions in Chrome on an Android device, as described below.
 
-Without `--mode` it runs all three. It stages, unstages and saves one file in the repo named, one with unstaged changes in two or more places and nothing staged (`--file` chooses it), then puts the file and its index entry back as they were, so name a scratch repository. `--runs` sets the count, and `--cpu-slowdown 4` runs Chrome's CPU four times slower.
+Without `--mode` it runs the first three. It stages, unstages and saves one file in the repo named, one with unstaged changes in two or more places and nothing staged (`--file` chooses it), then puts the file and its index entry back as they were, so name a scratch repository. `--runs` sets the count, and `--cpu-slowdown 4` runs Chrome's CPU four times slower.
 
-The requirements hold on a phone, and these figures leave out its network hop and its slower CPU, so they are a floor: a requirement missed on the server machine is missed on a phone too, but one met there may still be missed on one. `tailscale ping <phone>` from the server machine times the hop.
+The requirements hold on a phone, and the server and client figures leave out its network hop and its slower CPU, so they are a floor: a requirement missed on the server machine is missed on a phone too, but one met there may still be missed on one. `tailscale ping <phone>` from the server machine times the hop.
+
+#### On an Android device
+
+Device mode runs on the server machine, like the others, and drives a device attached to that machine's adb, sending each tap and key through Android's own input pipeline with `adb shell input`:
+
+```powershell
+bun scripts/measure-speed.ts --mode device --serial <serial> --client <rift url> --repo <root>/<scratch repo>
+```
+
+- `--serial` names the device as `adb devices` lists it. Every adb command the script runs names it, so no other attached device is touched.
+- `--client` is Rift's address as the device reaches it.
+- `--adb` gives adb's path, when adb is not on the PATH or under `ANDROID_HOME` or `ANDROID_SDK_ROOT`.
+
+Open Rift on the device first, in a Chrome tab or the installed app, and leave it in the foreground with no unsaved edits. The script forwards Chrome's DevTools socket, which the installed app shares, and attaches to that page. It will not open a page itself, because on a phone a page opened over DevTools stays in the background and the taps would land on whatever is showing, and it will not start on a page with unsaved edits, because it navigates the page. It maps the page's CSS pixels to the screen's by tapping twice on a layer it lays over the page, which takes both taps and does nothing with them, and it taps only elements a finger could reach on screen.
+
+Each figure runs from the input event's `timeStamp`, which Android sets when it takes the touch or key, so the time adb spends delivering the input is left out. Chrome keeps that timestamp on the same monotonic clock as `performance.now()`, and the script checks each one: it has to fall after the script began watching for the result and before the page's first handler ran. The report also gives the time from the timestamp to that handler, and adb's delivery time.
+
+When the run ends, or fails, or is stopped with Ctrl+C, the script puts back the page's URL and its `localStorage`, which holds the selected repo and any drafts, closes the on-screen keyboard if it is up, and puts the file and its index entry back.
+
+- For the emulator, run `bun scripts/emulator-proxy.ts` and `adb -s <serial> reverse tcp:8080 tcp:13001`, open `http://localhost:8080/rift/` in its Chrome (see Testing on Android), and pass that address as `--client`.
+- For a phone, turn on USB or wireless debugging, check that `adb devices` lists it, open Rift at the address it normally uses, and pass that address as `--client`. It has to stay unlocked, with Rift in the foreground, until the run ends.
+
+A device run sends taps and key presses to the device for several minutes, so run it on someone's phone only once they have agreed to it.
+
+Only a phone's figures show a requirement met, because only they include a phone's network hop and its CPU. The emulator, like the server machine, gives a floor.
 
 ## Deployment
 
