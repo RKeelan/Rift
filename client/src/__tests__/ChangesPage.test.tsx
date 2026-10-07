@@ -1696,10 +1696,20 @@ describe("committing", () => {
 		fireEvent.click(screen.getByLabelText("Refresh status"));
 		await screen.findByText("Working tree clean");
 
+		// The box must appear holding the stored draft, not show the earlier
+		// message until a later render replaces it, so note what it first holds.
+		let firstShown: string | undefined;
+		const observer = new MutationObserver(() => {
+			const box = screen.queryByRole("textbox", { name: "Commit message" });
+			firstShown ??= (box as HTMLTextAreaElement | null)?.value;
+		});
+		observer.observe(document.body, { childList: true, subtree: true });
 		files = STAGED;
 		fireEvent.click(screen.getByLabelText("Refresh status"));
+		await messageBox();
+		observer.disconnect();
 
-		expect(((await messageBox()) as HTMLTextAreaElement).value).toBe("");
+		expect(firstShown).toBe("");
 	});
 
 	test("offers no commit when the server refuses writes", async () => {

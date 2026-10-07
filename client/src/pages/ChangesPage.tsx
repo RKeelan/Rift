@@ -269,11 +269,16 @@ export function ChangesPage({
 
 	// The box takes the stored draft each time it appears, so a message that
 	// was committed while the box was gone, as when the page was left and
-	// reopened during a commit, is not offered again.
+	// reopened during a commit, is not offered again. It takes the draft while
+	// rendering, not in an effect, so the box never appears holding the message
+	// it had before.
 	const hasStaged = files.some((entry) => entry.staged);
-	useEffect(() => {
-		if (hasStaged) setCommitMessage(readString(commitDraftKey));
-	}, [commitDraftKey, hasStaged]);
+	const boxDraftKey = hasStaged ? commitDraftKey : null;
+	const [takenDraftKey, setTakenDraftKey] = useState<string | null>(null);
+	if (boxDraftKey !== takenDraftKey) {
+		setTakenDraftKey(boxDraftKey);
+		if (boxDraftKey !== null) setCommitMessage(readString(boxDraftKey));
+	}
 
 	const handleCommitMessageChange = useCallback(
 		(message: string) => {
