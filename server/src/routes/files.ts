@@ -25,42 +25,59 @@ interface TextFileInfo {
 	stat: Awaited<ReturnType<typeof fs.stat>>;
 }
 
-async function isGitRepo(dir: string): Promise<boolean> {
-	try {
-		const git = repoGit(dir);
-		return await git.checkIsRepo();
-	} catch {
-		return false;
-	}
-}
+// A line of `git check-ignore --verbose --non-matching`: the ignore file,
+// line number and pattern that matched the path, all empty when none did,
+// then a tab and the path.
+const CHECK_IGNORE_LINE = /^(.*?):(\d*):(.*)\t(.*)$/;
 
+/**
+ * The paths, of those given, that the repo's ignore rules leave out, or null
+ * when the directory is not in a repository, where check-ignore fails.
+ *
+ * `--verbose --non-matching` has git print a line for every path, ignored or
+ * not. Without them, check-ignore prints nothing for a folder that ignores
+ * nothing, and simple-git waits a further 50 ms for a command that prints
+ * nothing. A verbose line names any pattern that matched, including a
+ * negated one, starting with "!", which keeps its path.
+ */
 async function getIgnoredPaths(
 	workingDir: string,
 	entries: string[],
-): Promise<Set<string>> {
-	const git = repoGit(workingDir);
-	const ignored = new Set<string>();
+): Promise<Set<string> | null> {
+	if (entries.length === 0) return new Set();
 
-	if (entries.length === 0) return ignored;
-
+	let output: string;
 	try {
-		const result = await git.checkIgnore(entries);
-		for (const raw of result) {
-			// Normalise to forward slashes so Windows backslashes match
-			const entry = raw.replaceAll("\\", "/");
-			// git may return paths with or without trailing slash;
-			// add both forms so the filter matches regardless
-			ignored.add(entry);
-			if (entry.endsWith("/")) {
-				ignored.add(entry.slice(0, -1));
-			} else {
-				ignored.add(`${entry}/`);
-			}
-		}
+		output = await repoGit(workingDir).raw([
+			"-c",
+			"core.quotePath=false",
+			"check-ignore",
+			"--verbose",
+			"--non-matching",
+			"--",
+			...entries,
+		]);
 	} catch {
-		// If git check-ignore fails, treat nothing as ignored
+		return null;
 	}
 
+	const ignored = new Set<string>();
+	for (const line of output.split("\n")) {
+		const match = CHECK_IGNORE_LINE.exec(line);
+		if (!match) continue;
+		const [, , , pattern, raw] = match;
+		if (pattern === "" || pattern.startsWith("!")) continue;
+		// Normalise to forward slashes so Windows backslashes match
+		const entry = raw.replaceAll("\\", "/");
+		// git may return paths with or without trailing slash;
+		// add both forms so the filter matches regardless
+		ignored.add(entry);
+		if (entry.endsWith("/")) {
+			ignored.add(entry.slice(0, -1));
+		} else {
+			ignored.add(`${entry}/`);
+		}
+	}
 	return ignored;
 }
 
@@ -240,10 +257,13 @@ export function fileRoutes(roots: RepoRoot[]): Router {
 				entries.push({ name: dirent.name, type: entryType, size });
 			}
 
-			// Filter by gitignore if in a git repo
-			if (await isGitRepo(workingDir)) {
-				const ignored = await getIgnoredPaths(workingDir, relativePaths);
-				entries = entries.filter((_entry, i) => !ignored.has(relativePaths[i]));
+			// In a git repo, leave out what it ignores, and git's own .git,
+			// which it never tracks
+			const ignored = await getIgnoredPaths(workingDir, relativePaths);
+			if (ignored) {
+				entries = entries.filter(
+					(entry, i) => entry.name !== ".git" && !ignored.has(relativePaths[i]),
+				);
 			}
 
 			// Sort: directories first, then alphabetically
