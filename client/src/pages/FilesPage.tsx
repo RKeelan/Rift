@@ -71,13 +71,24 @@ function StatusBadge({ status }: { status: FileStatus }) {
 // count.
 function SectionHeader({ title, count }: { title: string; count?: number }) {
 	return (
-		<div className="changes-section-header">
+		<h2 className="changes-section-header">
 			{title}
 			{count !== undefined && (
 				<span className="changes-section-count">{count}</span>
 			)}
-		</div>
+		</h2>
 	);
+}
+
+// A changed file's row shows its name, with its folder under it as the
+// dashboard shows a repository's path under its name. A nested repository is
+// listed as its folder, trailing slash and all.
+function splitPath(path: string): { name: string; dir: string } {
+	const slash = path.replace(/\/$/, "").lastIndexOf("/");
+	return {
+		name: path.slice(slash + 1),
+		dir: path.slice(0, Math.max(slash, 0)),
+	};
 }
 
 const WRITES_DISABLED_TITLE = "The server does not allow changes";
@@ -699,6 +710,7 @@ export function FilesPage({
 
 	const changeRow = (entry: StatusEntry) => {
 		const action = entry.staged ? "Unstage" : "Stage";
+		const { name, dir } = splitPath(entry.path);
 		return (
 			<div
 				className="changes-file-row"
@@ -710,7 +722,10 @@ export function FilesPage({
 					onClick={() => handleSelectFile(entry)}
 				>
 					<StatusBadge status={entry.status} />
-					<span className="changes-file-path">{entry.path}</span>
+					<span className="changes-file-text">
+						<span className="changes-file-name">{name}</span>
+						{dir !== "" && <span className="changes-file-dir">{dir}</span>}
+					</span>
 				</button>
 				<button
 					type="button"
@@ -720,11 +735,41 @@ export function FilesPage({
 					aria-label={`${action} ${entry.path}`}
 					title={writesRefused ? WRITES_DISABLED_TITLE : action}
 				>
-					{entry.staged ? <Minus size={18} /> : <Plus size={18} />}
+					{entry.staged ? <Minus size={20} /> : <Plus size={20} />}
 				</button>
 			</div>
 		);
 	};
+
+	// The folder tree, under the changes or, for a directory without git, alone.
+	// Its card is left empty when every file at the top is listed with the
+	// changes, and is not drawn then.
+	const treeList = (
+		<>
+			{tree.nodes.length === 0 ? (
+				<div className="changes-message">No files found</div>
+			) : (
+				<div className="changes-card">
+					{tree.nodes.map((node) => (
+						<TreeEntry
+							key={node.path}
+							node={node}
+							onToggle={tree.toggleDirectory}
+							onFileSelect={handleSelectTreeFile}
+							isHidden={notGitRepo ? undefined : isChanged}
+							depth={0}
+						/>
+					))}
+				</div>
+			)}
+			{tree.truncated && (
+				<div className="files-truncated">
+					Not all entries are displayed. The directory contains more than 1,000
+					items.
+				</div>
+			)}
+		</>
+	);
 
 	// The list stays built and laid out behind an open file, hidden, so going
 	// back only shows it again, scrolled where it was. Its poll pauses
@@ -733,31 +778,28 @@ export function FilesPage({
 		<div className="files-view">
 			<div className={`changes-page${fileOpen ? " changes-page--hidden" : ""}`}>
 				<header className="changes-header">
-					<div className="changes-header-left">
-						<span className="changes-header-title">Files</span>
-					</div>
+					<h1 className="changes-header-title">Files</h1>
+					{lastCommit !== null ? (
+						<span className="changes-timestamp" role="status">
+							Committed {lastCommit}
+						</span>
+					) : (
+						lastRefreshed && (
+							<span className="changes-timestamp">
+								Last refreshed {formatTimestamp(lastRefreshed)}
+							</span>
+						)
+					)}
 					<button
 						type="button"
 						className={`changes-refresh-button${refreshing ? " changes-refresh-button--spinning" : ""}`}
 						onClick={handleRefresh}
-						aria-label="Refresh status"
+						aria-label="Refresh"
 						title="Refresh"
 					>
-						<RefreshCw size={18} />
+						<RefreshCw size={20} />
 					</button>
 				</header>
-
-				{lastCommit !== null ? (
-					<div className="changes-timestamp" role="status">
-						Committed {lastCommit}
-					</div>
-				) : (
-					lastRefreshed && (
-						<div className="changes-timestamp">
-							Last refreshed {formatTimestamp(lastRefreshed)}
-						</div>
-					)
-				)}
 
 				{writesRefused && (
 					<div className="changes-readonly-note" role="note">
@@ -769,6 +811,8 @@ export function FilesPage({
 				<div className="changes-list">
 					{listLoading && <div className="changes-message">Loading...</div>}
 
+					{!listLoading && notGitRepo && treeList}
+
 					{!listLoading && !notGitRepo && (
 						<>
 							{files.length === 0 && (
@@ -776,80 +820,63 @@ export function FilesPage({
 							)}
 
 							{staged.length > 0 && (
-								<>
+								<section className="changes-section">
 									<SectionHeader title="Staged" count={staged.length} />
-									{staged.map(changeRow)}
-									<div className="changes-commit">
-										<textarea
-											className="changes-commit-message"
-											value={commitMessage}
-											onChange={(event) =>
-												handleCommitMessageChange(event.target.value)
-											}
-											placeholder="Commit message"
-											aria-label="Commit message"
-											rows={3}
-											disabled={!canWrite}
-											readOnly={committing}
-										/>
-										<button
-											type="button"
-											className="changes-commit-button"
-											onClick={() => {
-												void handleCommit();
-											}}
-											disabled={
-												actionPending ||
-												!canWrite ||
-												commitMessage.trim() === ""
-											}
-											title={writesRefused ? WRITES_DISABLED_TITLE : undefined}
-										>
-											{committing ? "Committing..." : "Commit"}
-										</button>
+									<div className="changes-card">
+										{staged.map(changeRow)}
+										<div className="changes-commit">
+											<textarea
+												className="changes-commit-message"
+												value={commitMessage}
+												onChange={(event) =>
+													handleCommitMessageChange(event.target.value)
+												}
+												placeholder="Commit message"
+												aria-label="Commit message"
+												rows={3}
+												disabled={!canWrite}
+												readOnly={committing}
+											/>
+											<button
+												type="button"
+												className="changes-commit-button"
+												onClick={() => {
+													void handleCommit();
+												}}
+												disabled={
+													actionPending ||
+													!canWrite ||
+													commitMessage.trim() === ""
+												}
+												title={
+													writesRefused ? WRITES_DISABLED_TITLE : undefined
+												}
+											>
+												{committing ? "Committing..." : "Commit"}
+											</button>
+										</div>
 									</div>
-								</>
+								</section>
 							)}
 
 							{unstaged.length > 0 && (
-								<>
+								<section className="changes-section">
 									<SectionHeader title="Unstaged" count={unstaged.length} />
-									{unstaged.map(changeRow)}
-								</>
+									<div className="changes-card">{unstaged.map(changeRow)}</div>
+								</section>
 							)}
 
 							{untracked.length > 0 && (
-								<>
+								<section className="changes-section">
 									<SectionHeader title="Untracked" count={untracked.length} />
-									{untracked.map(changeRow)}
-								</>
+									<div className="changes-card">{untracked.map(changeRow)}</div>
+								</section>
 							)}
 
-							<SectionHeader title="Unchanged" />
-						</>
-					)}
-
-					{!listLoading && (
-						<>
-							{tree.nodes.length === 0 && (
-								<div className="changes-message">No files found</div>
-							)}
-							{tree.nodes.map((node) => (
-								<TreeEntry
-									key={node.path}
-									node={node}
-									onToggle={tree.toggleDirectory}
-									onFileSelect={handleSelectTreeFile}
-									isHidden={notGitRepo ? undefined : isChanged}
-									depth={0}
-								/>
-							))}
-							{tree.truncated && (
-								<div className="files-truncated">
-									Not all entries are displayed. The directory contains more
-									than 1,000 items.
-								</div>
-							)}
+							<section className="changes-section">
+								<SectionHeader title="Unchanged" />
+								{treeList}
+							</section>
 						</>
 					)}
 				</div>

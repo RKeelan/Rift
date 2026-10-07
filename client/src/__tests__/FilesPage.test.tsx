@@ -155,6 +155,13 @@ function treeNames(container: HTMLElement) {
 	);
 }
 
+// The path a changed file's row shows, as its name with its folder under it.
+function rowPath(text: Element) {
+	const name = text.querySelector(".changes-file-name")?.textContent ?? "";
+	const dir = text.querySelector(".changes-file-dir")?.textContent;
+	return dir ? `${dir}/${name}` : name;
+}
+
 function sectionHeaders(container: HTMLElement) {
 	return [...container.querySelectorAll(".changes-section-header")].map(
 		(header) => header.textContent,
@@ -344,8 +351,10 @@ describe("FilesPage", () => {
 		const fileEntries = container.querySelectorAll(".changes-file-entry");
 		expect(fileEntries.length).toBe(2);
 
-		const filePaths = container.querySelectorAll(".changes-file-path");
-		const pathTexts = Array.from(filePaths).map((el) => el.textContent);
+		const pathTexts = Array.from(
+			container.querySelectorAll(".changes-file-text"),
+			rowPath,
+		);
 		expect(pathTexts).toContain("src/app.ts");
 		expect(pathTexts).toContain("README.md");
 	});
@@ -361,8 +370,8 @@ describe("FilesPage", () => {
 			expect(sectionHeaders(container)).toEqual(["Unstaged1", "Unchanged"]);
 		});
 
-		const filePaths = container.querySelectorAll(".changes-file-path");
-		expect(filePaths[0]?.textContent).toBe("index.ts");
+		const row = container.querySelector(".changes-file-text") as Element;
+		expect(rowPath(row)).toBe("index.ts");
 	});
 
 	test("renders both staged and unstaged sections", async () => {
@@ -562,11 +571,11 @@ describe("FilesPage", () => {
 		const { container } = renderFilesPage();
 
 		await waitFor(() => {
-			expect(screen.getByText("src/utils.ts")).not.toBeNull();
+			expect(screen.getByText("utils.ts")).not.toBeNull();
 		});
 
 		await act(async () => {
-			fireEvent.click(screen.getByText("src/utils.ts"));
+			fireEvent.click(screen.getByText("utils.ts"));
 		});
 
 		await findEditableEditor(container);
@@ -610,11 +619,11 @@ describe("FilesPage", () => {
 		const { container } = renderFilesPage();
 
 		await waitFor(() => {
-			expect(screen.getByText("src/added.ts")).not.toBeNull();
+			expect(screen.getByText("added.ts")).not.toBeNull();
 		});
 
 		await act(async () => {
-			fireEvent.click(screen.getByText("src/added.ts"));
+			fireEvent.click(screen.getByText("added.ts"));
 		});
 
 		await findEditableEditor(container);
@@ -687,11 +696,11 @@ describe("FilesPage", () => {
 		const { container } = renderFilesPage();
 
 		await waitFor(() => {
-			expect(screen.getByText("src/utils.ts")).not.toBeNull();
+			expect(screen.getByText("utils.ts")).not.toBeNull();
 		});
 
 		await act(async () => {
-			fireEvent.click(screen.getByText("src/utils.ts"));
+			fireEvent.click(screen.getByText("utils.ts"));
 		});
 
 		// A staged file opens read-only against the index: the editor loads, but
@@ -1347,7 +1356,7 @@ describe("FilesPage", () => {
 		renderFilesPage();
 
 		await waitFor(() => {
-			const button = screen.getByLabelText("Refresh status");
+			const button = screen.getByLabelText("Refresh");
 			expect(button).not.toBeNull();
 		});
 	});
@@ -1805,7 +1814,7 @@ describe("committing", () => {
 		// was left and reopened, which clears the stored draft.
 		globalThis.localStorage.removeItem("rift:commit-draft:test-repo");
 		files = [];
-		fireEvent.click(screen.getByLabelText("Refresh status"));
+		fireEvent.click(screen.getByLabelText("Refresh"));
 		await screen.findByText("Working tree clean");
 
 		// The box must appear holding the stored draft, not show the earlier
@@ -1817,7 +1826,7 @@ describe("committing", () => {
 		});
 		observer.observe(document.body, { childList: true, subtree: true });
 		files = STAGED;
-		fireEvent.click(screen.getByLabelText("Refresh status"));
+		fireEvent.click(screen.getByLabelText("Refresh"));
 		await messageBox();
 		observer.disconnect();
 
@@ -2367,12 +2376,14 @@ describe("the tree of unchanged files", () => {
 		expect(
 			[
 				...list.querySelectorAll(
-					".changes-section-header, .changes-commit, .changes-file-path, .tree-entry-name",
+					".changes-section-header, .changes-commit, .changes-file-text, .tree-entry-name",
 				),
 			].map((element) =>
 				element.classList.contains("changes-commit")
 					? "commit box"
-					: element.textContent,
+					: element.classList.contains("changes-file-text")
+						? rowPath(element)
+						: element.textContent,
 			),
 		).toEqual([
 			"Staged1",
@@ -2795,7 +2806,7 @@ describe("the tree of unchanged files", () => {
 		folders["."] = [folder("docs"), folder("src"), file("NEWS.md")];
 		folders.src = [folder("lib"), file("a.ts"), file("c.ts")];
 		folders["src/lib"] = [file("b.ts"), file("d.ts")];
-		fireEvent.click(screen.getByLabelText("Refresh status"));
+		fireEvent.click(screen.getByLabelText("Refresh"));
 
 		await waitFor(() => {
 			expect(treeNames(container)).toEqual([
