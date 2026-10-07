@@ -280,3 +280,48 @@ describe("buildPartialPatch (reverse)", () => {
 		);
 	});
 });
+
+describe("buildPartialPatch (new files)", () => {
+	const NEW_FILE = [
+		"diff --git a/file.txt b/file.txt",
+		"new file mode 100644",
+		`index ${"0".repeat(40)}..${"2".repeat(40)}`,
+		"--- /dev/null",
+		"+++ b/file.txt",
+	].join("\n");
+
+	function newFile(...body: string[]): string {
+		return `${NEW_FILE}\n${body.join("\n")}\n`;
+	}
+
+	test("stages the selected lines as a new file holding just them", () => {
+		const input = newFile("@@ -0,0 +1,3 @@", "+one", "+two", "+three");
+
+		expect(buildPartialPatch(input, [[2, 2]])).toBe(
+			newFile("@@ -0,0 +1,3 @@", "+two"),
+		);
+	});
+
+	test("unstages part of a new file as a change to it, keeping the rest", () => {
+		const input = newFile("@@ -0,0 +1,3 @@", "+one", "+two", "+three");
+
+		expect(buildPartialPatch(input, [[2, 2]], true)).toBe(
+			[
+				"diff --git a/file.txt b/file.txt",
+				"--- b/file.txt",
+				"+++ b/file.txt",
+				"@@ -0,0 +1,3 @@",
+				" one",
+				"+two",
+				" three",
+				"",
+			].join("\n"),
+		);
+	});
+
+	test("unstages all of a new file as its creation, which removes it", () => {
+		const input = newFile("@@ -0,0 +1,2 @@", "+one", "+two");
+
+		expect(buildPartialPatch(input, [[1, 2]], true)).toBe(input);
+	});
+});

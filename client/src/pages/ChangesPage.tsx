@@ -334,16 +334,35 @@ export function ChangesPage({
 		fetchStatus(true);
 	}, [fetchStatus]);
 
-	const handleEditorStaged = useCallback(() => {
-		setRefreshToken((value) => value + 1);
-		setStagedContentToken((value) => value + 1);
-		fetchStatus(true);
-	}, [fetchStatus]);
+	// A stage or unstage from the editor answers with the repo's changes, which
+	// take the place of any status still on its way, read before them. They are
+	// set with the tokens that refetch each side's context, so a side whose
+	// status the action changed, as an untracked file's does when some of its
+	// lines are staged, goes straight to the requests its new status needs.
+	const applyChangedFiles = useCallback((changed: StatusEntry[]) => {
+		abortRef.current?.abort();
+		setFiles(changed);
+		setLastRefreshed(new Date());
+		setLoading(false);
+		setRefreshing(false);
+	}, []);
 
-	const handleEditorUnstaged = useCallback(() => {
-		setRefreshToken((value) => value + 1);
-		fetchStatus(true);
-	}, [fetchStatus]);
+	const handleEditorStaged = useCallback(
+		(changed: StatusEntry[]) => {
+			applyChangedFiles(changed);
+			setRefreshToken((value) => value + 1);
+			setStagedContentToken((value) => value + 1);
+		},
+		[applyChangedFiles],
+	);
+
+	const handleEditorUnstaged = useCallback(
+		(changed: StatusEntry[]) => {
+			applyChangedFiles(changed);
+			setRefreshToken((value) => value + 1);
+		},
+		[applyChangedFiles],
+	);
 
 	// Reloading rereads the file, and git's diff and the comparison have to be
 	// reread with it for the editor's line numbers to match git's again. The
@@ -390,11 +409,15 @@ export function ChangesPage({
 
 	// An untracked file stages whole through the editor, which names the version
 	// on screen by its modification time. Like the page's own action on the
-	// whole file, staging it returns to the list.
-	const handleUntrackedStaged = useCallback(() => {
-		fetchStatus(true);
-		leaveDetail();
-	}, [fetchStatus, leaveDetail]);
+	// whole file, staging it returns to the list; staging some of its lines
+	// stays in the file, as for any other change.
+	const handleUntrackedStaged = useCallback(
+		(changed: StatusEntry[]) => {
+			applyChangedFiles(changed);
+			leaveDetail();
+		},
+		[applyChangedFiles, leaveDetail],
+	);
 
 	const handleWholeFileAction = useCallback(
 		async (staged: boolean) => {

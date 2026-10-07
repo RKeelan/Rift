@@ -93,7 +93,7 @@ function mockFetchForChanges(
 	files: StatusFile[],
 	options?: {
 		notGitRepo?: boolean;
-		diff?: { path: string; diff: string; truncated: boolean };
+		diff?: { path: string; diff: string; truncated: boolean; exact?: boolean };
 		baseContent?: { path: string; content: string; staged?: boolean };
 		fileContent?: { path: string; content: string; mtimeMs?: number };
 	},
@@ -136,6 +136,7 @@ function mockFetchForChanges(
 						JSON.stringify({
 							diff: options.diff.diff,
 							truncated: options.diff.truncated,
+							exact: options.diff.exact,
 						}),
 						{
 							status: 200,
@@ -374,6 +375,11 @@ describe("ChangesPage", () => {
 		mockFetchForChanges(
 			[{ path: "scratch.txt", status: "untracked", staged: false }],
 			{
+				diff: {
+					path: "scratch.txt",
+					diff: "@@ -0,0 +1,2 @@\n+draft line 1\n+draft line 2\n",
+					truncated: false,
+				},
 				fileContent: {
 					path: "scratch.txt",
 					content: "draft line 1\ndraft line 2\n",
@@ -396,9 +402,24 @@ describe("ChangesPage", () => {
 		await findEditableEditor(container);
 		expect(screen.queryByRole("button", { name: "Show diff" })).toBeNull();
 
+		// Its lines come from its diff against nothing, so each can be picked.
 		await waitFor(() => {
-			expect(container.querySelector(".cm-changedLine--added")).not.toBeNull();
+			expect(
+				[...container.querySelectorAll<HTMLElement>(".cm-pickTarget")].map(
+					(target) => target.dataset.pickLine,
+				),
+			).toEqual(["1", "2"]);
 		});
+		expect(container.querySelectorAll(".cm-changedLine--added").length).toBe(2);
+		const { calls } = (
+			globalThis.fetch as unknown as { mock: { calls: [string][] } }
+		).mock;
+		expect(
+			calls.some(
+				([url]) =>
+					url.includes("/api/git/diff") && url.includes("untracked=true"),
+			),
+		).toBe(true);
 		expect(container.querySelector(".diff-viewer")).toBeNull();
 	});
 
@@ -1181,6 +1202,17 @@ describe("ChangesPage", () => {
 				if (url.includes("/api/git/status")) {
 					return Promise.resolve(json());
 				}
+				if (url.includes("/api/git/diff")) {
+					return Promise.resolve(
+						new Response(
+							JSON.stringify({
+								diff: "@@ -0,0 +1 @@\n+current\n",
+								truncated: false,
+							}),
+							{ headers: { "Content-Type": "application/json" } },
+						),
+					);
+				}
 				if (url.includes("/api/files/content")) {
 					return Promise.resolve(
 						new Response("current\n", {
@@ -1804,8 +1836,13 @@ describe("switching between a file's unstaged and staged changes", () => {
 		});
 	});
 
-	// Answers every request the open file makes, and a stage with `files`.
-	function mockFileRequests(files: StatusFile[], urls: string[] = []) {
+	// Answers every request the open file makes, the status with `files`, and a
+	// stage or unstage with `answer`.
+	function mockFileRequests(
+		files: StatusFile[],
+		urls: string[] = [],
+		answer: StatusFile[] = files,
+	) {
 		globalThis.fetch = mock(
 			(input: string | URL | Request, init?: RequestInit) => {
 				const url = typeof input === "string" ? input : input.toString();
@@ -1817,7 +1854,7 @@ describe("switching between a file's unstaged and staged changes", () => {
 							headers: { "Content-Type": "application/json" },
 						}),
 					);
-				if (init?.method === "POST") return json({ files });
+				if (init?.method === "POST") return json({ files: answer });
 				if (url.includes("/api/git/status")) return json({ files });
 				if (url.includes("/api/git/diff")) {
 					return json({
@@ -1925,6 +1962,231 @@ describe("switching between a file's unstaged and staged changes", () => {
 			"?path=app.ts&staged=false",
 		);
 		expect(view?.state.doc.toString()).toBe("edited current\n");
+	});
+
+	test("stages lines of an untracked file and stays in it, with the rest unstaged", async () => {
+		const blobs = `${"0".repeat(40)}..${"3".repeat(40)}`;
+		const newFile = (...lines: string[]) =>
+			[
+				"diff --git a/new.txt b/new.txt",
+				"new file mode 100644",
+				`index ${blobs}`,
+				"--- /dev/null",
+				"+++ b/new.txt",
+				`@@ -0,0 +1,${lines.length} @@`,
+				...lines.map((line) => `+${line}`),
+				"",
+			].join("\n");
+		let files: StatusFile[] = [
+			{ path: "new.txt", status: "untracked", staged: false },
+		];
+		// What the index holds of the file, once some of it is staged.
+		let index: string | null = null;
+		const stageBodies: unknown[] = [];
+		const urls: string[] = [];
+		globalThis.fetch = mock(
+			(input: string | URL | Request, init?: RequestInit) => {
+				const url = typeof input === "string" ? input : input.toString();
+				urls.push(url);
+				const json = (body: unknown) =>
+					Promise.resolve(
+						new Response(JSON.stringify(body), {
+							headers: { "Content-Type": "application/json" },
+						}),
+					);
+				if (url.includes("/api/git/stage")) {
+					stageBodies.push(JSON.parse(String(init?.body)));
+					index = "two\n";
+					files = [
+						{ path: "new.txt", status: "added", staged: true },
+						{ path: "new.txt", status: "modified", staged: false },
+					];
+					return json({ files });
+				}
+				if (url.includes("/api/git/status")) return json({ files });
+				if (url.includes("/api/git/diff")) {
+					const diff = url.includes("untracked=true")
+						? newFile("one", "two", "three")
+						: url.includes("staged=true")
+							? newFile("two")
+							: "@@ -1 +1,3 @@\n+one\n two\n+three\n";
+					return json({ diff, truncated: false });
+				}
+				if (url.includes("/api/git/base-content")) {
+					return Promise.resolve(
+						index !== null && url.includes("staged=false")
+							? new Response(index)
+							: new Response("Not found", { status: 404 }),
+					);
+				}
+				return Promise.resolve(
+					new Response("one\ntwo\nthree\n", {
+						headers: { "x-file-mtime-ms": "1" },
+					}),
+				);
+			},
+		) as typeof fetch;
+		const { container } = renderChangesPage([
+			"/changes?path=new.txt&staged=false",
+		]);
+		// The lines the editor on screen offers to pick, once git's diff has
+		// placed them.
+		const shownTargets = () => {
+			const targets = [
+				...container.querySelectorAll<HTMLElement>(
+					".changes-editor-view:not(.changes-editor-view--hidden) .cm-pickTarget",
+				),
+			];
+			return targets.some((target) =>
+				target.classList.contains("cm-pickTarget--waiting"),
+			)
+				? "waiting"
+				: targets.map((target) => target.dataset.pickLine);
+		};
+
+		await waitFor(() => {
+			expect(shownTargets()).toEqual(["1", "2", "3"]);
+		});
+		expect(tabs()).toEqual(["Unstaged (selected)", "Staged (disabled)"]);
+		act(() => {
+			fireEvent.click(
+				container.querySelector(
+					'.cm-pickTarget[data-pick-line="2"]',
+				) as Element,
+			);
+		});
+		const stage = await screen.findByRole("button", { name: "Stage 1 line" });
+		await waitFor(() => {
+			expect(stage.hasAttribute("disabled")).toBe(false);
+		});
+		fireEvent.click(stage);
+
+		// The file is now a staged new file with the rest of its lines unstaged,
+		// and the editor stays open on the lines still to stage.
+		await waitFor(() => {
+			expect(tabs()).toEqual(["Unstaged (selected)", "Staged"]);
+			expect(shownTargets()).toEqual(["1", "3"]);
+		});
+		expect(stageBodies).toEqual([
+			{
+				path: "new.txt",
+				ranges: [[2, 2]],
+				expectedBlobs: blobs,
+				untracked: true,
+			},
+		]);
+		expect(screen.getByTestId("location-search").textContent).toBe(
+			"?path=new.txt&staged=false",
+		);
+		// The stage's answer gives the file's new status, so the side asks
+		// straight away for what a tracked change needs, and nothing else: not
+		// the status again, nor the untracked diff it had.
+		const afterStage = urls.slice(
+			urls.findIndex((url) => url.includes("/api/git/stage")) + 1,
+		);
+		expect(afterStage.some((url) => url.includes("/api/git/status"))).toBe(
+			false,
+		);
+		expect(afterStage.some((url) => url.includes("untracked=true"))).toBe(
+			false,
+		);
+
+		fireEvent.click(screen.getByRole("tab", { name: "Staged" }));
+		await waitFor(() => {
+			expect(shownTargets()).toEqual(["1"]);
+		});
+
+		// The list shows the file in both sections.
+		fireEvent.click(
+			screen.getByRole("button", { name: "Back to changes list" }),
+		);
+		await waitFor(() => {
+			expect(
+				[...container.querySelectorAll(".changes-section-header")].map(
+					(header) => header.textContent,
+				),
+			).toEqual(["Staged1", "Unstaged1"]);
+		});
+		expect(screen.getByLabelText("Unstage new.txt")).not.toBeNull();
+		expect(screen.getByLabelText("Stage new.txt")).not.toBeNull();
+	});
+
+	test("offers only Stage file for an untracked file its diff does not describe exactly", async () => {
+		mockFetchForChanges(
+			[{ path: "latin.txt", status: "untracked", staged: false }],
+			{
+				diff: {
+					path: "latin.txt",
+					diff: "@@ -0,0 +1 @@\n+caf\uFFFD\n",
+					truncated: false,
+					exact: false,
+				},
+				fileContent: { path: "latin.txt", content: "caf\uFFFD\n" },
+			},
+		);
+		const { container } = renderChangesPage([
+			"/changes?path=latin.txt&staged=false",
+		]);
+
+		await findEditableEditor(container);
+		await waitFor(() => {
+			expect(container.querySelector(".cm-changedLine--added")).not.toBeNull();
+			expect(container.querySelector(".cm-pickTarget") === null).toBe(true);
+		});
+		expect(container.querySelector(".cm-changeStrip") === null).toBe(true);
+		expect(container.querySelector(".text-file-editor-notice") === null).toBe(
+			true,
+		);
+	});
+
+	test("updates the list from an unstage's answer, without asking for the status", async () => {
+		const urls = mockFileRequests(
+			BOTH,
+			[],
+			[{ path: "app.ts", status: "modified", staged: false }],
+		);
+		// The index holds the staged change.
+		const answer = globalThis.fetch;
+		globalThis.fetch = mock(
+			(input: string | URL | Request, init?: RequestInit) => {
+				const url = typeof input === "string" ? input : input.toString();
+				if (
+					url.includes("/api/git/base-content") &&
+					url.includes("staged=false")
+				) {
+					urls.push(url);
+					return Promise.resolve(new Response("current\n"));
+				}
+				return answer(input, init);
+			},
+		) as typeof fetch;
+		const { container } = renderChangesPage([
+			"/changes?path=app.ts&staged=true",
+		]);
+		const strip = await enabledStrip("Unstage the change at line 1");
+		const before = urls.length;
+
+		fireEvent.click(strip);
+		await waitFor(() => {
+			expect(
+				urls.slice(before).some((url) => url.includes("/api/git/unstage")),
+			).toBe(true);
+		});
+		fireEvent.click(
+			screen.getByRole("button", { name: "Back to changes list" }),
+		);
+
+		// Nothing is staged now.
+		await waitFor(() => {
+			expect(
+				[...container.querySelectorAll(".changes-section-header")].map(
+					(header) => header.textContent,
+				),
+			).toEqual(["Unstaged1"]);
+		});
+		expect(
+			urls.slice(before).some((url) => url.includes("/api/git/status")),
+		).toBe(false);
 	});
 
 	test("rereads the status on a reload", async () => {

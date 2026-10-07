@@ -131,13 +131,18 @@ interface EditorChangeDecorationsOptions {
 	changeDiff?: string | null;
 }
 
+/**
+ * A new file adds every one of its lines. The empty line the editor shows
+ * after a final newline is not one of them, as git's diff of the file agrees.
+ */
 function getUntrackedChangeDecorations(content: string): ChangeDecorationsData {
-	if (!content) {
-		return { lineHighlights: [], deletedChunks: [] };
-	}
+	const lineCount =
+		content === ""
+			? 0
+			: content.split("\n").length - (content.endsWith("\n") ? 1 : 0);
 
 	return {
-		lineHighlights: content.split("\n").map((_line, index) => ({
+		lineHighlights: Array.from({ length: lineCount }, (_line, index) => ({
 			kind: "added",
 			lineNumber: index + 1,
 		})),
@@ -315,6 +320,12 @@ function getLiveChangeDecorations(
 	lineHighlights: ChangeLineHighlight[];
 	deletedChunks: DeletedLineChunk[];
 } {
+	// Empty text has no lines, but split into lines it would be one empty line,
+	// which could match an empty line of the buffer or show as a deleted one.
+	if (originalContent === "") {
+		return getUntrackedChangeDecorations(currentContent);
+	}
+
 	const originalLines = originalContent.split("\n");
 	const currentLines = currentContent.split("\n");
 	const prefixLength = getCommonPrefixLength(originalLines, currentLines);
@@ -745,6 +756,16 @@ export const WRITES_UNKNOWN_LABEL = "Checking write access...";
 // The file a draft is kept for.
 type DraftTarget = { repo: string; path: string };
 
+/**
+ * One side of a file's changes, as the status endpoint lists it. A stage or
+ * unstage answers with the repo's changes as it leaves them.
+ */
+export interface ChangedFile {
+	path: string;
+	status: ChangeType;
+	staged: boolean;
+}
+
 export interface TextFileEditorProps {
 	filePath: string;
 	repo: string;
@@ -752,6 +773,10 @@ export interface TextFileEditorProps {
 	readOnlyLabel?: string;
 	comparisonContent?: string;
 	changeDiff?: string | null;
+	// False when git's diff of an untracked file does not describe the file
+	// exactly, as for a file that is not UTF-8, so its lines cannot be staged
+	// from it.
+	changeDiffExact?: boolean;
 	changeType?: ChangeType | null;
 	// When set, the editor loads the file's staged (index) content instead of the
 	// working tree and presents it read-only, so a staged change can be viewed and
@@ -768,8 +793,12 @@ export interface TextFileEditorProps {
 	// view from elsewhere.
 	reloadKey?: number;
 	onSaved?: () => void;
-	onStaged?: () => void;
-	onUnstaged?: () => void;
+	// Called with the repo's changes once a stage or unstage has made them.
+	onStaged?: (files: ChangedFile[]) => void;
+	// Called in place of onStaged when the editor stages an untracked file
+	// whole, so the page can treat it as it does its own action on the file.
+	onFileStaged?: (files: ChangedFile[]) => void;
+	onUnstaged?: (files: ChangedFile[]) => void;
 	// Called when the user reloads the file, so the page can refetch the change
 	// context that git's line numbers come from along with it.
 	onReload?: () => void;
@@ -791,12 +820,14 @@ export function TextFileEditor({
 	readOnlyLabel = "Read-only",
 	comparisonContent,
 	changeDiff = null,
+	changeDiffExact = true,
 	changeType = null,
 	staged = false,
 	deleted = false,
 	reloadKey = 0,
 	onSaved,
 	onStaged,
+	onFileStaged,
 	onUnstaged,
 	onReload,
 	onDirtyChange,
@@ -927,10 +958,13 @@ export function TextFileEditor({
 	// The change context is refetched independently of the buffer, as after a
 	// stage or a save. The editor reads it through this ref and redraws its
 	// decorations in place, keeping the buffer, its selection, and its scroll
-	// position.
+	// position. An untracked file's inexact diff names no lines that staging
+	// could act on, so its lines are marked from its content instead.
+	const decoratedDiff =
+		changeType === "untracked" && !changeDiffExact ? null : changeDiff;
 	const changeContextRef = useRef({
 		comparisonContent,
-		changeDiff,
+		changeDiff: decoratedDiff,
 		changeType,
 	});
 
@@ -941,10 +975,41 @@ export function TextFileEditor({
 	const [contextStale, setContextStale] = useState(false);
 
 	useEffect(() => {
-		changeContextRef.current = { comparisonContent, changeDiff, changeType };
+		changeContextRef.current = {
+			comparisonContent,
+			changeDiff: decoratedDiff,
+			changeType,
+		};
 		refreshDecorationsRef.current?.();
 		setContextStale(false);
-	}, [comparisonContent, changeDiff, changeType]);
+	}, [comparisonContent, decoratedDiff, changeType]);
+
+	// An inexact diff is handed over too, though it draws nothing.
+	useEffect(() => {
+		if (changeDiff !== null) setContextStale(false);
+	}, [changeDiff]);
+
+	// An untracked file stages by line only when git's diff of it describes the
+	// file exactly as loaded. Otherwise, as when the file is not UTF-8, a clean
+	// filter changes it, its lines end in bare carriage returns, or its diff was
+	// cut short, it stages whole, as untracked files did before they could stage
+	// by line. The answer holds while the buffer is edited, so typing neither
+	// adds the gutter nor takes it away.
+	const [untrackedWhole, setUntrackedWhole] = useState(false);
+	useEffect(() => {
+		if (
+			changeType !== "untracked" ||
+			content === null ||
+			changeDiff === null ||
+			contextStale
+		) {
+			return;
+		}
+		setUntrackedWhole(
+			!changeDiffExact ||
+				applyDiff("", normalizeDiff(changeDiff)) !== originalContentRef.current,
+		);
+	}, [changeType, content, changeDiff, changeDiffExact, contextStale]);
 
 	// Picked lines live in the CodeMirror state; this reaches them from the
 	// action bar, and the count labels the Stage and Unstage buttons.
@@ -962,11 +1027,11 @@ export function TextFileEditor({
 	// covers a change: the server ignores lines that hold none.
 	const [selectionCoversChange, setSelectionCoversChange] = useState(false);
 
-	// A brand-new or deleted file has no diff to slice, so it stages whole; a
-	// staged new or deleted file likewise unstages whole. Every other change
-	// stages and unstages by line.
-	const stagesByLine = changeType !== "untracked" && changeType !== "deleted";
-	const unstagesByLine = changeType !== "added" && changeType !== "deleted";
+	// A deleted file has no lines left to pick, so it stages and unstages whole.
+	// Every other change stages and unstages by line, a new file through its
+	// diff against nothing, unless that diff cannot be staged from.
+	const byLine =
+		changeType !== "deleted" && !(changeType === "untracked" && untrackedWhole);
 	// Picks and selections name lines of the change git reports, so acting on
 	// them waits until both the comparison and git's diff have arrived, and
 	// then until git's diff describes the buffer as shown. A clean buffer that
@@ -985,14 +1050,18 @@ export function TextFileEditor({
 		!readOnly &&
 		!deleted &&
 		!draftOfferPending &&
-		(staged
-			? onUnstaged !== undefined && unstagesByLine
-			: onStaged !== undefined && stagesByLine);
+		byLine &&
+		(staged ? onUnstaged !== undefined : onStaged !== undefined);
 	// A file changed on disk since it loaded is the usual cause, but not the
 	// only one: a truncated diff or a clean filter can keep the two apart for
-	// good, so the notice offers the whole file as well as a reload.
+	// good, so the notice offers the whole file as well as a reload. An
+	// untracked file in that state stages whole instead, with no notice.
 	const gitDiffMismatch =
-		linePickingEnabled && !dirty && !changeContextLoading && !matchesGitDiff;
+		linePickingEnabled &&
+		changeType !== "untracked" &&
+		!dirty &&
+		!changeContextLoading &&
+		!matchesGitDiff;
 	const linePickingEnabledRef = useRef(linePickingEnabled);
 	const applyLinePickingRef = useRef<((enabled: boolean) => void) | null>(null);
 
@@ -1028,6 +1097,7 @@ export function TextFileEditor({
 		setChangeCount(0);
 		matchesGitDiffRef.current = false;
 		setMatchesGitDiff(false);
+		setUntrackedWhole(false);
 		offerDraft(null);
 		setDraftNotKept(false);
 		loadCountRef.current += 1;
@@ -1967,16 +2037,18 @@ export function TextFileEditor({
 		}
 	}, [filePath, keepDraft, mtimeMs, onSaved, readOnly, repo, staged]);
 
-	// Stages the given change whole, or else the picked or selected lines.
+	// Stages the given change whole, or else the picked or selected lines, or
+	// given "file", an untracked file whole.
 	const handleStage = useCallback(
-		async (region?: ChangeRegion) => {
+		async (target?: ChangeRegion | "file") => {
+			const wholeFile = target === "file";
+			const region = wholeFile ? undefined : target;
 			if (
 				readOnly ||
 				!viewRef.current ||
 				dirty ||
 				draftOfferRef.current !== null ||
-				// A file that stages whole has no changes to stage on their own.
-				(region && !stagesByLine)
+				(wholeFile ? changeType !== "untracked" : !byLine)
 			) {
 				return;
 			}
@@ -1990,16 +2062,23 @@ export function TextFileEditor({
 					ranges?: [number, number][];
 					expectedBlobs?: string;
 					expectedMtimeMs?: number;
+					untracked?: boolean;
 				} = {
 					path: filePath,
 				};
-				// A tracked change stages exactly the change's lines, or the picked
-				// ones, or the selected ones when nothing is picked. Each way it names
-				// the git diff those line numbers come from, so the server refuses
-				// rather than staging whatever lines now sit at them. An untracked
-				// file stages whole and names the version on screen by its
-				// modification time instead.
-				if (stagesByLine) {
+				// A change stages exactly the change's lines, or the picked ones, or
+				// the selected ones when nothing is picked. Each way it names the git
+				// diff those line numbers come from, so the server refuses rather
+				// than staging whatever lines now sit at them; an untracked file's
+				// come from its diff against nothing, which the server reads in its
+				// place. An untracked file staged whole names the version on screen
+				// by its modification time instead, so it stages whether or not its
+				// diff has arrived, or describes the buffer.
+				if (wholeFile) {
+					if (mtimeMs !== null) {
+						body.expectedMtimeMs = mtimeMs;
+					}
+				} else {
 					body.ranges = region
 						? [[region.start, region.end]]
 						: (pickerRef.current?.ranges() ??
@@ -2009,8 +2088,9 @@ export function TextFileEditor({
 					if (blobs !== null) {
 						body.expectedBlobs = blobs;
 					}
-				} else if (mtimeMs !== null) {
-					body.expectedMtimeMs = mtimeMs;
+					if (changeType === "untracked") {
+						body.untracked = true;
+					}
 				}
 
 				const response = await fetch(
@@ -2031,6 +2111,7 @@ export function TextFileEditor({
 					const errorBody = await response.json().catch(() => null);
 					throw new Error(getErrorMessage(errorBody, response.status));
 				}
+				const { files } = (await response.json()) as { files: ChangedFile[] };
 
 				// Staging leaves the buffer as it was, so picks in other changes
 				// still name their lines, and a change staged whole drops only its
@@ -2040,7 +2121,11 @@ export function TextFileEditor({
 				} else {
 					pickerRef.current?.clear();
 				}
-				onStaged?.();
+				if (wholeFile && onFileStaged) {
+					onFileStaged(files);
+				} else {
+					onStaged?.(files);
+				}
 			} catch (err) {
 				setError(
 					err instanceof Error ? err.message : "Failed to stage changes",
@@ -2049,39 +2134,47 @@ export function TextFileEditor({
 				setStaging(false);
 			}
 		},
-		[dirty, filePath, mtimeMs, onStaged, readOnly, repo, stagesByLine],
+		[
+			byLine,
+			changeType,
+			dirty,
+			filePath,
+			mtimeMs,
+			onFileStaged,
+			onStaged,
+			readOnly,
+			repo,
+		],
 	);
 
 	// Unstages the given change whole, or else the picked or selected lines.
 	const handleUnstage = useCallback(
 		async (region?: ChangeRegion) => {
 			// A file that unstages whole has no changes to unstage on their own.
-			if (!staged || !viewRef.current || (region && !unstagesByLine)) return;
+			if (!staged || !viewRef.current || !byLine) return;
 
 			setUnstaging(true);
 			setError(null);
 
 			try {
+				// A staged change unstages exactly the change's lines, or the picked
+				// ones, or the selected ones when nothing is picked, and names the
+				// staged diff those line numbers come from, as staging does.
 				const body: {
 					path: string;
-					ranges?: [number, number][];
+					ranges: [number, number][];
 					expectedBlobs?: string;
 				} = {
 					path: filePath,
-				};
-				// A staged modification unstages exactly the change's lines, or the
-				// picked ones, or the selected ones when nothing is picked, and names
-				// the staged diff those line numbers come from, as staging does.
-				if (unstagesByLine) {
-					body.ranges = region
+					ranges: region
 						? [[region.start, region.end]]
 						: (pickerRef.current?.ranges() ??
-							selectionToRanges(viewRef.current.state));
-					if (body.ranges.length === 0) return;
-					const blobs = pickerRef.current?.diffBlobs() ?? null;
-					if (blobs !== null) {
-						body.expectedBlobs = blobs;
-					}
+							selectionToRanges(viewRef.current.state)),
+				};
+				if (body.ranges.length === 0) return;
+				const blobs = pickerRef.current?.diffBlobs() ?? null;
+				if (blobs !== null) {
+					body.expectedBlobs = blobs;
 				}
 
 				const response = await fetch(
@@ -2102,6 +2195,7 @@ export function TextFileEditor({
 					const errorBody = await response.json().catch(() => null);
 					throw new Error(getErrorMessage(errorBody, response.status));
 				}
+				const { files } = (await response.json()) as { files: ChangedFile[] };
 
 				pickerRef.current?.clear();
 				// The index just changed, so bring the buffer up to the new staged
@@ -2113,8 +2207,14 @@ export function TextFileEditor({
 						`/api/git/base-content?repo=${encodeURIComponent(repo)}&path=${encodeURIComponent(filePath)}&staged=false&_reload=${Date.now()}`,
 					),
 				).catch(() => null);
-				if (refreshed?.ok && replaceDocRef.current) {
-					const text = await refreshed.text();
+				// A new file unstaged in full has left the index, which then holds
+				// nothing of it.
+				const text = refreshed?.ok
+					? await refreshed.text()
+					: refreshed?.status === 404
+						? ""
+						: null;
+				if (text !== null && replaceDocRef.current) {
 					const normalized = normalizeLineEndings(text);
 					lineSeparatorRef.current = detectLineSeparator(text);
 					originalContentRef.current = normalized;
@@ -2123,7 +2223,7 @@ export function TextFileEditor({
 				} else {
 					setReloadToken((value) => value + 1);
 				}
-				onUnstaged?.();
+				onUnstaged?.(files);
 			} catch (err) {
 				setError(
 					err instanceof Error ? err.message : "Failed to unstage changes",
@@ -2132,15 +2232,16 @@ export function TextFileEditor({
 				setUnstaging(false);
 			}
 		},
-		[filePath, onUnstaged, repo, staged, unstagesByLine],
+		[byLine, filePath, onUnstaged, repo, staged],
 	);
 
 	// The editor stages or unstages picked or selected lines, and each change
 	// whole, itself. The page's file action covers the whole file; without one,
 	// the editor stages an untracked file whole itself.
-	const lineActionAvailable = staged
-		? !readOnly && onUnstaged !== undefined && unstagesByLine
-		: !readOnly && !deleted && onStaged !== undefined && stagesByLine;
+	const lineActionAvailable =
+		!readOnly &&
+		byLine &&
+		(staged ? onUnstaged !== undefined : !deleted && onStaged !== undefined);
 	const lineActionBusy = staged ? unstaging : staging;
 	const lineActionDisabled =
 		loading ||
@@ -2170,11 +2271,11 @@ export function TextFileEditor({
 			: `${staged ? "Unstage" : "Stage"} ${lines}`;
 	const wholeFileAction: FileAction | undefined =
 		fileAction ??
-		(!readOnly && !staged && !deleted && onStaged && !stagesByLine
+		(!readOnly && !staged && !deleted && onStaged && changeType === "untracked"
 			? {
 					label: staging ? "Staging..." : "Stage file",
 					onClick: () => {
-						void handleStage();
+						void handleStage("file");
 					},
 					// An empty file marks no lines, but still stages.
 					disabled: loading || saving || staging || dirty || draftOfferPending,

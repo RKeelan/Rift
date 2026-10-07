@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -147,6 +147,13 @@ function lineSelected(line: number, ranges: LineRange[]): boolean {
  * an unselected `+` becomes context, an unselected `-` is dropped. Both use
  * `--recount` to derive the hunk counts from the rebuilt body.
  *
+ * A new file's diff, whether of an untracked file or a staged one, has only
+ * additions. Staging part of it creates the file holding just the selected
+ * lines. Unstaging part of it leaves the rest in the index, so the patch
+ * reverses a change to the file rather than its creation, which git refuses
+ * to reverse while lines would remain. Unstaging all of it reverses the
+ * creation, which takes the file out of the index, as unstaging it whole does.
+ *
  * Splitting on `\n` preserves any `\r`, keeping a CRLF working tree
  * byte-faithful. Returns null when the selection covers no change.
  */
@@ -161,17 +168,20 @@ export function buildPartialPatch(
 	const lines = diff.split("\n");
 	if (hasTrailingNewline) lines.pop();
 
+	const preamble: string[] = [];
 	const out: string[] = [];
 	let index = 0;
 
 	// Preamble: the file headers before the first hunk.
 	while (index < lines.length && !lines[index].startsWith("@@")) {
-		out.push(lines[index]);
+		preamble.push(lines[index]);
 		index += 1;
 	}
 	if (index === lines.length) return null;
 
 	let anyChange = false;
+	// Whether unstaging leaves any staged addition in the index.
+	let keptAddition = false;
 
 	while (index < lines.length && lines[index].startsWith("@@")) {
 		const header = lines[index];
@@ -211,6 +221,7 @@ export function buildPartialPatch(
 					// Unstaging leaves an unselected staged addition in the index, so
 					// it stays as context to reconstruct the index side exactly.
 					body.push(` ${line.slice(1)}`);
+					keptAddition = true;
 					lastDropped = false;
 				} else {
 					lastDropped = true;
@@ -248,7 +259,26 @@ export function buildPartialPatch(
 	}
 
 	if (!anyChange) return null;
-	return `${out.join("\n")}\n`;
+	const header =
+		reverse && keptAddition && preamble.includes("--- /dev/null")
+			? asModificationHeader(preamble)
+			: preamble;
+	return `${[...header, ...out].join("\n")}\n`;
+}
+
+/**
+ * Turns a new file's patch headers into those of a change to the file, by
+ * dropping what marks a creation: the new file's mode, the null blob it starts
+ * from, and /dev/null as its old name, which the new name replaces.
+ */
+function asModificationHeader(preamble: string[]): string[] {
+	const newName = preamble.find((line) => line.startsWith("+++ "))?.slice(4);
+	return preamble.flatMap((line) => {
+		if (line.startsWith("new file mode ") || line.startsWith("index ")) {
+			return [];
+		}
+		return line === "--- /dev/null" && newName ? [`--- ${newName}`] : [line];
+	});
 }
 
 /**
@@ -270,19 +300,97 @@ function checkDiffBlobs(diff: string, expectedBlobs: string | null): void {
 	}
 }
 
-// Stages the selected lines of a change by rebuilding a partial patch and
-// applying it to the index. A no-op (returning false) when the selection
-// covers no change, so the caller can still return the current status. The
-// diff it slices is the same output it checks against expectedBlobs, so the
-// patch holds exactly the lines the caller picked.
+/**
+ * An untracked file's diff against nothing, which is the diff it would have
+ * once added: a new-file patch of its lines, put through the clean filters
+ * and line-ending conversion that `git add` applies. The flags keep the
+ * user's diff settings, such as a textconv driver, an external diff, colour,
+ * or other prefixes, from changing the text that staging slices.
+ */
+async function untrackedDiff(
+	toplevel: string,
+	relativePath: string,
+): Promise<string> {
+	// `git diff --no-index` exits 1 whenever its sides differ, which against
+	// /dev/null they always do, and simple-git takes a failing exit with
+	// anything on stderr, such as a line-ending warning, for an error. So the
+	// exit is a failure only when it comes without a diff, as for a missing file.
+	const git = repoGit(toplevel, (error, result) =>
+		result.exitCode === 1 && result.stdOut.length > 0 ? undefined : error,
+	);
+	return git.diff([
+		"--no-index",
+		"--full-index",
+		"--no-textconv",
+		"--no-ext-diff",
+		"--no-color",
+		"--src-prefix=a/",
+		"--dst-prefix=b/",
+		"--",
+		"/dev/null",
+		toGitPath(relativePath),
+	]);
+}
+
+/**
+ * Whether a new file's diff, as text, rebuilds exactly the file that git
+ * hashed for the new side of its `index` line. Git's output reaches Rift
+ * decoded as UTF-8, and a patch goes back encoded as UTF-8, so the lines of a
+ * file that is not UTF-8 would be staged with their undecodable bytes
+ * replaced. So would text that is not the file's at all, such as a textconv
+ * driver's, or a diff read while the file was being written.
+ */
+export function newFileDiffIsExact(diff: string): boolean {
+	const blob = /^index [0-9a-f]+\.\.([0-9a-f]+)$/m.exec(diff)?.[1];
+	if (!blob) return false;
+
+	const lines = diff.split("\n");
+	let index = lines.findIndex((line) => line.startsWith("@@"));
+	let text = "";
+	if (index !== -1) {
+		for (index += 1; index < lines.length; index += 1) {
+			const line = lines[index];
+			if (line.startsWith("+")) {
+				text += `${line.slice(1)}\n`;
+			} else if (line.startsWith("\\")) {
+				text = text.slice(0, -1);
+			} else if (line !== "" || index !== lines.length - 1) {
+				// A new file's diff is a single hunk of additions.
+				return false;
+			}
+		}
+	}
+
+	const content = Buffer.from(text, "utf8");
+	// A SHA-256 repository names its blobs with 64 hex digits, SHA-1 with 40.
+	const hash = createHash(blob.length === 64 ? "sha256" : "sha1");
+	hash.update(`blob ${content.length}\0`);
+	hash.update(content);
+	return hash.digest("hex") === blob;
+}
+
+// Thrown when a new file's diff does not describe the file exactly, so its
+// lines cannot be staged from it.
+class InexactDiffError extends Error {}
+
+// Stages the selected lines of a change by rebuilding a partial patch from the
+// diff the caller read and applying it to the index. A no-op when the
+// selection covers no change, so the caller can still return the current
+// status. The diff it slices is the same output it checks against
+// expectedBlobs, so the patch holds exactly the lines the caller picked. A new
+// file's patch also creates the file, so its diff has to describe the file
+// exactly.
 async function applyPartialStage(
 	gitRoot: ReturnType<typeof repoGit>,
-	relativePath: string,
+	diff: string,
 	ranges: LineRange[],
 	expectedBlobs: string | null,
+	newFile: boolean,
 ): Promise<void> {
-	const diff = await gitRoot.diff(["--full-index", "--", relativePath]);
 	checkDiffBlobs(diff, expectedBlobs);
+	if (newFile && !newFileDiffIsExact(diff)) {
+		throw new InexactDiffError("Git's diff does not describe the file exactly");
+	}
 	const patch = buildPartialPatch(diff, ranges);
 	if (patch === null) return;
 
@@ -381,8 +489,7 @@ async function handleStageAction(
 	// and a stale number applies cleanly to whatever line now sits there. So a
 	// caller may name that diff by the full blob ids on its `index` line, and
 	// the action is refused unless the diff about to be acted on names the same
-	// blobs. Staging an untracked file whole has no diff, so it may name the
-	// file's modification time instead.
+	// blobs. Staging a file whole may name the file's modification time instead.
 	const expectedBlobs: unknown = req.body?.expectedBlobs;
 	if (
 		expectedBlobs !== undefined &&
@@ -409,6 +516,23 @@ async function handleStageAction(
 			error: {
 				code: "INVALID_MTIME",
 				message: "expectedMtimeMs must be a number",
+			},
+		});
+		return;
+	}
+	// An untracked file has no diff against the index, so a caller staging it
+	// says the file is untracked, and its line numbers and blob ids then name
+	// the file's diff against nothing.
+	const untracked: unknown = req.body?.untracked;
+	if (
+		action === "stage" &&
+		untracked !== undefined &&
+		typeof untracked !== "boolean"
+	) {
+		res.status(400).json({
+			error: {
+				code: "INVALID_UNTRACKED",
+				message: "untracked must be a boolean",
 			},
 		});
 		return;
@@ -449,13 +573,24 @@ async function handleStageAction(
 	}
 
 	const blobs = typeof expectedBlobs === "string" ? expectedBlobs : null;
+	// The diff a stage's line numbers and blob ids come from.
+	const stageDiff = () =>
+		untracked === true
+			? untrackedDiff(toplevel, relativePath)
+			: gitRoot.diff(["--full-index", "--", relativePath]);
 	try {
 		if (action === "stage") {
 			if (ranges !== null) {
 				// Line-level staging: an empty selection or one that touches no
 				// change stages nothing, falling through to the current status.
 				if (ranges.length > 0) {
-					await applyPartialStage(gitRoot, relativePath, ranges, blobs);
+					await applyPartialStage(
+						gitRoot,
+						await stageDiff(),
+						ranges,
+						blobs,
+						untracked === true,
+					);
 				}
 			} else {
 				// A whole-file action is checked and then run by separate commands,
@@ -463,10 +598,7 @@ async function handleStageAction(
 				// line numbers to misapply, so the window can only let through
 				// content the caller never saw, not stage the wrong lines.
 				if (blobs !== null) {
-					checkDiffBlobs(
-						await gitRoot.diff(["--full-index", "--", relativePath]),
-						blobs,
-					);
+					checkDiffBlobs(await stageDiff(), blobs);
 				}
 				// `git add` stages additions, modifications, and deletions alike.
 				await gitRoot.raw(["add", "--", relativePath]);
@@ -508,6 +640,16 @@ async function handleStageAction(
 			});
 			return;
 		}
+		if (err instanceof InexactDiffError) {
+			res.status(422).json({
+				error: {
+					code: "DIFF_INEXACT",
+					message:
+						"Git's diff doesn't describe this file exactly, so it can only be staged whole",
+				},
+			});
+			return;
+		}
 		res.status(500).json({
 			error: {
 				code: "GIT_ERROR",
@@ -545,10 +687,13 @@ export function gitRoutes(roots: RepoRoot[]): Router {
 	});
 
 	// POST /api/git/stage?repo=<name>
-	//   body: { path, ranges?, expectedBlobs?, expectedMtimeMs? }
+	//   body: { path, ranges?, expectedBlobs?, expectedMtimeMs?, untracked? }
 	// Responds 409 DIFF_CHANGED when the diff's index line no longer names
 	// expectedBlobs, and FILE_MODIFIED when a whole-file stage finds the file's
-	// mtime is no longer expectedMtimeMs.
+	// mtime is no longer expectedMtimeMs. With `untracked`, the diff is the
+	// file's diff against nothing, so ranges stage its lines as a new file, and
+	// the stage answers 422 DIFF_INEXACT when that diff does not describe the
+	// file exactly.
 	router.post("/stage", async (req, res) => {
 		await handleStageAction(roots, req, res, "stage");
 	});
@@ -903,7 +1048,11 @@ export function gitRoutes(roots: RepoRoot[]): Router {
 		}
 	});
 
-	// GET /api/git/diff?repo=<name>&path=<file>&staged=<bool>
+	// GET /api/git/diff?repo=<name>&path=<file>&staged=<bool>&untracked=<bool>
+	// With `untracked`, an unstaged diff is the file's diff against nothing,
+	// since an untracked file has none against the index, and the response
+	// says whether it is exact. Responds 404 NOT_FOUND when there is no such
+	// file to diff.
 	router.get("/diff", async (req, res) => {
 		const filePath = req.query.path as string;
 		if (!filePath) {
@@ -956,17 +1105,34 @@ export function gitRoutes(roots: RepoRoot[]): Router {
 		const diffArgs = staged
 			? ["--cached", "--full-index", "--", relativePath]
 			: ["--full-index", "--", relativePath];
-		const diff = await gitRoot.diff(diffArgs);
-
-		if (diff.length > MAX_DIFF_SIZE) {
-			res.json({
-				diff: diff.slice(0, MAX_DIFF_SIZE),
-				truncated: true,
-			});
-			return;
+		const untracked = !staged && req.query.untracked === "true";
+		let diff: string;
+		if (untracked) {
+			try {
+				diff = await untrackedDiff(toplevel, relativePath);
+			} catch {
+				// There is no file to diff, as when it has gone or the path names a
+				// directory.
+				res.status(404).json({
+					error: { code: "NOT_FOUND", message: "File not found" },
+				});
+				return;
+			}
+		} else {
+			diff = await gitRoot.diff(diffArgs);
 		}
+		const truncated = diff.length > MAX_DIFF_SIZE;
+		// An untracked file's lines stage from its diff only when the diff, as
+		// sent, describes the file exactly, which `exact` says.
+		const exact = untracked
+			? { exact: !truncated && newFileDiffIsExact(diff) }
+			: {};
 
-		res.json({ diff, truncated: false });
+		res.json({
+			diff: truncated ? diff.slice(0, MAX_DIFF_SIZE) : diff,
+			truncated,
+			...exact,
+		});
 	});
 
 	return router;
