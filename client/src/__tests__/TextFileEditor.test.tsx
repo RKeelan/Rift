@@ -3047,6 +3047,85 @@ describe("line wrapping", () => {
 	});
 });
 
+describe("Enter", () => {
+	const originalFetch = globalThis.fetch;
+
+	beforeEach(() => {
+		globalThis.localStorage.clear();
+	});
+
+	afterEach(() => {
+		cleanup();
+		globalThis.fetch = originalFetch;
+	});
+
+	async function renderEditor(filePath: string, content: string) {
+		globalThis.fetch = (async () =>
+			new Response(content, {
+				headers: { "x-file-mtime-ms": "1" },
+			})) as unknown as typeof fetch;
+		const { container } = render(
+			<TextFileEditor filePath={filePath} repo="test-repo" />,
+		);
+		await waitFor(() => {
+			expect(container.querySelector(".cm-content")).not.toBeNull();
+		});
+		const { EditorView } = await import("@codemirror/view");
+		const view = EditorView.findFromDOM(
+			container.querySelector(".cm-editor") as HTMLElement,
+		);
+		if (!view) throw new Error("editor view not found");
+		return view;
+	}
+
+	// Chrome on Android's EditContext inserts nothing for Enter, so the key
+	// itself, which CodeMirror's view passes on, is all the editor gets.
+	function pressEnter(view: View, at: number) {
+		act(() => {
+			view.dispatch({ selection: { anchor: at } });
+		});
+		act(() => {
+			fireEvent.keyDown(view.contentDOM, { key: "Enter", keyCode: 13 });
+		});
+	}
+
+	test("breaks a line of plain text", async () => {
+		const view = await renderEditor("notes.txt", "alpha\nbeta\n");
+
+		pressEnter(view, "alp".length);
+
+		expect(view.state.doc.toString()).toBe("alp\nha\nbeta\n");
+		expect(view.state.selection.main.head).toBe("alp\n".length);
+	});
+
+	test("breaks a line of Markdown prose, and continues a list", async () => {
+		const { language } = await import("@codemirror/language");
+		const view = await renderEditor("notes.md", "Some prose.\n\n* one\n");
+		await waitFor(() => {
+			expect(view.state.facet(language) !== null).toBe(true);
+		});
+
+		pressEnter(view, "Some prose.".length);
+		expect(view.state.doc.toString()).toBe("Some prose.\n\n\n* one\n");
+
+		pressEnter(view, "Some prose.\n\n\n* one".length);
+		expect(view.state.doc.toString()).toBe("Some prose.\n\n\n* one\n* \n");
+	});
+
+	// Markdown's binding continues a list only from after a line's marker.
+	test("breaks a Markdown list line before its marker", async () => {
+		const { language } = await import("@codemirror/language");
+		const view = await renderEditor("notes.md", "* one\n    - detail\n* two\n");
+		await waitFor(() => {
+			expect(view.state.facet(language) !== null).toBe(true);
+		});
+
+		pressEnter(view, "* one\n    - detail\n".length);
+
+		expect(view.state.doc.toString()).toBe("* one\n    - detail\n\n* two\n");
+	});
+});
+
 describe("menu", () => {
 	const originalFetch = globalThis.fetch;
 	let contentUrls: string[] = [];

@@ -635,6 +635,28 @@ function selectionToRanges(
 	return ranges;
 }
 
+/**
+ * The editor's binding for Enter. Chrome on Android types into the editor
+ * through an EditContext, which inserts nothing for Enter: CodeMirror's view
+ * hands the key to the editor's bindings instead, so without one Enter does
+ * nothing there. Elsewhere the browser's own line break reaches the view as a
+ * change, which this matches. Markdown's binding, which continues a list or a
+ * quote, runs ahead of it.
+ */
+const insertNewline: import("@codemirror/state").StateCommand = ({
+	state,
+	dispatch,
+}) => {
+	if (state.readOnly) return false;
+	dispatch(
+		state.update(state.replaceSelection(state.lineBreak), {
+			scrollIntoView: true,
+			userEvent: "input",
+		}),
+	);
+	return true;
+};
+
 type LanguageLoader = () => Promise<
 	import("@codemirror/language").LanguageSupport
 >;
@@ -1208,6 +1230,7 @@ export function TextFileEditor({
 				Decoration,
 				EditorView,
 				WidgetType,
+				keymap,
 				lineNumbers,
 				drawSelection,
 				highlightActiveLine,
@@ -1601,6 +1624,7 @@ export function TextFileEditor({
 			];
 			const baseExtensions = [
 				draftLockCompartment.of(draftOfferRef.current ? draftLock : []),
+				keymap.of([{ key: "Enter", run: insertNewline }]),
 				lineNumbers(),
 				linePickingCompartment.of(
 					linePickingEnabledRef.current ? lineActions : [],
