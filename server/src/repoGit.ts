@@ -3,7 +3,7 @@ import { type SimpleGitOptions, simpleGit } from "simple-git";
 /**
  * A git client for a repository. `git status` refreshes the index when it
  * can, which holds the index's lock for a moment, and a stage or commit that
- * wants the lock meanwhile fails at once. The Changes list polls status every
+ * wants the lock meanwhile fails at once. The Files list polls status every
  * few seconds, so every git command Rift runs passes `--no-optional-locks`,
  * which stops status writing the index. A working-tree `git diff` still
  * refreshes it, but Rift runs one only when a file opens or changes, not on a

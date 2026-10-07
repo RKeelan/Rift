@@ -10,7 +10,7 @@ const repoName = "test-repo";
 const repoRef = `root/${repoName}`;
 
 // A read that rewrites the index holds its lock while it does, and a stage
-// or commit that wants the lock then fails. The Changes list polls status, so
+// or commit that wants the lock then fails. The Files list polls status, so
 // the status must leave the index alone.
 describe("reading the status", () => {
 	let reposRoot: string;

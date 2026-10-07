@@ -99,7 +99,7 @@ describe("DashboardPage", () => {
 		});
 	});
 
-	test("selects a repository and opens the changes view", async () => {
+	test("selects a repository and opens its files", async () => {
 		mockRepos([{ name: "RKeelan/Rift", path: "/repos/RKeelan/Rift" }]);
 
 		renderDashboard();
@@ -115,7 +115,7 @@ describe("DashboardPage", () => {
 				"RKeelan/Rift",
 			);
 		});
-		expect(screen.getByTestId("location").textContent).toBe("/changes");
+		expect(screen.getByTestId("location").textContent).toBe("/files");
 	});
 
 	test("records the selection as a recent repository", async () => {

@@ -67,7 +67,7 @@ bun scripts/measure-speed.ts --repo <root>/<scratch repo>
 
 - `--mode server` times each endpoint the client waits on, straight to `127.0.0.1:13000`.
 - `--mode spawn` times starting git from Bun, through the launcher and directly, with `node:child_process` and with `Bun.spawn`.
-- `--mode client` drives headless Chrome at a phone's width through the proxy: opening a file from the Changes list, picking a line, staging a change from its strip, the switch, going back to the list, opening the Changes tab, typing, and saving.
+- `--mode client` drives headless Chrome at a phone's width through the proxy: opening a changed file from the Files list, picking a line, staging a change from its strip, the switch, going back to the list, opening the Files tab from the History tab, typing, and saving.
 - `--mode device` times the same interactions in Chrome on an Android device, as described below.
 
 Without `--mode` it runs the first three. It stages, unstages and saves one file in the repo named, one with unstaged changes in two or more places and nothing staged (`--file` chooses it), then puts the file and its index entry back as they were, so name a scratch repository. `--runs` sets the count, and `--cpu-slowdown 4` runs Chrome's CPU four times slower.

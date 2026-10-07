@@ -17,9 +17,9 @@ afterEach(() => {
 	globalThis.localStorage.clear();
 });
 
-function json(body: unknown) {
+function json(body: unknown, status = 200) {
 	return new Response(JSON.stringify(body), {
-		status: 200,
+		status,
 		headers: { "Content-Type": "application/json" },
 	});
 }
@@ -30,24 +30,45 @@ function mockServer({ gitRepo }: { gitRepo: boolean }) {
 		if (url.includes("/api/health")) {
 			return Promise.resolve(json({ status: "ok", gitRepo }));
 		}
+		if (url.includes("/api/files/content")) {
+			return Promise.resolve(new Response("current\n"));
+		}
 		if (url.includes("/api/files")) {
-			return Promise.resolve(json({ entries: [], truncated: false }));
+			return Promise.resolve(
+				json({
+					entries: [{ name: "README.md", type: "file", size: 1 }],
+					truncated: false,
+				}),
+			);
 		}
 		if (url.includes("/api/git/status")) {
-			return Promise.resolve(json({ files: [] }));
+			return Promise.resolve(
+				gitRepo
+					? json({ files: [] })
+					: json(
+							{
+								error: {
+									code: "NOT_GIT_REPO",
+									message: "The working directory is not a git repository",
+								},
+							},
+							400,
+						),
+			);
 		}
 		return Promise.resolve(json({}));
 	}) as typeof fetch;
 }
 
 function LocationProbe() {
-	return <div data-testid="location">{useLocation().pathname}</div>;
+	const { pathname, search } = useLocation();
+	return <div data-testid="location">{`${pathname}${search}`}</div>;
 }
 
-function renderShell() {
+function renderShell(initialEntry: string) {
 	globalThis.localStorage.setItem("rift:selected-repo", "RKeelan/Rift");
 	return render(
-		<MemoryRouter initialEntries={["/changes"]}>
+		<MemoryRouter initialEntries={[initialEntry]}>
 			<ErrorBannerProvider>
 				<SessionProvider>
 					<SessionShell />
@@ -59,31 +80,48 @@ function renderShell() {
 }
 
 describe("SessionShell", () => {
-	test("stays on the changes view for a git repo", async () => {
+	test("offers Files and History for a git repo, and no Changes tab", async () => {
 		mockServer({ gitRepo: true });
 
-		renderShell();
+		renderShell("/files");
 
 		await waitFor(() => {
-			// The changes tab and the page it mounts share a label; the tab alone
-			// would not prove the route rendered.
-			expect(
-				screen.getByText("Changes", { selector: ".changes-header-title" }),
-			).not.toBeNull();
+			expect(screen.getByText("Unchanged")).not.toBeNull();
 		});
-		expect(screen.getByTestId("location").textContent).toBe("/changes");
+		expect(
+			[...document.querySelectorAll(".tab-bar-label")].map(
+				(label) => label.textContent,
+			),
+		).toEqual(["Files", "History"]);
 	});
 
-	// The dashboard opens every repo on /changes, so a repo without git has to
-	// land somewhere: the changes route is never mounted for it.
-	test("falls back to files for a repo without git", async () => {
+	// The changes once had a tab of their own, whose URLs an installed app or
+	// a history entry may still hold, with a file open in the query.
+	test("sends an old changes URL to Files, keeping its query", async () => {
+		mockServer({ gitRepo: true });
+
+		renderShell("/changes?path=README.md&staged=false");
+
+		await waitFor(() => {
+			expect(screen.getByTestId("location").textContent).toBe(
+				"/files?path=README.md&staged=false",
+			);
+			expect(
+				screen.getByText("README.md", { selector: ".changes-diff-filename" }),
+			).not.toBeNull();
+		});
+	});
+
+	test("sends an old changes URL to Files for a repo without git", async () => {
 		mockServer({ gitRepo: false });
 
-		renderShell();
+		renderShell("/changes");
 
 		await waitFor(() => {
 			expect(screen.getByTestId("location").textContent).toBe("/files");
+			expect(screen.getByText("README.md")).not.toBeNull();
 		});
-		expect(screen.queryByText("Changes")).toBeNull();
+		expect(screen.queryByText("Unchanged")).toBeNull();
+		expect(screen.queryByText("History")).toBeNull();
 	});
 });
