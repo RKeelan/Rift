@@ -5,6 +5,8 @@
 	min-height: 0;
 }
 
+/* The list is styled after the dashboard: its header, uppercase section
+   titles, and rows on rounded cards with secondary text in grey. */
 .changes-page {
 	position: absolute;
 	inset: 0;
@@ -27,78 +29,48 @@
 .changes-header {
 	display: flex;
 	align-items: center;
-	justify-content: space-between;
-	padding: 0.5rem 0.75rem;
+	gap: 0.75rem;
+	padding: 1rem 1.5rem;
 	border-bottom: 1px solid var(--color-border);
-	background: var(--color-surface);
 	flex-shrink: 0;
 }
 
-.changes-header-left {
-	display: flex;
-	align-items: center;
-	gap: 0.5rem;
-}
-
 .changes-header-title {
+	flex: 1;
+	font-size: 1.25rem;
 	font-weight: 600;
-	font-size: 1rem;
+	margin: 0;
 }
 
+/* When the list was last read, or the commit just made. */
+.changes-timestamp {
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	font-size: 0.875rem;
+	color: var(--color-text-muted);
+}
+
+/* The button reaches into the header's padding, so the header is as tall as
+   the dashboard's, which has no button. */
 .changes-refresh-button {
 	display: flex;
 	align-items: center;
 	justify-content: center;
+	flex-shrink: 0;
+	width: 48px;
+	height: 48px;
+	margin: -0.5625rem -0.75rem -0.5625rem 0;
 	background: none;
 	border: none;
-	color: var(--color-text-muted);
+	border-radius: 50%;
+	color: var(--color-text-secondary);
 	cursor: pointer;
-	padding: 0.25rem;
-	border-radius: 4px;
-}
-
-.changes-header-button {
-	border: 1px solid var(--color-border);
-	background: var(--color-surface);
-	color: var(--color-text);
-	border-radius: 6px;
-	padding: 0.375rem 0.75rem;
-	font-size: 0.8125rem;
-	cursor: pointer;
-	flex-shrink: 0;
 }
 
 .changes-refresh-button:active {
 	background: var(--color-surface-raised);
-}
-
-.changes-header-button:active {
-	background: var(--color-surface-raised);
-}
-
-.changes-header-button:disabled {
-	opacity: 0.5;
-	cursor: default;
-}
-
-.changes-header-button--danger {
-	border-color: var(--color-error);
-	color: var(--color-error);
-}
-
-.changes-discard-confirm {
-	display: flex;
-	align-items: center;
-	gap: 0.5rem;
-	padding: 0.5rem 0.75rem;
-	border-bottom: 1px solid var(--color-border);
-	background: var(--color-error-bg);
-	flex-shrink: 0;
-}
-
-.changes-discard-confirm-text {
-	flex: 1;
-	font-size: 0.8125rem;
 }
 
 .changes-refresh-button--spinning svg {
@@ -114,21 +86,10 @@
 	}
 }
 
-/* Timestamp */
-
-.changes-timestamp {
-	padding: 0.25rem 0.75rem;
-	font-size: 0.75rem;
-	color: var(--color-text-muted);
-	border-bottom: 1px solid var(--color-border);
-	flex-shrink: 0;
-}
-
 .changes-readonly-note {
-	padding: 0.5rem 0.75rem;
-	font-size: 0.8125rem;
-	color: var(--color-text-muted);
-	background: var(--color-surface);
+	padding: 0.75rem 1.5rem;
+	font-size: 0.875rem;
+	color: var(--color-text-secondary);
 	border-bottom: 1px solid var(--color-border);
 	flex-shrink: 0;
 }
@@ -139,37 +100,50 @@
 	flex: 1;
 	overflow-y: auto;
 	-webkit-overflow-scrolling: touch;
+	padding: 1.5rem;
 }
 
+.changes-section {
+	margin-bottom: 1.5rem;
+}
+
+/* A section's title stays in view while its rows scroll under it. It reaches
+   up into the list's padding, and sticks there, so that rows scroll out of
+   sight under it rather than through the padding above it. */
 .changes-section-header {
-	display: flex;
-	align-items: center;
-	gap: 0.5rem;
-	padding: 0.5rem 0.75rem;
-	font-size: 0.75rem;
-	font-weight: 600;
-	text-transform: uppercase;
-	letter-spacing: 0.05em;
-	color: var(--color-text-muted);
-	background: var(--color-surface);
-	border-bottom: 1px solid var(--color-border);
 	position: sticky;
-	top: 0;
+	top: -1.5rem;
 	z-index: 1;
+	display: flex;
+	align-items: baseline;
+	gap: 0.5rem;
+	margin: -1.5rem 0 0;
+	padding: 1.5rem 0 0.75rem;
+	background: var(--color-bg);
+	font-size: 0.8125rem;
+	font-weight: 600;
+	letter-spacing: 0.05em;
+	text-transform: uppercase;
+	color: var(--color-text-secondary);
 }
 
 .changes-section-count {
-	display: inline-flex;
-	align-items: center;
-	justify-content: center;
-	min-width: 1.25rem;
-	height: 1.25rem;
-	padding: 0 0.375rem;
-	font-size: 0.6875rem;
-	font-weight: 600;
-	border-radius: 9999px;
-	background: var(--color-surface-raised);
+	font-size: 0.875rem;
+	font-weight: 400;
+	letter-spacing: normal;
 	color: var(--color-text-muted);
+}
+
+.changes-card {
+	background: var(--color-surface);
+	border: 1px solid var(--color-border);
+	border-radius: 8px;
+	overflow: hidden;
+}
+
+/* A tree whose top-level files are all listed with the changes. */
+.changes-card:empty {
+	display: none;
 }
 
 .changes-file-row {
@@ -177,29 +151,46 @@
 	align-items: center;
 }
 
+.changes-file-row + .changes-file-row {
+	border-top: 1px solid var(--color-border);
+}
+
 .changes-file-entry {
 	display: flex;
 	align-items: center;
-	gap: 0.5rem;
-	width: 100%;
-	padding: 0.5rem 0.75rem;
+	gap: 0.75rem;
+	flex: 1;
+	min-width: 0;
+	min-height: 48px;
+	padding: 0.5rem 0 0.5rem 1rem;
 	background: none;
 	border: none;
 	color: var(--color-text);
-	font-size: 0.875rem;
 	text-align: left;
 	cursor: pointer;
-	min-height: 40px;
-}
-
-.changes-file-row .changes-file-entry {
-	flex: 1;
-	min-width: 0;
-	width: auto;
 }
 
 .changes-file-entry:active {
 	background: var(--color-surface-raised);
+}
+
+.changes-file-text {
+	display: flex;
+	flex-direction: column;
+	flex: 1;
+	min-width: 0;
+	line-height: 1.375;
+	overflow-wrap: anywhere;
+}
+
+.changes-file-name {
+	font-size: 1rem;
+	font-weight: 600;
+}
+
+.changes-file-dir {
+	font-size: 0.875rem;
+	color: var(--color-text-secondary);
 }
 
 .changes-file-action {
@@ -207,12 +198,12 @@
 	align-items: center;
 	justify-content: center;
 	flex-shrink: 0;
-	width: 44px;
-	min-height: 40px;
-	padding: 0.25rem;
+	align-self: stretch;
+	width: 48px;
+	min-height: 48px;
 	background: none;
 	border: none;
-	color: var(--color-text-muted);
+	color: var(--color-text-secondary);
 	cursor: pointer;
 }
 
@@ -225,21 +216,21 @@
 	cursor: default;
 }
 
-/* The commit box under the staged files */
+/* The commit box, at the foot of the staged files' card */
 
 .changes-commit {
 	display: flex;
 	flex-direction: column;
-	gap: 0.5rem;
-	padding: 0.5rem 0.75rem 0.75rem;
-	border-bottom: 1px solid var(--color-border);
+	gap: 0.75rem;
+	padding: 1rem;
+	border-top: 1px solid var(--color-border);
 }
 
 .changes-commit-message {
 	width: 100%;
-	padding: 0.5rem 0.75rem;
+	padding: 0.625rem 0.75rem;
 	border: 1px solid var(--color-border);
-	border-radius: 6px;
+	border-radius: 8px;
 	background: var(--color-bg);
 	color: var(--color-text);
 	font: inherit;
@@ -261,9 +252,9 @@
 	align-self: flex-end;
 	min-width: 48px;
 	min-height: 48px;
-	padding: 0 1.25rem;
+	padding: 0 1.5rem;
 	border: 1px solid var(--color-primary);
-	border-radius: 6px;
+	border-radius: 8px;
 	background: var(--color-primary);
 	color: var(--color-surface);
 	font-size: 1rem;
@@ -282,11 +273,11 @@
 	display: inline-flex;
 	align-items: center;
 	justify-content: center;
-	width: 1.25rem;
-	height: 1.25rem;
-	font-size: 0.6875rem;
+	width: 1.375rem;
+	height: 1.375rem;
+	font-size: 0.75rem;
 	font-weight: 700;
-	border-radius: 3px;
+	border-radius: 4px;
 	flex-shrink: 0;
 	line-height: 1;
 }
@@ -316,11 +307,54 @@
 	color: var(--color-primary);
 }
 
-.changes-file-path {
+/* Messages and states, as the dashboard shows them */
+
+.changes-message {
+	padding: 2rem;
+	text-align: center;
+	color: var(--color-text-secondary);
+}
+
+/* The open file's header, over the list */
+
+.changes-header-button {
+	border: 1px solid var(--color-border);
+	background: var(--color-surface);
+	color: var(--color-text);
+	border-radius: 6px;
+	padding: 0.375rem 0.75rem;
+	font-size: 0.8125rem;
+	cursor: pointer;
+	flex-shrink: 0;
+}
+
+.changes-header-button:active {
+	background: var(--color-surface-raised);
+}
+
+.changes-header-button:disabled {
+	opacity: 0.5;
+	cursor: default;
+}
+
+.changes-header-button--danger {
+	border-color: var(--color-error);
+	color: var(--color-error);
+}
+
+.changes-discard-confirm {
+	display: flex;
+	align-items: center;
+	gap: 0.5rem;
+	padding: 0.5rem 0.75rem;
+	border-bottom: 1px solid var(--color-border);
+	background: var(--color-error-bg);
+	flex-shrink: 0;
+}
+
+.changes-discard-confirm-text {
 	flex: 1;
-	overflow: hidden;
-	text-overflow: ellipsis;
-	white-space: nowrap;
+	font-size: 0.8125rem;
 }
 
 /* Diff viewer panel, over the list */
@@ -424,12 +458,4 @@
 .changes-view-switch-tab:disabled {
 	opacity: 0.5;
 	cursor: default;
-}
-
-/* Messages and states */
-
-.changes-message {
-	padding: 2rem 1rem;
-	text-align: center;
-	color: var(--color-text-muted);
 }

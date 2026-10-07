@@ -264,23 +264,21 @@ export const TreeEntry = memo(function TreeEntry({
 				type="button"
 				className="tree-entry"
 				onClick={handleClick}
-				style={{ paddingLeft: `${depth * 1.25 + 0.75}rem` }}
+				style={{ paddingLeft: `${depth * 1.25 + 1}rem` }}
 			>
-				<span className="tree-entry-icon">
-					{node.type === "directory" ? (
-						node.expanded ? (
-							<FolderOpen size={16} />
-						) : (
-							<Folder size={16} />
-						)
-					) : (
-						<File size={16} />
-					)}
-				</span>
+				{node.type === "directory" ? (
+					<span className="tree-entry-icon tree-entry-icon--folder">
+						{node.expanded ? <FolderOpen size={18} /> : <Folder size={18} />}
+					</span>
+				) : (
+					<span className="tree-entry-icon">
+						<File size={18} />
+					</span>
+				)}
 				<span className="tree-entry-name">{node.name}</span>
 				{node.type === "directory" && (
 					<ChevronRight
-						size={14}
+						size={18}
 						className={`tree-chevron ${node.expanded ? "tree-chevron-open" : ""}`}
 					/>
 				)}
@@ -288,7 +286,7 @@ export const TreeEntry = memo(function TreeEntry({
 			{node.expanded && node.loading && (
 				<div
 					className="tree-loading"
-					style={{ paddingLeft: `${(depth + 1) * 1.25 + 0.75}rem` }}
+					style={{ paddingLeft: `${(depth + 1) * 1.25 + 1}rem` }}
 				>
 					Loading...
 				</div>
