@@ -1,10 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { applyDiff, type DiffOp, getDiffOps, getWordChanges } from "../diff.ts";
-import {
-	CREATED_FILE_CASE,
-	GIT_DIFF_CASES,
-	type GitDiffCase,
-} from "./gitDiffCases.ts";
+import { GIT_DIFF_CASES, type GitDiffCase } from "./gitDiffCases.ts";
 
 function render(ops: DiffOp[]): string[] {
 	return ops.map(
@@ -190,9 +186,7 @@ describe("getWordChanges", () => {
 
 describe("applyDiff", () => {
 	function gitCase(name: string): GitDiffCase {
-		const found = [...GIT_DIFF_CASES, CREATED_FILE_CASE].find(
-			(candidate) => candidate.name === name,
-		);
+		const found = GIT_DIFF_CASES.find((candidate) => candidate.name === name);
 		if (!found) throw new Error(`no case named ${name}`);
 		return found;
 	}
@@ -203,10 +197,7 @@ describe("applyDiff", () => {
 	}
 
 	test("rebuilds the new side of every captured git diff", () => {
-		for (const { name, base, diff, current } of [
-			...GIT_DIFF_CASES,
-			CREATED_FILE_CASE,
-		]) {
+		for (const { name, base, diff, current } of GIT_DIFF_CASES) {
 			expect({ name, result: applyDiff(base, diff) }).toEqual({
 				name,
 				result: current,
@@ -220,6 +211,7 @@ describe("applyDiff", () => {
 
 	test("fills an empty old side and empties a new one", () => {
 		applies("a created file");
+		applies("a created file without a final newline");
 		applies("an emptied file");
 	});
 

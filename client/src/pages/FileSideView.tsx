@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { apiUrl } from "../apiUrl.ts";
 import {
+	type ChangedFile,
 	type FileAction,
 	TextFileEditor,
 } from "../components/TextFileEditor.tsx";
@@ -15,6 +16,8 @@ export type FileStatus =
 interface DiffResponse {
 	diff: string;
 	truncated: boolean;
+	// Given for an untracked file's diff: whether it describes the file exactly.
+	exact?: boolean;
 }
 
 interface ChangeContextOptions {
@@ -53,6 +56,7 @@ function useChangeContext({
 		string | undefined
 	>(undefined);
 	const [diff, setDiff] = useState<string | null>(null);
+	const [diffExact, setDiffExact] = useState(true);
 	const inEditor = status !== "deleted";
 	// The working tree compares against the index, which stages and unstages
 	// change, and the index against HEAD, which they don't. Only the working
@@ -114,10 +118,11 @@ function useChangeContext({
 	}, [inEditor, repoName, path, staged, status, showError, comparisonKey]);
 
 	useEffect(() => {
-		// The editor only needs a diff to decorate a tracked modification it is
-		// editing or unstaging. Untracked and deleted files decorate straight from
-		// their content, so they need no diff.
-		if (status === "untracked" || status === "deleted" || status === null) {
+		// The editor needs git's diff to decorate a change, and to stage or
+		// unstage it by line. A deleted file decorates straight from its content,
+		// so it needs none. An untracked file has no diff against the index, so
+		// its diff is against nothing, which is what staging its lines slices.
+		if (status === "deleted" || status === null) {
 			setDiff(null);
 			return;
 		}
@@ -133,6 +138,7 @@ function useChangeContext({
 					staged: String(staged),
 					_refresh: diffKey,
 				});
+				if (status === "untracked") params.set("untracked", "true");
 				const res = await fetch(apiUrl(`/api/git/diff?${params}`), {
 					signal: controller.signal,
 				});
@@ -144,6 +150,7 @@ function useChangeContext({
 
 				const data: DiffResponse = await res.json();
 				setDiff(data.diff);
+				setDiffExact(data.exact !== false);
 			} catch (err) {
 				if (err instanceof DOMException && err.name === "AbortError") {
 					return;
@@ -157,7 +164,7 @@ function useChangeContext({
 		};
 	}, [repoName, path, staged, status, showError, diffKey]);
 
-	return { comparisonContent, diff };
+	return { comparisonContent, diff, diffExact };
 }
 
 export interface FileSideViewProps extends ChangeContextOptions {
@@ -174,9 +181,11 @@ export interface FileSideViewProps extends ChangeContextOptions {
 	// The page's action on the whole file, for this side.
 	fileAction: (label: string) => FileAction;
 	onSaved: () => void;
-	onStaged: () => void;
-	onUntrackedStaged: () => void;
-	onUnstaged: () => void;
+	// Each is called with the repo's changes as the action leaves them.
+	onStaged: (files: ChangedFile[]) => void;
+	// Called when the editor stages an untracked file whole.
+	onUntrackedStaged: (files: ChangedFile[]) => void;
+	onUnstaged: (files: ChangedFile[]) => void;
 	onReload: () => void;
 	onDirtyChange: (dirty: boolean) => void;
 }
@@ -201,7 +210,7 @@ export function FileSideView({
 	...context
 }: FileSideViewProps) {
 	const { repoName, path, staged, status } = context;
-	const { comparisonContent, diff } = useChangeContext(context);
+	const { comparisonContent, diff, diffExact } = useChangeContext(context);
 
 	return (
 		<div
@@ -239,14 +248,16 @@ export function FileSideView({
 			) : (
 				<TextFileEditor
 					comparisonContent={comparisonContent}
-					changeDiff={status === "untracked" ? null : diff}
+					changeDiff={diff}
+					changeDiffExact={diffExact}
 					changeType={status}
 					filePath={path}
 					repo={repoName}
 					readOnly={!canWrite}
 					readOnlyLabel={readOnlyLabel}
 					onSaved={onSaved}
-					onStaged={status === "untracked" ? onUntrackedStaged : onStaged}
+					onStaged={onStaged}
+					onFileStaged={onUntrackedStaged}
 					onReload={onReload}
 					onDirtyChange={onDirtyChange}
 					fileAction={

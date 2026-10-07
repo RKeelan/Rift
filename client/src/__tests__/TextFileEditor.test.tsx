@@ -25,6 +25,26 @@ const B_MODIFIED_DIFF = "@@ -1,3 +1,3 @@\n a\n-b\n+B\n c\n";
 const B_MODIFIED_BLOBS = `${"1".repeat(40)}..${"2".repeat(40)}`;
 const B_MODIFIED_DIFF_WITH_BLOBS = `diff --git a/notes.txt b/notes.txt\nindex ${B_MODIFIED_BLOBS} 100644\n--- a/notes.txt\n+++ b/notes.txt\n${B_MODIFIED_DIFF}`;
 
+// git's diff of a new file against nothing, as `git diff --no-index` prints
+// it for an untracked file and `git diff --cached` for a staged one.
+const NEW_FILE_BLOBS = `${"0".repeat(40)}..${"3".repeat(40)}`;
+function newFileDiff(...hunk: string[]): string {
+	return [
+		"diff --git a/notes.txt b/notes.txt",
+		"new file mode 100644",
+		`index ${NEW_FILE_BLOBS}`,
+		"--- /dev/null",
+		"+++ b/notes.txt",
+		...hunk,
+		"",
+	].join("\n");
+}
+const NEW_FILE = {
+	file: "one\ntwo\nthree\n",
+	comparison: "",
+	diff: newFileDiff("@@ -0,0 +1,3 @@", "+one", "+two", "+three"),
+};
+
 function gitCase(name: string) {
 	const found = GIT_DIFF_CASES.find((candidate) => candidate.name === name);
 	if (!found) throw new Error(`no case named ${name}`);
@@ -173,6 +193,36 @@ describe("getEditorChangeDecorations", () => {
 
 		expect(decorations.lineHighlights).toEqual([]);
 		expect(decorations.deletedChunks).toEqual([]);
+	});
+
+	test("marks every line of a new file as added, and none as deleted", () => {
+		// Split into lines, the empty comparison would be one empty line, which
+		// would show as deleted above a file without a final newline, or match a
+		// new empty line and leave it unmarked.
+		for (const [current, added] of [
+			["a\nb", [1, 2]],
+			["\nb\n", [1, 2]],
+			["a\n\nb", [1, 2, 3]],
+			["a\n", [1]],
+			["", []],
+		] as const) {
+			const decorations = getEditorChangeDecorations({
+				currentContent: current,
+				loadedContent: current,
+				comparisonContent: "",
+				changeType: "untracked",
+			});
+
+			expect({ current, ...decorations }).toEqual({
+				current,
+				lineHighlights: added.map((lineNumber) => ({
+					kind: "added",
+					lineNumber,
+				})),
+				deletedChunks: [],
+				matchesGitDiff: false,
+			});
+		}
 	});
 
 	test("marks every line of a deleted file as removed", () => {
@@ -361,6 +411,30 @@ describe("getEditorChangeDecorations", () => {
 			});
 
 			expect(decorations.deletedChunks).toEqual([GIT_PLACEMENT]);
+		});
+
+		test("follows git's diff of a new file without a final newline", () => {
+			const decorations = getEditorChangeDecorations({
+				currentContent: "a\nb",
+				loadedContent: "a\nb",
+				comparisonContent: "",
+				changeType: "untracked",
+				changeDiff: newFileDiff(
+					"@@ -0,0 +1,2 @@",
+					"+a",
+					"+b",
+					"\\ No newline at end of file",
+				),
+			});
+
+			expect(decorations).toEqual({
+				lineHighlights: [
+					{ kind: "added", lineNumber: 1 },
+					{ kind: "added", lineNumber: 2 },
+				],
+				deletedChunks: [],
+				matchesGitDiff: true,
+			});
 		});
 
 		test("falls back to its own diff once the buffer moves on", () => {
@@ -765,16 +839,21 @@ describe("staging", () => {
 	});
 
 	test("stages an empty untracked file, which marks no lines", async () => {
-		const { requests } = await renderForStaging(
+		const { view, requests } = await renderForStaging(
 			{
 				changeType: "untracked",
 				comparisonContent: "",
-				changeDiff: null,
+				// An empty file's diff has headers but no hunk.
+				changeDiff: newFileDiff(),
 			},
 			"",
 		);
 
-		fireEvent.click(await enabledButton("Stage file"));
+		const stageFile = await enabledButton("Stage file");
+		// With no lines, there is nothing to pick or to stage by line.
+		expect(view.dom.querySelector(".cm-pickTarget") === null).toBe(true);
+		expect(view.dom.querySelector(".cm-changeStrip") === null).toBe(true);
+		fireEvent.click(stageFile);
 
 		await waitFor(() => {
 			expect(requests.length).toBe(1);
@@ -782,6 +861,29 @@ describe("staging", () => {
 		expect(JSON.parse(requests[0].body as string)).toEqual({
 			path: "notes.txt",
 			expectedMtimeMs: 1,
+		});
+	});
+
+	test("hands on the repo's changes that a stage answers with", async () => {
+		const changes = [
+			{ path: "notes.txt", status: "modified", staged: true },
+			{ path: "notes.txt", status: "modified", staged: false },
+		];
+		const handed: unknown[] = [];
+		const { view } = await renderForStaging({
+			onStaged: (files) => handed.push(files),
+		});
+		globalThis.fetch = (async () =>
+			new Response(JSON.stringify({ files: changes }), {
+				headers: { "Content-Type": "application/json" },
+			})) as unknown as typeof fetch;
+		selectLines(view, 2);
+
+		fireEvent.click(await enabledButton("Stage selection"));
+
+		// The page shows them as they are, without asking for the status again.
+		await waitFor(() => {
+			expect(handed).toEqual([changes]);
 		});
 	});
 
@@ -1069,35 +1171,90 @@ describe("unstaging", () => {
 		});
 	});
 
-	test("leaves a staged new file to the page's action, which unstages it whole", async () => {
-		let unstaged = 0;
-		const { container, view, requests } = await renderForUnstaging(
+	test("unstages a staged new file by line, or whole through the page's action", async () => {
+		let unstagedWhole = 0;
+		const { container, requests } = await renderForUnstaging(
 			{
 				changeType: "added",
 				comparisonContent: "",
+				changeDiff: NEW_FILE.diff,
 				fileAction: {
 					label: "Unstage file",
 					onClick: () => {
-						unstaged += 1;
+						unstagedWhole += 1;
 					},
 				},
 			},
-			"x\ny\n",
+			NEW_FILE.file,
+		);
+
+		await waitFor(() => {
+			expect(pickTargets(container)).toEqual([
+				["line", 1, "+"],
+				["line", 2, "+"],
+				["line", 3, "+"],
+			]);
+		});
+		fireEvent.click(await enabledButton("Unstage file"));
+		expect(unstagedWhole).toBe(1);
+		expect(requests.length).toBe(0);
+
+		await tap(container, 2);
+		fireEvent.click(await enabledButton("Unstage 1 line"));
+
+		await waitFor(() => {
+			expect(requests.length).toBe(1);
+		});
+		expect(JSON.parse(requests[0].body as string)).toEqual({
+			path: "notes.txt",
+			ranges: [[2, 2]],
+			expectedBlobs: NEW_FILE_BLOBS,
+		});
+	});
+
+	test("empties the staged view of a new file once all of it is unstaged", async () => {
+		let inIndex = true;
+		globalThis.fetch = (async (_input: string, init?: RequestInit) => {
+			if (init?.method === "POST") {
+				inIndex = false;
+				return new Response(JSON.stringify({ files: [] }), {
+					headers: { "Content-Type": "application/json" },
+				});
+			}
+			// The index holds nothing of a file it no longer tracks.
+			return inIndex
+				? new Response(NEW_FILE.file)
+				: new Response("Not found", { status: 404 });
+		}) as unknown as typeof fetch;
+
+		const { container } = render(
+			<TextFileEditor
+				filePath="notes.txt"
+				repo="test-repo"
+				comparisonContent=""
+				changeDiff={NEW_FILE.diff}
+				changeType="added"
+				staged
+				onUnstaged={() => {}}
+			/>,
 		);
 		await waitFor(() => {
-			expect(container.querySelector(".cm-changedLine--added")).not.toBeNull();
+			expect(container.querySelector(".cm-content")).not.toBeNull();
 		});
+		const { EditorView } = await import("@codemirror/view");
+		const view = EditorView.findFromDOM(
+			container.querySelector(".cm-editor") as HTMLElement,
+		);
+		if (!view) throw new Error("editor view not found");
 
-		// A new file has no diff to slice, so no part of it unstages alone.
-		selectLines(view, 1, 2);
-		expect(container.querySelector(".cm-pickTarget") === null).toBe(true);
-		expect(
-			screen.queryByRole("button", { name: "Unstage selection" }) === null,
-		).toBe(true);
+		fireEvent.click(await enabledButton("Unstage the change at line 1"));
 
-		fireEvent.click(await enabledButton("Unstage file"));
-		expect(unstaged).toBe(1);
-		expect(requests.length).toBe(0);
+		await waitFor(() => {
+			expect(view.state.doc.toString()).toBe("");
+		});
+		expect(container.querySelector(".text-file-editor-error") === null).toBe(
+			true,
+		);
 	});
 
 	test("keeps the editor when an unstage changes the staged content", async () => {
@@ -1544,15 +1701,134 @@ describe("line picking", () => {
 		);
 	});
 
-	test("offers no targets for an untracked file, which stages whole", async () => {
-		const { container } = await renderForPicking({
-			changeType: "untracked",
-			comparisonContent: "",
-			changeDiff: null,
+	test("offers a target beside every line of an untracked file", async () => {
+		const { container, requests } = await renderForPicking(
+			{ changeType: "untracked" },
+			NEW_FILE,
+		);
+
+		await waitFor(() => {
+			expect(pickTargets(container)).toEqual([
+				["line", 1, "+"],
+				["line", 2, "+"],
+				["line", 3, "+"],
+			]);
+		});
+		// With nothing picked, the file stages whole.
+		await enabledButton("Stage file");
+
+		await tap(container, 1);
+		await tap(container, 3);
+		fireEvent.click(await enabledButton("Stage 2 lines"));
+
+		await waitFor(() => {
+			expect(requests.length).toBe(1);
+		});
+		// The lines are those of the file's diff against nothing, which the
+		// server reads in place of its diff against the index.
+		expect(requests[0]).toEqual({
+			path: "notes.txt",
+			ranges: [
+				[1, 1],
+				[3, 3],
+			],
+			expectedBlobs: NEW_FILE_BLOBS,
+			untracked: true,
+		});
+	});
+
+	test("offers only Stage file for an untracked file its diff does not describe exactly", async () => {
+		// As for a file that is not UTF-8: the server says its diff is not exact.
+		const { container } = await renderForPicking(
+			{ changeType: "untracked", changeDiffExact: false },
+			NEW_FILE,
+		);
+
+		await enabledButton("Stage file");
+		await waitFor(() => {
+			expect(pickTargets(container)).toEqual([]);
+		});
+		// Its lines are marked from its content, with nothing to stage alone.
+		expect(container.querySelectorAll(".cm-changedLine--added").length).toBe(3);
+		expect(container.querySelector(".cm-changeStrip") === null).toBe(true);
+		expect(container.querySelector(".text-file-editor-notice") === null).toBe(
+			true,
+		);
+	});
+
+	test("offers only Stage file, with no notice, for an untracked file its diff does not describe", async () => {
+		// As a clean filter that changes the file's text would.
+		const { container } = await renderForPicking(
+			{ changeType: "untracked" },
+			{
+				file: "one\ntwo\n",
+				comparison: "",
+				diff: newFileDiff("@@ -0,0 +1,2 @@", "+ONE", "+TWO"),
+			},
+		);
+
+		await enabledButton("Stage file");
+		await waitFor(() => {
+			expect(pickTargets(container)).toEqual([]);
+		});
+		expect(container.querySelectorAll(".cm-changedLine--added").length).toBe(2);
+		expect(container.querySelector(".cm-changeStrip") === null).toBe(true);
+		expect(container.querySelector(".text-file-editor-notice") === null).toBe(
+			true,
+		);
+	});
+
+	test("keeps an untracked file's targets while its buffer is edited", async () => {
+		const { container, view } = await renderForPicking(
+			{ changeType: "untracked" },
+			NEW_FILE,
+		);
+		await waitFor(() => {
+			expect(container.querySelector(".cm-pickTarget--waiting") === null).toBe(
+				true,
+			);
 		});
 
-		await screen.findByRole("button", { name: "Stage file" });
-		expect(pickTargets(container)).toEqual([]);
+		act(() => {
+			view.dispatch({ changes: { from: 0, insert: "x" } });
+		});
+
+		await screen.findByRole("button", { name: "Save" });
+		// git's diff no longer describes the buffer, so the targets wait, but
+		// they stay, and no notice comes.
+		expect(pickTargets(container).length).toBe(3);
+		expect(container.querySelector(".text-file-editor-notice") === null).toBe(
+			true,
+		);
+	});
+
+	test("stays in an untracked file staged by line, and leaves one staged whole", async () => {
+		let stagedByLine = 0;
+		let stagedWhole = 0;
+		const { container } = await renderForPicking(
+			{
+				changeType: "untracked",
+				onStaged: () => {
+					stagedByLine += 1;
+				},
+				onFileStaged: () => {
+					stagedWhole += 1;
+				},
+			},
+			NEW_FILE,
+		);
+
+		await tap(container, 2);
+		fireEvent.click(await enabledButton("Stage 1 line"));
+		await waitFor(() => {
+			expect(stagedByLine).toBe(1);
+		});
+
+		fireEvent.click(await enabledButton("Stage file"));
+		await waitFor(() => {
+			expect(stagedWhole).toBe(1);
+		});
+		expect(stagedByLine).toBe(1);
 	});
 
 	test("offers no targets when the server refuses writes", async () => {
@@ -2050,9 +2326,40 @@ describe("change strips", () => {
 		expect(requests.length).toBe(0);
 	});
 
-	test("draws no strips for an untracked file, or without a Stage", async () => {
+	test("draws one strip above an untracked file, which stages all of it", async () => {
+		const { container, view, requests } = await renderWithStrips(
+			{
+				changeType: "untracked",
+				comparisonContent: NEW_FILE.comparison,
+				changeDiff: NEW_FILE.diff,
+			},
+			{ file: NEW_FILE.file },
+		);
+
+		await waitFor(() => {
+			expect(strips(container)).toEqual([["Line 1", "Stage"]]);
+		});
+		const strip = container.querySelector(".cm-changeStrip") as HTMLElement;
+		// The press takes focus from the editor, so it raises no keyboard.
+		act(() => view.focus());
+		expect(fireEvent.mouseDown(strip)).toBe(false);
+		expect(document.activeElement === view.contentDOM).toBe(false);
+
+		fireEvent.click(await enabledButton("Stage the change at line 1"));
+
+		await waitFor(() => {
+			expect(requests.length).toBe(1);
+		});
+		expect(requests[0].body).toEqual({
+			path: "notes.txt",
+			ranges: [[1, 3]],
+			expectedBlobs: NEW_FILE_BLOBS,
+			untracked: true,
+		});
+	});
+
+	test("draws no strips without a Stage", async () => {
 		for (const props of [
-			{ changeType: "untracked" as const, changeDiff: null },
 			{ onStaged: undefined },
 			{ readOnly: true, readOnlyLabel: "Writes are off" },
 		]) {

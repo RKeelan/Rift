@@ -113,6 +113,18 @@ export const GIT_DIFF_CASES: GitDiffCase[] = [
 		diff: gitDiff("@@ -1,2 +1,2 @@", " a", "-b", "+b", NO_NEWLINE),
 	},
 	{
+		name: "a created file",
+		base: "",
+		current: "a\nb\n",
+		diff: gitDiff("@@ -0,0 +1,2 @@", "+a", "+b"),
+	},
+	{
+		name: "a created file without a final newline",
+		base: "",
+		current: "a\nb",
+		diff: gitDiff("@@ -0,0 +1,2 @@", "+a", "+b", NO_NEWLINE),
+	},
+	{
 		name: "edits in three hunks",
 		base: `${numbered.join("\n")}\n`,
 		current: `${numbered
@@ -149,11 +161,3 @@ export const GIT_DIFF_CASES: GitDiffCase[] = [
 		),
 	},
 ];
-
-/** A new file's diff, which Rift stages whole rather than by line. */
-export const CREATED_FILE_CASE: GitDiffCase = {
-	name: "a created file",
-	base: "",
-	current: "a\nb\n",
-	diff: gitDiff("@@ -0,0 +1,2 @@", "+a", "+b"),
-};

@@ -28,7 +28,23 @@ async function blobsFromDiff(
 	const res = await supertest(app).get(
 		`/api/git/diff?repo=${repoRef}&path=${name}&staged=${staged}`,
 	);
-	const blobs = /^index ([0-9a-f]+\.\.[0-9a-f]+)/m.exec(res.body.diff)?.[1];
+	return blobsOf(res.body.diff, name);
+}
+
+// An untracked file's diff is against nothing, so it names the null blob on
+// its old side.
+async function blobsFromUntrackedDiff(
+	app: ReturnType<typeof createApp>,
+	name: string,
+): Promise<string> {
+	const res = await supertest(app).get(
+		`/api/git/diff?repo=${repoRef}&path=${name}&staged=false&untracked=true`,
+	);
+	return blobsOf(res.body.diff, name);
+}
+
+function blobsOf(diff: string, name: string): string {
+	const blobs = /^index ([0-9a-f]+\.\.[0-9a-f]+)/m.exec(diff)?.[1];
 	if (!blobs) throw new Error(`no index line in the diff of ${name}`);
 	return blobs;
 }
@@ -306,6 +322,55 @@ describe("GET /api/git/diff", () => {
 		expect(res.status).toBe(200);
 		expect(res.body.diff).toBe("");
 		expect(res.body.truncated).toBe(false);
+	});
+
+	test("returns an untracked file's diff against nothing", async () => {
+		await fs.mkdir(path.join(repoDir, "notes"), { recursive: true });
+		await fs.writeFile(path.join(repoDir, "notes", "new.txt"), "one\ntwo\n");
+
+		const res = await supertest(app).get(
+			`/api/git/diff?repo=${repoRef}&path=notes/new.txt&staged=false&untracked=true`,
+		);
+
+		expect(res.status).toBe(200);
+		const blob = execSync("git hash-object notes/new.txt", { cwd: repoDir })
+			.toString()
+			.trim();
+		expect(res.body.diff).toBe(
+			[
+				"diff --git a/notes/new.txt b/notes/new.txt",
+				"new file mode 100644",
+				`index ${"0".repeat(40)}..${blob}`,
+				"--- /dev/null",
+				"+++ b/notes/new.txt",
+				"@@ -0,0 +1,2 @@",
+				"+one",
+				"+two",
+				"",
+			].join("\n"),
+		);
+		expect(res.body.exact).toBe(true);
+
+		await fs.rm(path.join(repoDir, "notes"), { recursive: true, force: true });
+	});
+
+	test("answers 404 when there is no untracked file to diff", async () => {
+		await fs.mkdir(path.join(repoDir, "folder"), { recursive: true });
+		await fs.writeFile(path.join(repoDir, "folder", "inside.txt"), "x\n");
+
+		for (const name of ["gone.txt", "folder", "."]) {
+			const res = await supertest(app).get(
+				`/api/git/diff?repo=${repoRef}&path=${name}&staged=false&untracked=true`,
+			);
+
+			expect({ name, status: res.status, code: res.body.error?.code }).toEqual({
+				name,
+				status: 404,
+				code: "NOT_FOUND",
+			});
+		}
+
+		await fs.rm(path.join(repoDir, "folder"), { recursive: true, force: true });
 	});
 
 	test("returns 400 when path parameter is missing", async () => {
@@ -1219,6 +1284,366 @@ describe("POST /api/git/unstage (line ranges)", () => {
 
 		expect(res.status).toBe(400);
 		expect(res.body.error.code).toBe("INVALID_RANGES");
+	});
+});
+
+describe("POST /api/git/stage and /api/git/unstage (new files by line)", () => {
+	let reposRoot: string;
+	let repoDir: string;
+	let app: ReturnType<typeof createApp>;
+
+	// The repo has no commits, as a new repo's first files don't.
+	beforeAll(async () => {
+		reposRoot = await fs.mkdtemp(path.join(os.tmpdir(), "rift-git-new-lines-"));
+		repoDir = path.join(reposRoot, repoName);
+		await fs.mkdir(repoDir);
+
+		execSync("git init", { cwd: repoDir });
+		execSync("git config user.email 'test@test.com'", { cwd: repoDir });
+		execSync("git config user.name 'Test'", { cwd: repoDir });
+		// Store line endings verbatim unless a test says otherwise.
+		execSync("git config core.autocrlf false", { cwd: repoDir });
+
+		app = createApp(makeConfig(reposRoot));
+	});
+
+	afterAll(async () => {
+		await fs.rm(reposRoot, { recursive: true, force: true });
+	});
+
+	function indexContent(name: string): string {
+		return execSync(`git show :${name}`, { cwd: repoDir }).toString();
+	}
+
+	function inIndex(name: string): boolean {
+		return (
+			execSync(`git ls-files -- ${name}`, { cwd: repoDir }).toString() !== ""
+		);
+	}
+
+	// The status entries a response gives for one file.
+	function entries(res: { body: { files: { path: string }[] } }, name: string) {
+		return res.body.files.filter((f) => f.path === name);
+	}
+
+	async function stageLines(name: string, ranges: [number, number][]) {
+		return supertest(app)
+			.post(`/api/git/stage?repo=${repoRef}`)
+			.send({
+				path: name,
+				ranges,
+				expectedBlobs: await blobsFromUntrackedDiff(app, name),
+				untracked: true,
+			});
+	}
+
+	async function unstageLines(name: string, ranges: [number, number][]) {
+		return supertest(app)
+			.post(`/api/git/unstage?repo=${repoRef}`)
+			.send({
+				path: name,
+				ranges,
+				expectedBlobs: await blobsFromDiff(app, name, true),
+			});
+	}
+
+	async function removeFile(name: string): Promise<void> {
+		execSync(`git reset -q -- ${name}`, { cwd: repoDir });
+		await fs.rm(path.join(repoDir, name));
+	}
+
+	test("stages picked lines of an untracked file as a new file holding just them", async () => {
+		await fs.writeFile(
+			path.join(repoDir, "picked.txt"),
+			"one\ntwo\nthree\nfour\n",
+		);
+
+		const res = await stageLines("picked.txt", [
+			[2, 2],
+			[4, 4],
+		]);
+
+		expect(res.status).toBe(200);
+		expect(indexContent("picked.txt")).toBe("two\nfour\n");
+		expect(await fs.readFile(path.join(repoDir, "picked.txt"), "utf8")).toBe(
+			"one\ntwo\nthree\nfour\n",
+		);
+		// A staged new file, with the rest of its lines unstaged.
+		expect(entries(res, "picked.txt")).toEqual([
+			{ path: "picked.txt", status: "added", staged: true },
+			{ path: "picked.txt", status: "modified", staged: false },
+		]);
+
+		await removeFile("picked.txt");
+	});
+
+	test("stages every line of an untracked file as adding it whole", async () => {
+		await fs.writeFile(path.join(repoDir, "all.txt"), "one\ntwo\n");
+
+		const res = await stageLines("all.txt", [[1, 2]]);
+
+		expect(res.status).toBe(200);
+		expect(indexContent("all.txt")).toBe("one\ntwo\n");
+		expect(entries(res, "all.txt")).toEqual([
+			{ path: "all.txt", status: "added", staged: true },
+		]);
+
+		await removeFile("all.txt");
+	});
+
+	test("stages an untracked file's last line without a newline only with that line", async () => {
+		await fs.writeFile(path.join(repoDir, "nonl.txt"), "a\nb");
+
+		expect((await stageLines("nonl.txt", [[1, 1]])).status).toBe(200);
+		expect(indexContent("nonl.txt")).toBe("a\n");
+
+		execSync("git reset -q -- nonl.txt", { cwd: repoDir });
+		expect((await stageLines("nonl.txt", [[2, 2]])).status).toBe(200);
+		expect(indexContent("nonl.txt")).toBe("b");
+
+		await removeFile("nonl.txt");
+	});
+
+	test("preserves CRLF line endings when staging lines of an untracked file", async () => {
+		await fs.writeFile(path.join(repoDir, "crlf.txt"), "one\r\ntwo\r\n");
+
+		expect((await stageLines("crlf.txt", [[2, 2]])).status).toBe(200);
+		expect(indexContent("crlf.txt")).toBe("two\r\n");
+
+		await removeFile("crlf.txt");
+	});
+
+	test("converts line endings as adding the file would", async () => {
+		execSync("git config core.autocrlf true", { cwd: repoDir });
+		try {
+			await fs.writeFile(path.join(repoDir, "conv.txt"), "one\r\ntwo\r\n");
+
+			expect((await stageLines("conv.txt", [[2, 2]])).status).toBe(200);
+			expect(indexContent("conv.txt")).toBe("two\n");
+
+			await removeFile("conv.txt");
+		} finally {
+			execSync("git config core.autocrlf false", { cwd: repoDir });
+		}
+	});
+
+	test("keeps a byte order mark with line 1", async () => {
+		const bom = String.fromCharCode(0xfeff);
+		await fs.writeFile(path.join(repoDir, "bom.txt"), `${bom}one\ntwo\n`);
+
+		expect((await stageLines("bom.txt", [[1, 1]])).status).toBe(200);
+		expect(indexContent("bom.txt")).toBe(`${bom}one\n`);
+
+		await removeFile("bom.txt");
+	});
+
+	test("an empty untracked file has no lines to stage", async () => {
+		await fs.writeFile(path.join(repoDir, "empty.txt"), "");
+
+		const res = await stageLines("empty.txt", [[1, 1]]);
+
+		expect(res.status).toBe(200);
+		expect(inIndex("empty.txt")).toBe(false);
+		expect(entries(res, "empty.txt")).toEqual([
+			{ path: "empty.txt", status: "untracked", staged: false },
+		]);
+
+		await removeFile("empty.txt");
+	});
+
+	test("refuses to stage lines of an untracked file that changed since it was read", async () => {
+		await fs.writeFile(path.join(repoDir, "stale.txt"), "one\ntwo\n");
+		const expectedBlobs = await blobsFromUntrackedDiff(app, "stale.txt");
+		await fs.writeFile(path.join(repoDir, "stale.txt"), "zero\none\ntwo\n");
+
+		const res = await supertest(app)
+			.post(`/api/git/stage?repo=${repoRef}`)
+			.send({
+				path: "stale.txt",
+				ranges: [[2, 2]],
+				expectedBlobs,
+				untracked: true,
+			});
+
+		expect(res.status).toBe(409);
+		expect(res.body.error.code).toBe("DIFF_CHANGED");
+		expect(inIndex("stale.txt")).toBe(false);
+
+		await removeFile("stale.txt");
+	});
+
+	test("refuses to stage lines of a file its diff does not describe exactly, as one not in UTF-8", async () => {
+		// "café" in Windows-1252, whose é is not UTF-8.
+		const bytes = Buffer.concat([
+			Buffer.from("one\ncaf"),
+			Buffer.from([0xe9]),
+			Buffer.from(" two\nthree\n"),
+		]);
+		await fs.writeFile(path.join(repoDir, "latin.txt"), bytes);
+
+		const diff = await supertest(app).get(
+			`/api/git/diff?repo=${repoRef}&path=latin.txt&staged=false&untracked=true`,
+		);
+		expect(diff.body.exact).toBe(false);
+
+		const res = await stageLines("latin.txt", [[2, 2]]);
+		expect(res.status).toBe(422);
+		expect(res.body.error.code).toBe("DIFF_INEXACT");
+		expect(inIndex("latin.txt")).toBe(false);
+
+		// Staged whole, it goes into the index byte for byte.
+		const whole = await supertest(app)
+			.post(`/api/git/stage?repo=${repoRef}`)
+			.send({ path: "latin.txt" });
+		expect(whole.status).toBe(200);
+		expect(
+			execSync("git show :latin.txt", { cwd: repoDir }).equals(bytes),
+		).toBe(true);
+
+		await removeFile("latin.txt");
+	});
+
+	test("diffs an untracked file as it is, whatever the diff settings", async () => {
+		await fs.writeFile(
+			path.join(repoDir, ".gitattributes"),
+			"*.tc diff=upper\n",
+		);
+		await fs.writeFile(path.join(repoDir, "f.tc"), "abc\ndef\n");
+		const settings = [
+			'diff.upper.textconv "tr a-z A-Z <"',
+			"diff.noprefix true",
+			"color.diff always",
+		];
+		for (const setting of settings) {
+			execSync(`git config ${setting}`, { cwd: repoDir });
+		}
+		try {
+			const res = await supertest(app).get(
+				`/api/git/diff?repo=${repoRef}&path=f.tc&staged=false&untracked=true`,
+			);
+
+			expect(res.body.exact).toBe(true);
+			expect(res.body.diff).toContain(
+				"--- /dev/null\n+++ b/f.tc\n@@ -0,0 +1,2 @@\n+abc\n+def\n",
+			);
+		} finally {
+			for (const setting of settings) {
+				execSync(`git config --unset ${setting.split(" ")[0]}`, {
+					cwd: repoDir,
+				});
+			}
+			await fs.rm(path.join(repoDir, ".gitattributes"));
+			await fs.rm(path.join(repoDir, "f.tc"));
+		}
+	});
+
+	test("refuses to stage a new file over one the index already holds", async () => {
+		await fs.writeFile(path.join(repoDir, "held.txt"), "one\ntwo\n");
+		const expectedBlobs = await blobsFromUntrackedDiff(app, "held.txt");
+		// Added elsewhere after the caller read its diff.
+		execSync("git add held.txt", { cwd: repoDir });
+
+		const res = await supertest(app)
+			.post(`/api/git/stage?repo=${repoRef}`)
+			.send({
+				path: "held.txt",
+				ranges: [[2, 2]],
+				expectedBlobs,
+				untracked: true,
+			});
+
+		expect(res.status).toBe(500);
+		expect(indexContent("held.txt")).toBe("one\ntwo\n");
+
+		await removeFile("held.txt");
+	});
+
+	test("requires untracked to be a boolean", async () => {
+		const res = await supertest(app)
+			.post(`/api/git/stage?repo=${repoRef}`)
+			.send({ path: "any.txt", ranges: [[1, 1]], untracked: "yes" });
+
+		expect(res.status).toBe(400);
+		expect(res.body.error.code).toBe("INVALID_UNTRACKED");
+	});
+
+	test("unstages part of a staged new file, leaving the rest staged", async () => {
+		await fs.writeFile(path.join(repoDir, "part.txt"), "one\ntwo\nthree\n");
+		execSync("git add part.txt", { cwd: repoDir });
+
+		const res = await unstageLines("part.txt", [[2, 2]]);
+
+		expect(res.status).toBe(200);
+		expect(indexContent("part.txt")).toBe("one\nthree\n");
+		expect(entries(res, "part.txt")).toEqual([
+			{ path: "part.txt", status: "added", staged: true },
+			{ path: "part.txt", status: "modified", staged: false },
+		]);
+
+		await removeFile("part.txt");
+	});
+
+	test("unstages every line of a staged new file, which leaves it untracked", async () => {
+		await fs.writeFile(path.join(repoDir, "whole.txt"), "one\ntwo\n");
+		execSync("git add whole.txt", { cwd: repoDir });
+
+		const res = await unstageLines("whole.txt", [[1, 2]]);
+
+		expect(res.status).toBe(200);
+		expect(inIndex("whole.txt")).toBe(false);
+		expect(entries(res, "whole.txt")).toEqual([
+			{ path: "whole.txt", status: "untracked", staged: false },
+		]);
+
+		await removeFile("whole.txt");
+	});
+
+	test("unstages either line of a staged new file without a final newline", async () => {
+		await fs.writeFile(path.join(repoDir, "tail.txt"), "a\nb");
+		execSync("git add tail.txt", { cwd: repoDir });
+
+		expect((await unstageLines("tail.txt", [[1, 1]])).status).toBe(200);
+		expect(indexContent("tail.txt")).toBe("b");
+
+		execSync("git add tail.txt", { cwd: repoDir });
+		expect((await unstageLines("tail.txt", [[2, 2]])).status).toBe(200);
+		expect(indexContent("tail.txt")).toBe("a\n");
+
+		await removeFile("tail.txt");
+	});
+
+	test("stages and unstages lines of a new file with the blob ids the editor reads", async () => {
+		await fs.writeFile(
+			path.join(repoDir, "round.txt"),
+			"one\ntwo\nthree\nfour\n",
+		);
+
+		expect((await stageLines("round.txt", [[2, 3]])).status).toBe(200);
+		expect(indexContent("round.txt")).toBe("two\nthree\n");
+
+		// The file is in the index now, so the rest of it stages as a change to
+		// the file, by the diff against the index.
+		const rest = await supertest(app)
+			.post(`/api/git/stage?repo=${repoRef}`)
+			.send({
+				path: "round.txt",
+				ranges: [[4, 4]],
+				expectedBlobs: await blobsFromDiff(app, "round.txt"),
+			});
+		expect(rest.status).toBe(200);
+		expect(indexContent("round.txt")).toBe("two\nthree\nfour\n");
+
+		expect((await unstageLines("round.txt", [[1, 1]])).status).toBe(200);
+		expect(indexContent("round.txt")).toBe("three\nfour\n");
+
+		const last = await unstageLines("round.txt", [[1, 2]]);
+		expect(last.status).toBe(200);
+		expect(inIndex("round.txt")).toBe(false);
+		expect(entries(last, "round.txt")).toEqual([
+			{ path: "round.txt", status: "untracked", staged: false },
+		]);
+
+		await removeFile("round.txt");
 	});
 });
 
