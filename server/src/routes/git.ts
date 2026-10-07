@@ -13,6 +13,11 @@ import {
 import { repoGit } from "../repoGit.js";
 
 const MAX_DIFF_SIZE = 1024 * 1024; // 1 MB
+// The limits /api/files/content puts on a file, which a base copy of one
+// shares: its size, and how much of it is read for a NUL that marks it
+// binary.
+const MAX_BASE_SIZE = 1024 * 1024; // 1 MB
+const BINARY_CHECK_SIZE = 8192; // 8 KB
 
 type FileStatus = "added" | "modified" | "deleted" | "renamed" | "untracked";
 
@@ -992,7 +997,9 @@ export function gitRoutes(roots: RepoRoot[]): Router {
 		}
 	});
 
-	// GET /api/git/diff?repo=<name>&path=<file>&staged=<bool>
+	// GET /api/git/base-content?repo=<name>&path=<file>&staged=<bool>
+	// Responds 413 FILE_TOO_LARGE and 415 BINARY_FILE for a copy the editor
+	// would not show, as /api/files/content does for the file itself.
 	router.get("/base-content", async (req, res) => {
 		const filePath = req.query.path as string;
 		if (!filePath) {
@@ -1039,8 +1046,29 @@ export function gitRoutes(roots: RepoRoot[]): Router {
 			// file added but not yet committed has no HEAD version at all.
 			const staged = req.query.staged === "true";
 			const revision = staged ? `HEAD:${relativePath}` : `:${relativePath}`;
-			const content = await gitRoot.raw(["show", revision]);
-			res.type("text/plain").send(content);
+			const content = await gitRoot.showBuffer(revision);
+			// The editor shows no file that is too large or binary, so a copy
+			// of one is refused as /api/files/content refuses the file
+			// itself, rather than sent whole.
+			if (content.length > MAX_BASE_SIZE) {
+				res.status(413).json({
+					error: {
+						code: "FILE_TOO_LARGE",
+						message: `File exceeds maximum size of ${MAX_BASE_SIZE / (1024 * 1024)} MB`,
+					},
+				});
+				return;
+			}
+			if (content.subarray(0, BINARY_CHECK_SIZE).includes(0)) {
+				res.status(415).json({
+					error: {
+						code: "BINARY_FILE",
+						message: "Binary files are not supported",
+					},
+				});
+				return;
+			}
+			res.type("text/plain").send(content.toString("utf-8"));
 		} catch {
 			res.status(404).json({
 				error: { code: "NOT_FOUND", message: "Base file not found" },

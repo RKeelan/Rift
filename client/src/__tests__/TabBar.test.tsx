@@ -17,35 +17,31 @@ function renderTabBar(isGitRepo: boolean | null, initialRoute = "/files") {
 }
 
 describe("TabBar", () => {
-	test("renders all three tabs when isGitRepo is true", () => {
+	test("renders both tabs when isGitRepo is true", () => {
 		renderTabBar(true);
 		expect(screen.getByText("Files")).toBeDefined();
-		expect(screen.getByText("Changes")).toBeDefined();
 		expect(screen.getByText("History")).toBeDefined();
+		expect(screen.queryByText("Changes")).toBeNull();
 	});
 
-	test("renders all three tabs when isGitRepo is null", () => {
+	test("renders both tabs when isGitRepo is null", () => {
 		renderTabBar(null);
 		expect(screen.getByText("Files")).toBeDefined();
-		expect(screen.getByText("Changes")).toBeDefined();
 		expect(screen.getByText("History")).toBeDefined();
 	});
 
 	test("hides git-only tabs when isGitRepo is false", () => {
 		renderTabBar(false);
 		expect(screen.getByText("Files")).toBeDefined();
-		expect(screen.queryByText("Changes")).toBeNull();
 		expect(screen.queryByText("History")).toBeNull();
 	});
 
 	test("each tab links to the correct route", () => {
 		renderTabBar(true);
 		const filesLink = screen.getByText("Files").closest("a");
-		const changesLink = screen.getByText("Changes").closest("a");
 		const historyLink = screen.getByText("History").closest("a");
 
 		expect(filesLink?.getAttribute("href")).toBe("/files");
-		expect(changesLink?.getAttribute("href")).toBe("/changes");
 		expect(historyLink?.getAttribute("href")).toBe("/history");
 	});
 

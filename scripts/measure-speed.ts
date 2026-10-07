@@ -767,6 +767,8 @@ localStorage.setItem("rift:selected-repo", ${JSON.stringify(selectedRepo)});
 
 // The editor the page shows; the switch keeps the other one mounted, hidden.
 const ACTIVE = ".changes-editor-view:not(.changes-editor-view--hidden)";
+// The Files list on screen; it stays mounted, hidden, while a file is open.
+const LIST = ".changes-page:not(.changes-page--hidden) .changes-list";
 const ENABLED_STRIP = '.cm-changeStripButton[aria-disabled="false"]';
 const DISABLED_STRIP = '.cm-changeStripButton[aria-disabled="true"]';
 
@@ -945,7 +947,7 @@ class Client {
 	}
 
 	private entry(staged: boolean) {
-		return `[aria-label=${js(`${staged ? "Unstage" : "Stage"} ${this.file}`)}]`;
+		return `${LIST} [aria-label=${js(`${staged ? "Unstage" : "Stage"} ${this.file}`)}]`;
 	}
 
 	// The list shows the file with unstaged changes and nothing staged.
@@ -954,15 +956,12 @@ class Client {
 	}
 
 	async load() {
-		await this.browser.send("Page.navigate", { url: `${clientUrl}changes` });
-		await this.waitFor(
-			this.listShowsFile(),
-			"the Changes list to show the file",
-		);
+		await this.browser.send("Page.navigate", { url: `${clientUrl}files` });
+		await this.waitFor(this.listShowsFile(), "the Files list to show the file");
 	}
 
 	async open(record = true) {
-		const row = `document.querySelector(${js(`.changes-file-row:has(${this.entry(false)}) .changes-file-entry`)})`;
+		const row = `document.querySelector(${js(`${LIST} .changes-file-row:has([aria-label=${js(`Stage ${this.file}`)}]) .changes-file-entry`)})`;
 		await this.measure(
 			"open a file",
 			{
@@ -979,19 +978,22 @@ class Client {
 		return `[...document.querySelectorAll(".tab-bar-item")].find((tab) => tab.textContent.trim() === ${js(label)})`;
 	}
 
-	// Leaves for the Files tab, then times coming back to the Changes tab
-	// until its list shows the file again, which reads the status afresh.
-	async openChangesTab() {
-		await this.tapOn(this.tabLink("Files"));
+	// Leaves for the History tab, then times coming back to the Files tab
+	// until its list shows the changes and the tree again, which reads the
+	// status and the top folder afresh.
+	async openFilesTab() {
+		await this.tapOn(this.tabLink("History"));
 		await this.waitFor(
-			`location.pathname.endsWith("/files") && !document.querySelector(".changes-page")`,
-			"the Files tab",
+			`location.pathname.endsWith("/history") && !document.querySelector(".changes-page")`,
+			"the History tab",
 		);
 		await Bun.sleep(600);
 		await this.measure(
-			"open the Changes tab",
-			{ done: `document.querySelector(".changes-list .changes-file-row")` },
-			await this.point(this.tabLink("Changes")),
+			"open the Files tab",
+			{
+				done: `document.querySelector(${js(`${LIST} .changes-file-row`)}) && document.querySelector(${js(`${LIST} .tree-entry`)})`,
+			},
+			await this.point(this.tabLink("Files")),
 		);
 		await this.waitFor(this.listShowsFile(), "the list to show the file");
 	}
@@ -999,9 +1001,9 @@ class Client {
 	async back(record = true) {
 		await this.measure(
 			"back to the list",
-			{ done: `document.querySelector(".changes-list .changes-file-row")` },
+			{ done: `document.querySelector(${js(`${LIST} .changes-file-row`)})` },
 			await this.point(
-				`document.querySelector('[aria-label="Back to changes list"]')`,
+				`document.querySelector('[aria-label="Back to file list"]')`,
 			),
 			record,
 		);
@@ -1219,9 +1221,9 @@ async function runInteractions(browser: Browser, client: Client, file: string) {
 		}
 		await client.back();
 		// Unstaging the whole file puts its index entry back as it was, and
-		// the Changes tab reads the status again when it opens.
+		// the Files tab reads the status again when it opens.
 		await request(api("/api/git/unstage"), post({ path: file }));
-		await client.openChangesTab();
+		await client.openFilesTab();
 		process.stdout.write(".");
 	}
 	for (let round = 0; round < runs; round++) {

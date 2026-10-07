@@ -52,12 +52,17 @@ function useChangeContext({
 	headToken,
 	showError,
 }: ChangeContextOptions) {
-	const [comparisonContent, setComparisonContent] = useState<
-		string | undefined
-	>(undefined);
+	// The copy of the file that this side compares against: its text, null
+	// when git has no copy of it, or undefined while it loads or when it is
+	// too large or binary to show.
+	const [base, setBase] = useState<string | null | undefined>(undefined);
 	const [diff, setDiff] = useState<string | null>(null);
 	const [diffExact, setDiffExact] = useState(true);
-	const inEditor = status !== "deleted";
+	// A deleted file decorates straight from its content, and an untracked one
+	// compares against nothing. Every other side compares against the same
+	// copy whether or not the status lists a change in it, so the base stays
+	// as it is when the status gains or loses one, as when a save makes one.
+	const needsBase = status !== "deleted" && status !== "untracked";
 	// The working tree compares against the index, which stages and unstages
 	// change, and the index against HEAD, which they don't. Only the working
 	// tree's diff changes on a save.
@@ -67,17 +72,13 @@ function useChangeContext({
 		: `${refreshToken}.${diffRefreshToken}`;
 
 	useEffect(() => {
-		if (!inEditor) {
-			setComparisonContent(undefined);
-			return;
-		}
-		if (status === "untracked") {
-			setComparisonContent("");
+		if (!needsBase) {
+			setBase(undefined);
 			return;
 		}
 
 		const controller = new AbortController();
-		setComparisonContent(undefined);
+		setBase(undefined);
 
 		void (async () => {
 			try {
@@ -91,19 +92,19 @@ function useChangeContext({
 					signal: controller.signal,
 				});
 				if (!res.ok) {
-					// A file with no committed or staged version has no base to
-					// compare against; treat it like an untracked file rather
-					// than failing the edit.
 					if (res.status === 404) {
-						setComparisonContent("");
+						setBase(null);
 						return;
 					}
+					// A copy too large or binary to show belongs to a file the
+					// editor refuses too, and says so itself.
+					if (res.status === 413 || res.status === 415) return;
 					const body = await res.json().catch(() => null);
 					showError(body?.error?.message ?? `Request failed (${res.status})`);
 					return;
 				}
 
-				setComparisonContent(await res.text());
+				setBase(await res.text());
 			} catch (err) {
 				if (err instanceof DOMException && err.name === "AbortError") {
 					return;
@@ -115,14 +116,42 @@ function useChangeContext({
 		return () => {
 			controller.abort();
 		};
-	}, [inEditor, repoName, path, staged, status, showError, comparisonKey]);
+	}, [needsBase, repoName, path, staged, showError, comparisonKey]);
+
+	let comparisonContent: string | undefined;
+	if (status === "untracked") {
+		comparisonContent = "";
+	} else if (!needsBase) {
+		comparisonContent = undefined;
+	} else if (base === null) {
+		// A file with no committed or staged version has no base to compare
+		// against; treat it like an untracked file rather than failing the
+		// edit. A file the status doesn't list either, such as one inside
+		// .git, has no changes to mark.
+		comparisonContent = status === null ? undefined : "";
+	} else {
+		comparisonContent = base;
+	}
+
+	// The editor needs git's diff to decorate a change, and to stage or
+	// unstage it by line. A deleted file decorates straight from its content,
+	// so it needs none. An untracked file has no diff against the index, so
+	// its diff is against nothing, which is what staging its lines slices. A
+	// working tree with no change in the status, such as an unchanged file's,
+	// has its diff read too once its base has loaded, so a save that makes a
+	// change rereads git's diff alongside the status. The request is the same
+	// either way, so the status gaining or losing a change doesn't repeat it.
+	let diffKind: "untracked" | "tracked" | null = null;
+	if (status === "untracked") {
+		diffKind = "untracked";
+	} else if (status !== "deleted" && status !== null) {
+		diffKind = "tracked";
+	} else if (status === null && !staged && typeof base === "string") {
+		diffKind = "tracked";
+	}
 
 	useEffect(() => {
-		// The editor needs git's diff to decorate a change, and to stage or
-		// unstage it by line. A deleted file decorates straight from its content,
-		// so it needs none. An untracked file has no diff against the index, so
-		// its diff is against nothing, which is what staging its lines slices.
-		if (status === "deleted" || status === null) {
+		if (diffKind === null) {
 			setDiff(null);
 			return;
 		}
@@ -138,7 +167,7 @@ function useChangeContext({
 					staged: String(staged),
 					_refresh: diffKey,
 				});
-				if (status === "untracked") params.set("untracked", "true");
+				if (diffKind === "untracked") params.set("untracked", "true");
 				const res = await fetch(apiUrl(`/api/git/diff?${params}`), {
 					signal: controller.signal,
 				});
@@ -162,7 +191,7 @@ function useChangeContext({
 		return () => {
 			controller.abort();
 		};
-	}, [repoName, path, staged, status, showError, diffKey]);
+	}, [repoName, path, staged, diffKind, showError, diffKey]);
 
 	return { comparisonContent, diff, diffExact };
 }

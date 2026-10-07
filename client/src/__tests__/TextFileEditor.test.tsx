@@ -2792,7 +2792,7 @@ describe("refreshed change context", () => {
 		await waitFor(() => {
 			expect(saves.length).toBe(1);
 		});
-		// ChangesPage refetches git's diff after a save.
+		// FilesPage refetches git's diff after a save.
 		rerender(
 			<TextFileEditor
 				{...props}
@@ -2802,7 +2802,7 @@ describe("refreshed change context", () => {
 		);
 
 		// Stage the new first line, then hand the editor the change context that
-		// ChangesPage refetches after a stage.
+		// FilesPage refetches after a stage.
 		selectLines(view, 1);
 		fireEvent.click(await enabledButton("Stage selection"));
 		await waitFor(() => {

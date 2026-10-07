@@ -1,9 +1,8 @@
 import { useEffect } from "react";
-import { Navigate, Route, Routes } from "react-router-dom";
+import { Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { useSession } from "../contexts/SessionContext.tsx";
 import { useGitRepo } from "../hooks/useGitRepo.ts";
 import { TabBar } from "./TabBar.tsx";
-import { ChangesPage } from "../pages/ChangesPage.tsx";
 import { FilesPage } from "../pages/FilesPage.tsx";
 import { HistoryPage } from "../pages/HistoryPage.tsx";
 
@@ -15,6 +14,14 @@ export function SessionShell() {
 	}
 
 	return <SessionRoutes repoName={repoName} />;
+}
+
+// The changes once had a tab of their own at /changes. An installed app or a
+// history entry may still open one of its URLs, which can name an open file in
+// its query, so each goes to the same place under Files.
+function ChangesRedirect() {
+	const { search } = useLocation();
+	return <Navigate to={{ pathname: "/files", search }} replace />;
 }
 
 function SessionRoutes({ repoName }: { repoName: string }) {
@@ -39,15 +46,8 @@ function SessionRoutes({ repoName }: { repoName: string }) {
 					path="/files"
 					element={<FilesPage writesAllowed={writesAllowed} />}
 				/>
-				{showGitTabs && (
-					<>
-						<Route
-							path="/changes"
-							element={<ChangesPage writesAllowed={writesAllowed} />}
-						/>
-						<Route path="/history" element={<HistoryPage />} />
-					</>
-				)}
+				<Route path="/changes" element={<ChangesRedirect />} />
+				{showGitTabs && <Route path="/history" element={<HistoryPage />} />}
 				<Route path="*" element={<Navigate to="/files" replace />} />
 			</Routes>
 			<TabBar

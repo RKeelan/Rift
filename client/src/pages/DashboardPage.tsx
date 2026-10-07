@@ -107,10 +107,9 @@ export function DashboardPage() {
 	const handleSelectRepo = useCallback(
 		(repoName: string) => {
 			selectRepo(repoName);
-			// Changes is the view worth landing on, and it is safe to ask for even
-			// when the repo has no git: SessionShell mounts that route only for git
-			// repos and redirects the rest to files.
-			navigate("/changes");
+			// Files shows a repo's changes above its tree, and the tree alone for
+			// a directory without git.
+			navigate("/files");
 		},
 		[selectRepo, navigate],
 	);

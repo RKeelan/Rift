@@ -514,6 +514,63 @@ describe("GET /api/git/base-content", () => {
 		await fs.rm(path.join(repoDir, "untracked.txt"));
 	});
 
+	test("refuses a copy too large to show, as the file's content is refused", async () => {
+		await fs.writeFile(
+			path.join(repoDir, "large.log"),
+			"x".repeat(1024 * 1024 + 1),
+		);
+		execSync("git add large.log", { cwd: repoDir });
+
+		const res = await supertest(app).get(
+			`/api/git/base-content?repo=${repoRef}&path=large.log&staged=false`,
+		);
+
+		expect(res.status).toBe(413);
+		expect(res.body.error).toEqual({
+			code: "FILE_TOO_LARGE",
+			message: "File exceeds maximum size of 1 MB",
+		});
+
+		execSync("git rm -q --cached large.log", { cwd: repoDir });
+		await fs.rm(path.join(repoDir, "large.log"));
+	});
+
+	test("refuses a binary copy, as the file's content is refused", async () => {
+		await fs.writeFile(
+			path.join(repoDir, "image.bin"),
+			Buffer.from("text\x00binary"),
+		);
+		execSync("git add image.bin", { cwd: repoDir });
+
+		const res = await supertest(app).get(
+			`/api/git/base-content?repo=${repoRef}&path=image.bin&staged=false`,
+		);
+
+		expect(res.status).toBe(415);
+		expect(res.body.error).toEqual({
+			code: "BINARY_FILE",
+			message: "Binary files are not supported",
+		});
+
+		execSync("git rm -q --cached image.bin", { cwd: repoDir });
+		await fs.rm(path.join(repoDir, "image.bin"));
+	});
+
+	test("returns UTF-8 text as it is in the index", async () => {
+		await fs.writeFile(path.join(repoDir, "accents.txt"), "café ☕\n");
+		execSync("git add accents.txt", { cwd: repoDir });
+
+		const res = await supertest(app).get(
+			`/api/git/base-content?repo=${repoRef}&path=accents.txt&staged=false`,
+		);
+
+		expect(res.status).toBe(200);
+		expect(res.text).toBe("café ☕\n");
+
+		execSync("git rm -q --cached accents.txt", { cwd: repoDir });
+		await fs.rm(path.join(repoDir, "accents.txt"));
+	});
+
 	test("returns 400 when path parameter is missing", async () => {
 		const res = await supertest(app).get(
 			`/api/git/base-content?repo=${repoRef}`,

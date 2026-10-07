@@ -1,4 +1,4 @@
-import { FolderOpen, GitPullRequestArrow, History, Home } from "lucide-react";
+import { FolderOpen, History, Home } from "lucide-react";
 import { NavLink, useNavigate } from "react-router-dom";
 import { useSession } from "../contexts/SessionContext.tsx";
 import "./TabBar.css";
@@ -12,12 +12,6 @@ interface Tab {
 
 const tabs: Tab[] = [
 	{ to: "/files", label: "Files", icon: <FolderOpen size={22} /> },
-	{
-		to: "/changes",
-		label: "Changes",
-		icon: <GitPullRequestArrow size={22} />,
-		requiresGit: true,
-	},
 	{
 		to: "/history",
 		label: "History",
