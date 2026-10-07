@@ -84,6 +84,20 @@ describe("GET /api/files (directory listing)", () => {
 		expect(fileNames).toEqual([...fileNames].sort());
 	});
 
+	test("lists every entry of a directory outside a repository", async () => {
+		const res = await supertest(app).get(`/api/files?repo=${repoRef}`);
+
+		expect(res.status).toBe(200);
+		expect(res.body.entries.map((e: { name: string }) => e.name)).toEqual([
+			"delta",
+			"gamma",
+			"alpha.txt",
+			"beta.ts",
+			"binary.bin",
+			"editable.txt",
+		]);
+	});
+
 	test("returns entries with name, type, and size fields", async () => {
 		const res = await supertest(app).get(`/api/files?repo=${repoRef}`);
 
@@ -224,12 +238,14 @@ describe("GET /api/files (gitignore filtering)", () => {
 		// Create .gitignore
 		await fs.writeFile(
 			path.join(gitDir, ".gitignore"),
-			"ignored.txt\nignored_dir/\n",
+			"ignored.txt\nignored_dir/\n*.log\n!keep.log\n",
 		);
 
 		// Create files
 		await fs.writeFile(path.join(gitDir, "visible.txt"), "visible");
 		await fs.writeFile(path.join(gitDir, "ignored.txt"), "ignored");
+		await fs.writeFile(path.join(gitDir, "other.log"), "ignored by *.log");
+		await fs.writeFile(path.join(gitDir, "keep.log"), "kept by !keep.log");
 		await fs.mkdir(path.join(gitDir, "ignored_dir"));
 		await fs.writeFile(path.join(gitDir, "ignored_dir", "inner.txt"), "inner");
 		await fs.mkdir(path.join(gitDir, "visible_dir"));
@@ -260,6 +276,41 @@ describe("GET /api/files (gitignore filtering)", () => {
 		expect(names).toContain("visible_dir");
 		expect(names).not.toContain("ignored.txt");
 		expect(names).not.toContain("ignored_dir");
+	});
+
+	test("keeps a file a negated pattern matches", async () => {
+		const res = await supertest(gitApp).get("/api/files?repo=root/git-repo");
+
+		const names = res.body.entries.map((e: { name: string }) => e.name);
+		expect(names).toContain("keep.log");
+		expect(names).not.toContain("other.log");
+	});
+
+	test("leaves out git's own directory", async () => {
+		const res = await supertest(gitApp).get("/api/files?repo=root/git-repo");
+
+		const names = res.body.entries.map((e: { name: string }) => e.name);
+		expect(names).not.toContain(".git");
+	});
+
+	test("lists a folder that ignores nothing in full", async () => {
+		const res = await supertest(gitApp).get(
+			"/api/files?repo=root/git-repo&path=visible_dir",
+		);
+
+		expect(res.status).toBe(200);
+		expect(res.body.entries).toEqual([
+			{ name: "file.txt", type: "file", size: 4 },
+		]);
+	});
+
+	test("lists nothing of a folder that is ignored whole", async () => {
+		const res = await supertest(gitApp).get(
+			"/api/files?repo=root/git-repo&path=ignored_dir",
+		);
+
+		expect(res.status).toBe(200);
+		expect(res.body.entries).toEqual([]);
 	});
 });
 
