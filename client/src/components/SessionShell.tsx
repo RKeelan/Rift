@@ -28,6 +28,11 @@ function SessionRoutes({ repoName }: { repoName: string }) {
 	const { clearRepo } = useSession();
 	const { isGitRepo, repoMissing, writesAllowed, recheckGitRepo } =
 		useGitRepo(repoName);
+	// A file open from the Files tab takes the whole screen, with its own bar
+	// in place of the tabs.
+	const { pathname, search } = useLocation();
+	const fileOpen =
+		pathname === "/files" && new URLSearchParams(search).has("path");
 
 	// A stored repo the server no longer resolves — renamed, deleted, or from an
 	// older name format — would otherwise leave every tab failing to load.
@@ -50,11 +55,13 @@ function SessionRoutes({ repoName }: { repoName: string }) {
 				{showGitTabs && <Route path="/history" element={<HistoryPage />} />}
 				<Route path="*" element={<Navigate to="/files" replace />} />
 			</Routes>
-			<TabBar
-				isGitRepo={isGitRepo}
-				onNavigate={recheckGitRepo}
-				repoName={repoName}
-			/>
+			{!fileOpen && (
+				<TabBar
+					isGitRepo={isGitRepo}
+					onNavigate={recheckGitRepo}
+					repoName={repoName}
+				/>
+			)}
 		</div>
 	);
 }

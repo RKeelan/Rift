@@ -1,4 +1,4 @@
-import { ArrowLeft, Minus, Plus, RefreshCw } from "lucide-react";
+import { Minus, Plus, RefreshCw } from "lucide-react";
 import {
 	type ReactNode,
 	useCallback,
@@ -136,8 +136,6 @@ export function FilesPage({
 	// lose and staging the whole file would leave out.
 	const [editorDirty, setEditorDirty] = useState(false);
 	const [confirmingDiscard, setConfirmingDiscard] = useState(false);
-	// The header slot the open editor puts its menu in.
-	const [menuHost, setMenuHost] = useState<HTMLElement | null>(null);
 	// The commit message being written, kept per repo so that opening a file or
 	// leaving the tab doesn't lose a message typed on a phone.
 	const commitDraftKey = `rift:commit-draft:${repoName}`;
@@ -589,11 +587,12 @@ export function FilesPage({
 					statusOf(staged) === null,
 				title: writesRefused ? WRITES_DISABLED_TITLE : undefined,
 			});
-		// Both sides are always offered, so the bar never comes or goes, and a
-		// side with no changes is greyed out. Each side with changes stays built,
-		// so switching between them is immediate; switching replaces the history
-		// entry, so Back still returns to the list. The working tree counts as
-		// having changes while it holds unsaved edits, even ones git hasn't seen.
+		// Tapping the file's name in its bar switches to the other side, and the
+		// name is greyed out while that side has no changes. Each side with
+		// changes stays built, so switching between them is immediate; switching
+		// replaces the history entry, so Back still returns to the list. The
+		// working tree counts as having changes while it holds unsaved edits,
+		// even ones git hasn't seen.
 		const sideIsLive = (staged: boolean) =>
 			statusOf(staged) !== null || (!staged && editorDirty);
 		const sides = [false, true].filter(
@@ -606,20 +605,11 @@ export function FilesPage({
 				{ replace: true },
 			);
 		};
+		// The file takes the whole screen, with each side's bar at its foot.
+		// Asking before unsaved edits are discarded floats over the editor,
+		// above the bar, so nothing moves.
 		fileView = (
 			<div className="changes-diff-view">
-				<header className="changes-diff-header">
-					<button
-						type="button"
-						className="changes-back-button"
-						onClick={handleBack}
-						aria-label="Back to file list"
-					>
-						<ArrowLeft size={18} />
-					</button>
-					<span className="changes-diff-filename">{selected.path}</span>
-					<div className="changes-header-menu" ref={setMenuHost} />
-				</header>
 				{confirmingDiscard && (
 					<div className="changes-discard-confirm" role="alert">
 						<span className="changes-discard-confirm-text">
@@ -627,39 +617,20 @@ export function FilesPage({
 						</span>
 						<button
 							type="button"
-							className="changes-header-button"
+							className="changes-discard-button"
 							onClick={() => setConfirmingDiscard(false)}
 						>
 							Keep editing
 						</button>
 						<button
 							type="button"
-							className="changes-header-button changes-header-button--danger"
+							className="changes-discard-button changes-discard-button--danger"
 							onClick={discardAndLeave}
 						>
 							Discard
 						</button>
 					</div>
 				)}
-				<div
-					className="changes-view-switch"
-					role="tablist"
-					aria-label="Changes to show"
-				>
-					{[false, true].map((staged) => (
-						<button
-							key={String(staged)}
-							type="button"
-							role="tab"
-							aria-selected={selected.staged === staged}
-							className="changes-view-switch-tab"
-							onClick={() => switchTo(staged)}
-							disabled={selected.staged !== staged && !sideIsLive(staged)}
-						>
-							{staged ? "Staged" : "Unstaged"}
-						</button>
-					))}
-				</div>
 				<div className="changes-diff-content">
 					{sides.map((staged) => (
 						<FileSideView
@@ -676,7 +647,11 @@ export function FilesPage({
 							showError={showError}
 							canWrite={canWrite}
 							readOnlyLabel={editorReadOnlyLabel}
-							menuHost={menuHost}
+							onBack={handleBack}
+							otherSide={{
+								available: sideIsLive(!staged),
+								show: () => switchTo(!staged),
+							}}
 							fileAction={fileActionFor(staged)}
 							onSaved={handleEditorSaved}
 							onStaged={handleEditorStaged}

@@ -31,65 +31,148 @@
 	cursor: default;
 }
 
-.text-file-editor-button--icon {
-	display: inline-flex;
-	align-items: center;
-	justify-content: center;
-	padding: 0.375rem;
-}
-
 .text-file-editor-button--primary {
 	background: var(--color-primary);
 	border-color: var(--color-primary);
 	color: var(--color-surface);
 }
 
-/* The action bar sits under the editor, just above the app's tabs. */
+/* The file's one bar, at the foot of the screen, or on the keyboard while it
+   shows. At the foot of the screen it reaches down behind the gesture bar,
+   as the tab bar does; the keyboard covers that inset while it shows. */
 .text-file-editor-bar {
+	--file-action-width: 6rem;
 	display: flex;
 	align-items: center;
-	gap: 0.5rem;
-	padding: 0.5rem 0.75rem;
+	height: calc(var(--file-bar-height) + var(--safe-area-bottom));
+	padding-bottom: var(--safe-area-bottom);
 	border-top: 1px solid var(--color-border);
 	background: var(--color-surface);
 	flex-shrink: 0;
 }
 
-.text-file-editor-bar .text-file-editor-button {
-	min-width: 48px;
-	min-height: 48px;
-	padding: 0 1rem;
-	font-size: 1rem;
+/* Back, previous and next change, and the menu. */
+.text-file-editor-bar-button {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	flex-shrink: 0;
+	width: 48px;
+	height: 48px;
+	border: 0;
+	border-radius: 50%;
+	background: none;
+	color: var(--color-text);
+	cursor: pointer;
+	-webkit-tap-highlight-color: transparent;
 }
 
-.text-file-editor-bar .text-file-editor-button--icon {
-	padding: 0;
+.text-file-editor-bar-button:active {
+	background: var(--color-surface-raised);
 }
 
-.text-file-editor-status {
+.text-file-editor-bar-button[aria-disabled="true"] {
+	background: none;
+	opacity: 0.4;
+	cursor: default;
+}
+
+.text-file-editor-back {
+	color: var(--color-primary);
+}
+
+/* The file's name, with the side shown and any status under it. */
+.text-file-editor-name {
+	display: flex;
 	flex: 1;
+	flex-direction: column;
+	justify-content: center;
 	min-width: 0;
-	font-size: 0.875rem;
-	color: var(--color-text-muted);
+	height: 48px;
+	padding: 0 0.25rem;
+	border: 0;
+	background: none;
+	color: var(--color-text);
+	font-family: inherit;
+	line-height: 1.25;
+	text-align: left;
+	-webkit-tap-highlight-color: transparent;
 }
 
-/* The menu of less frequent actions, in the page's header or the bar. */
+button.text-file-editor-name {
+	cursor: pointer;
+}
+
+button.text-file-editor-name[aria-disabled="true"] {
+	opacity: 0.5;
+	cursor: default;
+}
+
+.text-file-editor-name-file,
+.text-file-editor-name-side {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.text-file-editor-name-file {
+	font-size: 0.9375rem;
+	font-weight: 600;
+}
+
+.text-file-editor-name-side {
+	font-size: 0.75rem;
+	color: var(--color-text-secondary);
+}
+
+.text-file-editor-status:not(:empty)::before {
+	content: " \00b7  ";
+}
+
+/* One width for every label, so changing it moves nothing beside it. A long
+   label takes two lines. */
+.text-file-editor-action {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	flex-shrink: 0;
+	width: var(--file-action-width);
+	height: 48px;
+	padding: 0 0.375rem;
+	border: 1px solid var(--color-primary);
+	border-radius: 8px;
+	background: var(--color-primary);
+	color: var(--color-surface);
+	font-family: inherit;
+	font-size: 0.875rem;
+	font-weight: 600;
+	line-height: 1.15;
+	text-align: center;
+	text-wrap: balance;
+	cursor: pointer;
+	-webkit-tap-highlight-color: transparent;
+}
+
+.text-file-editor-action[aria-disabled="true"] {
+	opacity: 0.5;
+	cursor: default;
+}
+
+.text-file-editor-action--empty {
+	border: 0;
+	background: none;
+}
+
+/* The menu of less frequent actions, at the end of the bar, opening upward. */
 .text-file-editor-menu {
 	position: relative;
 	flex-shrink: 0;
 }
 
-.text-file-editor-menu > .text-file-editor-button {
-	min-width: 48px;
-	min-height: 48px;
-	border: 0;
-	background: none;
-}
-
 .text-file-editor-menu-list {
 	position: absolute;
-	top: calc(100% + 4px);
-	right: 0;
+	right: 0.25rem;
+	bottom: calc(100% + 4px);
 	/* Above CodeMirror's sticky gutters. */
 	z-index: 1000;
 	display: flex;
@@ -100,13 +183,6 @@
 	border-radius: 8px;
 	background: var(--color-surface-raised);
 	box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
-}
-
-.text-file-editor-bar .text-file-editor-menu-list {
-	top: auto;
-	right: auto;
-	bottom: calc(100% + 4px);
-	left: 0;
 }
 
 .text-file-editor-menu-item {
