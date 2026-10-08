@@ -2325,7 +2325,7 @@ describe("change strips", () => {
 		const { view, requests } = await renderWithStrips({
 			filePath: "notes.md",
 		});
-		// Loading the language replaces the editor's state.
+		// The language support is added once the editor is built.
 		await waitFor(() => {
 			expect(view.state.facet(language) !== null).toBe(true);
 		});
@@ -3327,13 +3327,17 @@ describe("Enter", () => {
 		globalThis.fetch = originalFetch;
 	});
 
-	async function renderEditor(filePath: string, content: string) {
+	async function renderEditor(
+		filePath: string,
+		content: string,
+		props: Partial<Parameters<typeof TextFileEditor>[0]> = {},
+	) {
 		globalThis.fetch = (async () =>
 			new Response(content, {
 				headers: { "x-file-mtime-ms": "1" },
 			})) as unknown as typeof fetch;
 		const { container } = render(
-			<TextFileEditor filePath={filePath} repo="test-repo" />,
+			<TextFileEditor filePath={filePath} repo="test-repo" {...props} />,
 		);
 		await waitFor(() => {
 			expect(container.querySelector(".cm-content")).not.toBeNull();
@@ -3392,6 +3396,156 @@ describe("Enter", () => {
 
 		expect(view.state.doc.toString()).toBe("* one\n    - detail\n\n* two\n");
 	});
+
+	async function renderMarkdown(
+		content: string,
+		props: Partial<Parameters<typeof TextFileEditor>[0]> = {},
+	) {
+		const { language } = await import("@codemirror/language");
+		const view = await renderEditor("notes.md", content, props);
+		await waitFor(() => {
+			expect(view.state.facet(language) !== null).toBe(true);
+		});
+		return view;
+	}
+
+	// Each list marker and a quote's mark, with the line Enter continues it on.
+	const MARKUP = [
+		["*", "*"],
+		["-", "-"],
+		["+", "+"],
+		["1.", "2."],
+		[">", ">"],
+	];
+
+	for (const [marker, next] of MARKUP) {
+		test(`leaves an empty "${marker} " above the text when Enter splits a line just after it`, async () => {
+			const view = await renderMarkdown(`${marker} text\n`);
+
+			pressEnter(view, `${marker} `.length);
+
+			expect(view.state.doc.toString()).toBe(`${marker} \n${next} text\n`);
+			expect(view.state.selection.main.head).toBe(
+				`${marker} \n${next} `.length,
+			);
+		});
+
+		test(`continues a "${marker} " line split mid-text, leaving no trailing space`, async () => {
+			const view = await renderMarkdown(`${marker} one two\n`);
+
+			pressEnter(view, `${marker} one `.length);
+
+			expect(view.state.doc.toString()).toBe(`${marker} one\n${next} two\n`);
+			expect(view.state.selection.main.head).toBe(
+				`${marker} one\n${next} `.length,
+			);
+		});
+
+		test(`leaves Backspace just after "${marker} " to the browser`, async () => {
+			const view = await renderMarkdown(`${marker} text\n`);
+			act(() => {
+				view.dispatch({ selection: { anchor: `${marker} `.length } });
+			});
+
+			// No binding takes the key, so the browser deletes one character.
+			let unhandled = false;
+			act(() => {
+				unhandled = fireEvent.keyDown(view.contentDOM, {
+					key: "Backspace",
+					keyCode: 8,
+				});
+			});
+
+			expect(unhandled).toBe(true);
+			expect(view.state.doc.toString()).toBe(`${marker} text\n`);
+		});
+	}
+
+	test("keeps the space after a nested list's marker", async () => {
+		const view = await renderMarkdown("* one\n  - two\n");
+
+		pressEnter(view, "* one\n  - ".length);
+
+		expect(view.state.doc.toString()).toBe("* one\n  - \n  - two\n");
+	});
+
+	test("renumbers the items below a numbered item split just after its marker", async () => {
+		const view = await renderMarkdown("1. one\n2. two\n");
+
+		pressEnter(view, "1. ".length);
+
+		expect(view.state.doc.toString()).toBe("1. \n2. one\n3. two\n");
+	});
+
+	for (const [first, second, third] of [
+		["*", "*", "*"],
+		["-", "-", "-"],
+		["+", "+", "+"],
+		["1.", "2.", "3."],
+	]) {
+		test(`ends a "${first}" list on Enter in its last, empty item`, async () => {
+			const list = `${first} one\n${second} two\n`;
+			const view = await renderMarkdown(`${list}${third} \n`);
+
+			pressEnter(view, `${list}${third} `.length);
+
+			expect(view.state.doc.toString()).toBe(`${list}\n`);
+			expect(view.state.selection.main.head).toBe(list.length);
+		});
+	}
+
+	test("keeps the space after a task item's box", async () => {
+		const view = await renderMarkdown("- [ ] text\n");
+
+		pressEnter(view, "- [ ] ".length);
+
+		expect(view.state.doc.toString()).toBe("- [ ] \n- [ ] text\n");
+		expect(view.state.selection.main.head).toBe("- [ ] \n- [ ] ".length);
+	});
+
+	test("keeps every space after a marker followed by several", async () => {
+		const view = await renderMarkdown("*   text\n");
+
+		pressEnter(view, "*   ".length);
+
+		expect(view.state.doc.toString()).toBe("*   \n*   text\n");
+		expect(view.state.selection.main.head).toBe("*   \n*   ".length);
+	});
+
+	// Typing a list's first item and pressing Enter twice leaves the list.
+	for (const [first, second] of [
+		["*", "*"],
+		["1.", "2."],
+	]) {
+		test(`ends a "${first}" list on Enter in its empty second item`, async () => {
+			const view = await renderMarkdown(`${first} one\n`);
+
+			pressEnter(view, `${first} one`.length);
+			expect(view.state.doc.toString()).toBe(`${first} one\n${second} \n`);
+			pressEnter(view, `${first} one\n${second} `.length);
+
+			expect(view.state.doc.toString()).toBe(`${first} one\n\n`);
+			expect(view.state.selection.main.head).toBe(`${first} one\n`.length);
+		});
+	}
+
+	test("leaves a read-only view's Markdown alone", async () => {
+		const view = await renderMarkdown("* text\n", { staged: true });
+
+		pressEnter(view, "* ".length);
+
+		expect(view.state.doc.toString()).toBe("* text\n");
+	});
+
+	test("ends a quote on Enter in a second empty quoted line", async () => {
+		const view = await renderMarkdown("> one\n> \n");
+
+		pressEnter(view, "> one\n> ".length);
+		expect(view.state.doc.toString()).toBe("> one\n> \n> \n");
+
+		pressEnter(view, "> one\n> \n> ".length);
+		expect(view.state.doc.toString()).toBe("> one\n\n\n");
+	});
 });
 
 describe("menu", () => {
@@ -3446,6 +3600,8 @@ describe("menu", () => {
 				?.lastElementChild?.contains(screen.getByRole("menu")),
 		).toBe(true);
 		expect(menuItems()).toEqual([
+			["menuitem", "Undo"],
+			["menuitem", "Redo"],
 			["menuitemcheckbox", "Wrap lines"],
 			["menuitem", "Reload"],
 		]);
@@ -3464,6 +3620,8 @@ describe("menu", () => {
 		fireEvent.click(screen.getByRole("button", { name: "More actions" }));
 
 		expect(menuItems()).toEqual([
+			["menuitem", "Undo"],
+			["menuitem", "Redo"],
 			["menuitemcheckbox", "Wrap lines"],
 			["menuitem", "Reload"],
 			["menuitem", "Clear picks"],
@@ -3503,6 +3661,261 @@ describe("menu", () => {
 		expect(screen.queryByRole("menu") === null).toBe(true);
 		expect(more.getAttribute("aria-expanded")).toBe("false");
 	});
+});
+
+describe("Undo and Redo", () => {
+	const originalFetch = globalThis.fetch;
+	const originalConfirm = window.confirm;
+	// What the file holds on disk, which a load reads.
+	let onDisk = "";
+	let saved: string[] = [];
+	let staged: unknown[] = [];
+
+	beforeEach(() => {
+		onDisk = "alpha\nbeta\n";
+		saved = [];
+		staged = [];
+		globalThis.fetch = (async (_input: string, init?: RequestInit) => {
+			if (init?.method === "PUT") {
+				const { content } = JSON.parse(init.body as string);
+				saved.push(content);
+				onDisk = content;
+				return new Response(JSON.stringify({ mtimeMs: 2 }), {
+					headers: { "Content-Type": "application/json" },
+				});
+			}
+			if (init?.method === "POST") {
+				staged.push(JSON.parse(init.body as string));
+				return new Response(JSON.stringify({ files: [] }), {
+					headers: { "Content-Type": "application/json" },
+				});
+			}
+			return new Response(onDisk, {
+				headers: { "x-file-mtime-ms": "1" },
+			});
+		}) as unknown as typeof fetch;
+	});
+
+	afterEach(() => {
+		cleanup();
+		globalThis.fetch = originalFetch;
+		window.confirm = originalConfirm;
+	});
+
+	async function renderEditor(
+		props: Partial<Parameters<typeof TextFileEditor>[0]> = {},
+	) {
+		const result = render(
+			<TextFileEditor filePath="notes.txt" repo="test-repo" {...props} />,
+		);
+		await waitFor(() => {
+			expect(result.container.querySelector(".cm-content")).not.toBeNull();
+		});
+		return { ...result, view: await currentView(result.container) };
+	}
+
+	// The editor's view, which a load builds afresh.
+	async function currentView(container: HTMLElement) {
+		const { EditorView } = await import("@codemirror/view");
+		const view = EditorView.findFromDOM(
+			container.querySelector(".cm-editor") as HTMLElement,
+		);
+		if (!view) throw new Error("editor view not found");
+		return view;
+	}
+
+	function type(view: View, text: string, at = 0) {
+		act(() => {
+			view.dispatch({
+				changes: { from: at, insert: text },
+				userEvent: "input.type",
+			});
+		});
+	}
+
+	// The named item of the menu, opening it if it is closed.
+	function menuItem(name: "Undo" | "Redo") {
+		if (screen.queryByRole("menu") === null) {
+			fireEvent.click(screen.getByRole("button", { name: "More actions" }));
+		}
+		return screen.getByRole("menuitem", { name }) as HTMLButtonElement;
+	}
+
+	function pressKey(view: View, key: string, shiftKey = false) {
+		act(() => {
+			fireEvent.keyDown(view.contentDOM, {
+				key: shiftKey ? key.toUpperCase() : key,
+				keyCode: key.toUpperCase().charCodeAt(0),
+				ctrlKey: true,
+				shiftKey,
+			});
+		});
+	}
+
+	test("undoes and redoes from the menu, each greyed out while there is nothing to do", async () => {
+		const { view } = await renderEditor();
+		expect(menuItem("Undo").disabled).toBe(true);
+		expect(menuItem("Redo").disabled).toBe(true);
+
+		// The menu follows the history as it changes, while it is open.
+		type(view, "new ");
+		expect(menuItem("Undo").disabled).toBe(false);
+		expect(menuItem("Redo").disabled).toBe(true);
+
+		fireEvent.click(menuItem("Undo"));
+		expect(view.state.doc.toString()).toBe("alpha\nbeta\n");
+		expect(screen.queryByRole("menu") === null).toBe(true);
+		expect(menuItem("Undo").disabled).toBe(true);
+		expect(menuItem("Redo").disabled).toBe(false);
+
+		fireEvent.click(menuItem("Redo"));
+		expect(view.state.doc.toString()).toBe("new alpha\nbeta\n");
+		expect(menuItem("Undo").disabled).toBe(false);
+		expect(menuItem("Redo").disabled).toBe(true);
+	});
+
+	// historyKeymap binds Ctrl+Shift+Z itself on Linux, but the editor's own
+	// binding runs ahead of it, so this exercises that one everywhere.
+	test("undoes with Ctrl+Z, and redoes with Ctrl+Shift+Z or Ctrl+Y", async () => {
+		const { view } = await renderEditor();
+		type(view, "new ");
+
+		pressKey(view, "z");
+		expect(view.state.doc.toString()).toBe("alpha\nbeta\n");
+		pressKey(view, "z", true);
+		expect(view.state.doc.toString()).toBe("new alpha\nbeta\n");
+		pressKey(view, "z");
+		expect(view.state.doc.toString()).toBe("alpha\nbeta\n");
+		pressKey(view, "y");
+		expect(view.state.doc.toString()).toBe("new alpha\nbeta\n");
+	});
+
+	test("keeps the history across a save, so Undo can go back past it", async () => {
+		const { container, view } = await renderEditor();
+		type(view, "new ");
+		fireEvent.click(await enabledButton("Save"));
+		await waitFor(() => {
+			expect(barStatus(container)).toBe("");
+		});
+		expect(saved).toEqual(["new alpha\nbeta\n"]);
+
+		fireEvent.click(menuItem("Undo"));
+
+		expect(view.state.doc.toString()).toBe("alpha\nbeta\n");
+		expect(barStatus(container)).toBe("Unsaved changes");
+		fireEvent.click(await enabledButton("Save"));
+		await waitFor(() => {
+			expect(saved).toEqual(["new alpha\nbeta\n", "alpha\nbeta\n"]);
+		});
+	});
+
+	test("counts Redo back to the saved text as no unsaved changes", async () => {
+		const { container, view } = await renderEditor();
+		type(view, "new ");
+		fireEvent.click(await enabledButton("Save"));
+		await waitFor(() => {
+			expect(barStatus(container)).toBe("");
+		});
+
+		fireEvent.click(menuItem("Undo"));
+		expect(barStatus(container)).toBe("Unsaved changes");
+		fireEvent.click(menuItem("Redo"));
+
+		expect(view.state.doc.toString()).toBe("new alpha\nbeta\n");
+		expect(barStatus(container)).toBe("");
+		expect(greyed(screen.getByRole("button", { name: "Save" }))).toBe(true);
+	});
+
+	test("starts the history at a restored draft, so Undo cannot drop it", async () => {
+		writeDraft("test-repo", "notes.txt", {
+			text: "draft\n",
+			baseHash: hashText(onDisk),
+		});
+		const { container, view } = await renderEditor();
+
+		fireEvent.click(await screen.findByRole("button", { name: "Restore" }));
+
+		expect(view.state.doc.toString()).toBe("draft\n");
+		expect(menuItem("Undo").disabled).toBe(true);
+		pressKey(view, "z");
+		expect(view.state.doc.toString()).toBe("draft\n");
+		expect(barStatus(container)).toBe("Unsaved changes");
+		expect(readDraft("test-repo", "notes.txt")?.text).toBe("draft\n");
+	});
+
+	test("keeps the history across staging lines", async () => {
+		const props = {
+			comparisonContent: "alpha\nbeta\n",
+			changeType: "modified" as const,
+			onStaged: () => {},
+		};
+		const { container, rerender, view } = await renderEditor({
+			...props,
+			changeDiff: "",
+		});
+		type(view, "new\n");
+		fireEvent.click(await enabledButton("Save"));
+		await waitFor(() => {
+			expect(barStatus(container)).toBe("");
+		});
+		// The page hands the editor git's diff of the file as saved.
+		rerender(
+			<TextFileEditor
+				filePath="notes.txt"
+				repo="test-repo"
+				{...props}
+				changeDiff={"@@ -1,2 +1,3 @@\n+new\n alpha\n beta\n"}
+			/>,
+		);
+		selectLines(view, 1);
+		fireEvent.click(await enabledButton("Stage selection"));
+		await waitFor(() => {
+			expect(staged.length).toBe(1);
+		});
+
+		fireEvent.click(menuItem("Undo"));
+
+		expect(view.state.doc.toString()).toBe("alpha\nbeta\n");
+	});
+
+	test("drops the history on Reload, so Undo cannot bring back what the file held before", async () => {
+		const { container, view } = await renderEditor();
+		type(view, "mine ");
+		expect(menuItem("Undo").disabled).toBe(false);
+		window.confirm = () => true;
+		onDisk = "theirs\n";
+
+		fireEvent.click(screen.getByRole("menuitem", { name: "Reload" }));
+
+		const { EditorView } = await import("@codemirror/view");
+		await waitFor(() => {
+			const editor = container.querySelector<HTMLElement>(".cm-editor");
+			expect(
+				editor && EditorView.findFromDOM(editor)?.state.doc.toString(),
+			).toBe("theirs\n");
+		});
+		const reloaded = await currentView(container);
+		expect(menuItem("Undo").disabled).toBe(true);
+		expect(menuItem("Redo").disabled).toBe(true);
+		pressKey(reloaded, "z");
+		expect(reloaded.state.doc.toString()).toBe("theirs\n");
+	});
+
+	for (const props of [{ staged: true }, { readOnly: true }]) {
+		test(`greys out Undo and Redo in a read-only view (${Object.keys(props)[0]})`, async () => {
+			const { view } = await renderEditor(props);
+
+			// As the staged view's text is brought up to date after an unstage.
+			act(() => {
+				view.dispatch({ changes: { from: 0, insert: "new " } });
+			});
+
+			expect(menuItem("Undo").disabled).toBe(true);
+			expect(menuItem("Redo").disabled).toBe(true);
+			pressKey(view, "z");
+			expect(view.state.doc.toString()).toBe("new alpha\nbeta\n");
+		});
+	}
 });
 
 describe("saving", () => {
