@@ -107,9 +107,32 @@ describe("SessionShell", () => {
 				"/files?path=README.md&staged=false",
 			);
 			expect(
-				screen.getByText("README.md", { selector: ".changes-diff-filename" }),
+				screen.getByText("README.md", {
+					selector: ".text-file-editor-name-file",
+				}),
 			).not.toBeNull();
 		});
+	});
+
+	test("leaves out the tabs while a file is open, which has its own bar", async () => {
+		for (const { gitRepo, file } of [
+			{ gitRepo: true, file: "/files?path=README.md&staged=false" },
+			{ gitRepo: false, file: "/files?path=README.md" },
+		]) {
+			mockServer({ gitRepo });
+			renderShell(file);
+			await waitFor(() => {
+				expect(document.querySelector(".text-file-editor-bar")).not.toBeNull();
+			});
+			expect(
+				screen.queryByRole("navigation", { name: "Main navigation" }),
+			).toBe(null);
+			cleanup();
+
+			renderShell("/files");
+			await screen.findByRole("navigation", { name: "Main navigation" });
+			cleanup();
+		}
 	});
 
 	test("sends an old changes URL to Files for a repo without git", async () => {

@@ -20,6 +20,8 @@
 	--color-error-bg: #3b1a1a;
 	--color-border: #333;
 	--tab-bar-height: 56px;
+	/* An open file's bar: 48px targets with 4px either side, under a 1px rule. */
+	--file-bar-height: 57px;
 	--safe-area-bottom: env(safe-area-inset-bottom, 0px);
 	--font-ui:
 		-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial,

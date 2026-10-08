@@ -1,10 +1,4 @@
-import {
-	ArrowLeft,
-	ChevronRight,
-	File,
-	Folder,
-	FolderOpen,
-} from "lucide-react";
+import { ChevronRight, File, Folder, FolderOpen } from "lucide-react";
 import { memo, useCallback, useEffect, useRef, useState } from "react";
 import {
 	TextFileEditor,
@@ -308,7 +302,7 @@ export const TreeEntry = memo(function TreeEntry({
 
 /**
  * A file opened from the tree of a directory without git: the editor alone,
- * with the file's path as breadcrumbs back to its folders.
+ * whose Back opens the file's folder in the tree.
  */
 export function FileViewer({
 	filePath,
@@ -321,79 +315,21 @@ export function FileViewer({
 	repo: string;
 	writesAllowed: boolean | null;
 }) {
-	// The header slot the editor puts its menu in.
-	const [menuHost, setMenuHost] = useState<HTMLElement | null>(null);
 	return (
 		<div className="file-viewer">
-			<header className="files-header">
-				<button
-					type="button"
-					className="files-back-button"
-					onClick={() => {
-						// Navigate to parent directory
-						const parts = filePath.split("/");
-						const parentDir =
-							parts.length > 1 ? parts.slice(0, -1).join("/") : ".";
-						onNavigate(parentDir);
-					}}
-					aria-label="Back to file tree"
-				>
-					<ArrowLeft size={18} />
-				</button>
-				<Breadcrumbs path={filePath} onNavigate={onNavigate} />
-				<div className="files-header-menu" ref={setMenuHost} />
-			</header>
 			<TextFileEditor
 				filePath={filePath}
 				repo={repo}
-				menuHost={menuHost}
 				readOnly={writesAllowed !== true}
 				readOnlyLabel={
 					writesAllowed === false ? WRITES_DISABLED_LABEL : WRITES_UNKNOWN_LABEL
 				}
+				onBack={() => {
+					const slash = filePath.lastIndexOf("/");
+					onNavigate(slash === -1 ? "." : filePath.slice(0, slash));
+				}}
+				backLabel="Back to file tree"
 			/>
 		</div>
-	);
-}
-
-function Breadcrumbs({
-	path,
-	onNavigate,
-}: {
-	path: string;
-	onNavigate: (dir: string) => void;
-}) {
-	const parts = path.split("/").filter(Boolean);
-
-	return (
-		<nav className="breadcrumbs" aria-label="File path">
-			<button
-				type="button"
-				className="breadcrumb"
-				onClick={() => onNavigate(".")}
-			>
-				root
-			</button>
-			{parts.map((part, i) => {
-				const partPath = parts.slice(0, i + 1).join("/");
-				const isLast = i === parts.length - 1;
-				return (
-					<span key={partPath} className="breadcrumb-segment">
-						<ChevronRight size={14} className="breadcrumb-separator" />
-						{isLast ? (
-							<span className="breadcrumb breadcrumb-current">{part}</span>
-						) : (
-							<button
-								type="button"
-								className="breadcrumb"
-								onClick={() => onNavigate(partPath)}
-							>
-								{part}
-							</button>
-						)}
-					</span>
-				);
-			})}
-		</nav>
 	);
 }

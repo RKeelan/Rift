@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import {
 	act,
 	cleanup,
@@ -13,7 +15,7 @@ import {
 	getEditorChangeDecorations,
 	getLineChanges,
 	getWordMarks,
-	TextFileEditor,
+	TextFileEditor as Editor,
 	WRITES_UNKNOWN_LABEL,
 } from "../components/TextFileEditor.tsx";
 import { clearDraft, hashText, readDraft, writeDraft } from "../drafts.ts";
@@ -51,6 +53,13 @@ function gitCase(name: string) {
 	return found;
 }
 
+// Each editor here opens as one side of a changed file, as the Files page
+// opens it, with a bar that names the side and moves between changes, unless
+// a test gives otherSide itself.
+function TextFileEditor(props: Parameters<typeof Editor>[0]) {
+	return <Editor otherSide={{ available: false, show: () => {} }} {...props} />;
+}
+
 type View = import("@codemirror/view").EditorView;
 
 // Selects the whole of the given lines, as a drag across them would. A bare
@@ -66,18 +75,20 @@ function selectLines(view: View, first: number, last = first) {
 	});
 }
 
-// The action bar's buttons in order, each named by its label or its text.
+// The bar's contents in order: each control named by its label or its text,
+// the file's name by the name alone, and the main action's empty place by "".
 function barButtons(container: HTMLElement) {
 	const bar = container.querySelector(".text-file-editor-bar");
-	if (!bar) throw new Error("no action bar");
-	return [...bar.children]
-		.map((child) =>
-			child.classList.contains("text-file-editor-menu")
-				? child.querySelector("button")
-				: child,
-		)
-		.filter((child) => child?.tagName === "BUTTON")
-		.map((button) => button?.getAttribute("aria-label") ?? button?.textContent);
+	if (!bar) throw new Error("no bar");
+	return [...bar.children].map((child) => {
+		if (child.classList.contains("text-file-editor-name")) {
+			return child.querySelector(".text-file-editor-name-file")?.textContent;
+		}
+		const control = child.classList.contains("text-file-editor-menu")
+			? child.querySelector("button")
+			: child;
+		return control?.getAttribute("aria-label") ?? control?.textContent;
+	});
 }
 
 function barStatus(container: HTMLElement) {
@@ -113,13 +124,16 @@ async function tap(
 	});
 }
 
+// Whether a control in the bar is greyed out. The bar marks such a control
+// rather than disabling it, so a tap on it still takes focus from the editor.
+function greyed(element: Element) {
+	return element.getAttribute("aria-disabled") === "true";
+}
+
 async function enabledButton(name: string) {
 	const button = await screen.findByRole("button", { name });
 	await waitFor(() => {
-		expect(
-			button.hasAttribute("disabled") ||
-				button.getAttribute("aria-disabled") === "true",
-		).toBe(false);
+		expect(greyed(button)).toBe(false);
 	});
 	return button;
 }
@@ -598,7 +612,7 @@ describe("change navigation", () => {
 		await waitFor(() => {
 			expect(container.querySelector(".cm-content")).not.toBeNull();
 		});
-		await screen.findByRole("button", { name: "Next change" });
+		await enabledButton("Next change");
 
 		const { EditorView } = await import("@codemirror/view");
 		const view = EditorView.findFromDOM(
@@ -679,12 +693,12 @@ describe("change navigation", () => {
 		});
 
 		addComparison();
-		await screen.findByRole("button", { name: "Next change" });
+		await enabledButton("Next change");
 
 		expect(selectedLine(view)).toBe(5);
 	});
 
-	test("hides the change controls when there are no changes", async () => {
+	test("greys out the change controls when there are no changes", async () => {
 		globalThis.fetch = (async () =>
 			new Response("a\nb\nc\n", {
 				headers: { "x-file-mtime-ms": "1" },
@@ -700,11 +714,117 @@ describe("change navigation", () => {
 		await waitFor(() => {
 			expect(container.querySelector(".cm-content")).not.toBeNull();
 		});
+		const { EditorView } = await import("@codemirror/view");
+		const view = EditorView.findFromDOM(
+			container.querySelector(".cm-editor") as HTMLElement,
+		);
+		if (!view) throw new Error("editor view not found");
+
+		for (const name of ["Previous change", "Next change"]) {
+			const button = screen.getByRole("button", { name });
+			expect(greyed(button)).toBe(true);
+			fireEvent.click(button);
+		}
+		expect(view.state.selection.main.head).toBe(0);
+	});
+
+	test("has no change controls for a file without sides", async () => {
+		globalThis.fetch = (async () =>
+			new Response("a\nb\nc\n", {
+				headers: { "x-file-mtime-ms": "1" },
+			})) as typeof fetch;
+
+		const { container } = render(
+			<Editor filePath="notes.txt" repo="test-repo" />,
+		);
+		await waitFor(() => {
+			expect(container.querySelector(".cm-content")).not.toBeNull();
+		});
 
 		expect(screen.queryByRole("button", { name: "Next change" })).toBeNull();
 		expect(
 			screen.queryByRole("button", { name: "Previous change" }),
 		).toBeNull();
+	});
+});
+
+describe("the on-screen keyboard", () => {
+	const originalFetch = globalThis.fetch;
+
+	afterEach(() => {
+		cleanup();
+		globalThis.fetch = originalFetch;
+	});
+
+	// The layout shrinks for the keyboard, which the test stands in for by
+	// giving the editor's scroller a height and resizing the window.
+	async function renderWithHeight(height: { value: number }) {
+		globalThis.fetch = (async () =>
+			new Response("a\nb\nc\n", {
+				headers: { "x-file-mtime-ms": "1" },
+			})) as typeof fetch;
+		const { container } = render(
+			<TextFileEditor filePath="notes.txt" repo="test-repo" />,
+		);
+		await waitFor(() => {
+			expect(container.querySelector(".cm-content")).not.toBeNull();
+		});
+		const { EditorView } = await import("@codemirror/view");
+		const view = EditorView.findFromDOM(
+			container.querySelector(".cm-editor") as HTMLElement,
+		);
+		if (!view) throw new Error("editor view not found");
+		Object.defineProperty(view.scrollDOM, "clientHeight", {
+			get: () => height.value,
+		});
+		act(() => {
+			window.dispatchEvent(new Event("resize"));
+		});
+		// Every transaction the editor dispatches from here on.
+		const dispatched: unknown[] = [];
+		const dispatch = view.dispatch.bind(view);
+		view.dispatch = ((...specs: Parameters<typeof view.dispatch>) => {
+			dispatched.push(...specs);
+			return dispatch(...specs);
+		}) as typeof view.dispatch;
+		const scrolls = () =>
+			dispatched.filter((spec) => {
+				const effects = (spec as { effects?: unknown }).effects;
+				return (
+					effects !== undefined &&
+					(effects as { type: unknown }).type ===
+						EditorView.scrollIntoView(0).type
+				);
+			}).length;
+		return { view, scrolls };
+	}
+
+	function resize(height: { value: number }, value: number) {
+		height.value = value;
+		act(() => {
+			window.dispatchEvent(new Event("resize"));
+		});
+	}
+
+	test("brings the cursor back into view when the editor shrinks with focus", async () => {
+		const height = { value: 600 };
+		const { view, scrolls } = await renderWithHeight(height);
+		Object.defineProperty(view, "hasFocus", { get: () => true });
+
+		resize(height, 300);
+		expect(scrolls()).toBe(1);
+
+		// Growing again, as the keyboard goes down, leaves the text where it is.
+		resize(height, 600);
+		expect(scrolls()).toBe(1);
+	});
+
+	test("leaves the text where it is when the editor shrinks without focus", async () => {
+		const height = { value: 600 };
+		const { scrolls } = await renderWithHeight(height);
+
+		resize(height, 300);
+		expect(scrolls()).toBe(0);
 	});
 });
 
@@ -925,7 +1045,7 @@ describe("staging", () => {
 
 	test("hides the Stage button without an onStaged handler", async () => {
 		const { view } = await renderForStaging({ onStaged: undefined });
-		await screen.findByRole("button", { name: "Next change" });
+		await enabledButton("Next change");
 
 		selectLines(view, 2);
 
@@ -941,16 +1061,14 @@ describe("staging", () => {
 		const stage = await screen.findByRole("button", {
 			name: "Stage selection",
 		});
-		expect(stage.hasAttribute("disabled")).toBe(true);
+		expect(greyed(stage)).toBe(true);
 
 		cleanup();
 		const second = await renderForStaging({ comparisonContent: undefined });
 		selectLines(second.view, 2);
 
 		expect(
-			(
-				await screen.findByRole("button", { name: "Stage selection" })
-			).hasAttribute("disabled"),
+			greyed(await screen.findByRole("button", { name: "Stage selection" })),
 		).toBe(true);
 	});
 });
@@ -1149,9 +1267,7 @@ describe("unstaging", () => {
 		// over the diff it refetches.
 		selectLines(view, 4);
 		expect(
-			(
-				await screen.findByRole("button", { name: "Unstage selection" })
-			).hasAttribute("disabled"),
+			greyed(await screen.findByRole("button", { name: "Unstage selection" })),
 		).toBe(true);
 
 		rerender(
@@ -1643,9 +1759,7 @@ describe("line picking", () => {
 		// of it cannot be staged.
 		selectLines(view, 2);
 		expect(
-			(
-				await screen.findByRole("button", { name: "Stage selection" })
-			).hasAttribute("disabled"),
+			greyed(await screen.findByRole("button", { name: "Stage selection" })),
 		).toBe(true);
 
 		await tap(container, 2);
@@ -1681,7 +1795,7 @@ describe("line picking", () => {
 
 		await waitFor(() => {
 			const stage = screen.getByRole("button", { name: "Stage 1 line" });
-			expect(stage.hasAttribute("disabled")).toBe(true);
+			expect(greyed(stage)).toBe(true);
 			expect(stage.title).toBe("Git's diff doesn't match this file");
 		});
 	});
@@ -1888,9 +2002,7 @@ describe("line picking", () => {
 			// Restoring the draft would replace the lines a selection names.
 			selectLines(view, 2);
 			expect(
-				(
-					await screen.findByRole("button", { name: "Stage selection" })
-				).hasAttribute("disabled"),
+				greyed(await screen.findByRole("button", { name: "Stage selection" })),
 			).toBe(true);
 
 			fireEvent.click(screen.getByRole("button", { name: "Discard" }));
@@ -2282,7 +2394,7 @@ describe("change strips", () => {
 		const { container, rerender, view, requests } = await renderWithStrips({
 			changeDiff: null,
 		});
-		await screen.findByRole("button", { name: "Next change" });
+		await enabledButton("Next change");
 		// Only git's diff names lines that staging acts on.
 		expect(strips(container)).toEqual([]);
 
@@ -2364,7 +2476,7 @@ describe("change strips", () => {
 			{ readOnly: true, readOnlyLabel: "Writes are off" },
 		]) {
 			const { container } = await renderWithStrips(props);
-			await screen.findByRole("button", { name: "Next change" });
+			await enabledButton("Next change");
 
 			expect(strips(container)).toEqual([]);
 			cleanup();
@@ -2446,7 +2558,7 @@ describe("word marks", () => {
 	});
 });
 
-describe("action bar", () => {
+describe("bar", () => {
 	const originalFetch = globalThis.fetch;
 
 	afterEach(() => {
@@ -2462,15 +2574,17 @@ describe("action bar", () => {
 				headers: { "Content-Type": "application/json" },
 			}),
 	) {
-		globalThis.fetch = (async (_input: string, init?: RequestInit) =>
-			init?.method === "POST"
-				? respond()
-				: new Response("a\nB\nc\nD\ne\n", {
-						headers: { "x-file-mtime-ms": "1" },
-					})) as unknown as typeof fetch;
+		const writes: string[] = [];
+		globalThis.fetch = (async (input: string, init?: RequestInit) => {
+			if (init?.method === "POST") return respond();
+			if (init?.method) writes.push(`${init.method} ${input}`);
+			return new Response("a\nB\nc\nD\ne\n", {
+				headers: { "x-file-mtime-ms": "1" },
+			});
+		}) as unknown as typeof fetch;
 		const { container } = render(
 			<TextFileEditor
-				filePath="notes.txt"
+				filePath="docs/notes.txt"
 				repo="test-repo"
 				comparisonContent={"a\nb\nc\nd\ne\n"}
 				changeDiff={"@@ -1,5 +1,5 @@\n a\n-b\n+B\n c\n-d\n+D\n e\n"}
@@ -2479,25 +2593,35 @@ describe("action bar", () => {
 				{...props}
 			/>,
 		);
-		await screen.findByRole("button", { name: "Next change" });
+		await enabledButton("Next change");
 
 		const { EditorView } = await import("@codemirror/view");
 		const view = EditorView.findFromDOM(
 			container.querySelector(".cm-editor") as HTMLElement,
 		);
 		if (!view) throw new Error("editor view not found");
-		return { container, view };
+		return { container, view, writes };
 	}
 
-	function isPrimary(name: string) {
-		return screen
-			.getByRole("button", { name })
-			.classList.contains("text-file-editor-button--primary");
+	function action(container: HTMLElement) {
+		const found = container.querySelector(".text-file-editor-action");
+		if (!found) throw new Error("no main action");
+		return found;
 	}
 
-	test("offers the page's file action after the change controls when nothing is picked", async () => {
+	function openMenu() {
+		fireEvent.click(screen.getByRole("button", { name: "More actions" }));
+		return screen.getByRole("menu");
+	}
+
+	test("holds Back, the file's name, the change controls, the file action and the menu, in that order", async () => {
+		let backs = 0;
 		let clicks = 0;
 		const { container } = await renderBar({
+			onBack: () => {
+				backs += 1;
+			},
+			backLabel: "Back to file list",
 			fileAction: {
 				label: "Stage file",
 				onClick: () => {
@@ -2506,17 +2630,72 @@ describe("action bar", () => {
 			},
 		});
 
-		expect(barStatus(container)).toBe("");
 		expect(barButtons(container)).toEqual([
-			"More actions",
+			"Back to file list",
+			"notes.txt",
 			"Previous change",
 			"Next change",
 			"Stage file",
+			"More actions",
 		]);
-		expect(isPrimary("Stage file")).toBe(true);
+		expect(barStatus(container)).toBe("");
 
 		fireEvent.click(screen.getByRole("button", { name: "Stage file" }));
 		expect(clicks).toBe(1);
+		fireEvent.click(screen.getByRole("button", { name: "Back to file list" }));
+		expect(backs).toBe(1);
+	});
+
+	test("names the side under the file's name, with any status after it", async () => {
+		const { container, view } = await renderBar();
+		const side = () =>
+			container.querySelector(".text-file-editor-name-side")?.textContent;
+		expect(side()).toBe("Unstaged");
+
+		act(() => {
+			view.dispatch({ changes: { from: 0, insert: "x" } });
+		});
+		await waitFor(() => {
+			expect(side()).toBe("UnstagedUnsaved changes");
+		});
+		expect(barStatus(container)).toBe("Unsaved changes");
+		cleanup();
+
+		const staged = await renderBar({
+			staged: true,
+			onStaged: undefined,
+			onUnstaged: () => {},
+			readOnly: true,
+			readOnlyLabel: "Writes are off",
+		});
+		expect(
+			staged.container.querySelector(".text-file-editor-name-side")
+				?.textContent,
+		).toBe("StagedWrites are off");
+	});
+
+	test("switches to the other side from the file's name, which is greyed out while that side has nothing", async () => {
+		let shown = 0;
+		const show = () => {
+			shown += 1;
+		};
+		const { container } = await renderBar({
+			otherSide: { available: true, show },
+		});
+		const name = container.querySelector(".text-file-editor-name");
+		if (!name) throw new Error("no name");
+		expect(name.tagName).toBe("BUTTON");
+		expect(greyed(name)).toBe(false);
+		fireEvent.click(name);
+		expect(shown).toBe(1);
+		cleanup();
+
+		const other = await renderBar({ otherSide: { available: false, show } });
+		const greyedName = other.container.querySelector(".text-file-editor-name");
+		if (!greyedName) throw new Error("no name");
+		expect(greyed(greyedName)).toBe(true);
+		fireEvent.click(greyedName);
+		expect(shown).toBe(1);
 	});
 
 	test("shows the file action as the page gives it", async () => {
@@ -2530,22 +2709,41 @@ describe("action bar", () => {
 		});
 
 		const stage = screen.getByRole("button", { name: "Stage file" });
-		expect(stage.hasAttribute("disabled")).toBe(true);
+		expect(greyed(stage)).toBe(true);
 		expect(stage.title).toBe("The server does not allow changes");
 	});
 
-	test("offers a disabled Save when there is nothing else to do", async () => {
-		const { container } = await renderBar();
+	test("offers a greyed-out Save when there is nothing else to do", async () => {
+		const { container, writes } = await renderBar();
 
 		expect(barButtons(container)).toEqual([
-			"More actions",
+			"notes.txt",
 			"Previous change",
 			"Next change",
 			"Save",
+			"More actions",
 		]);
-		expect(
-			screen.getByRole("button", { name: "Save" }).hasAttribute("disabled"),
-		).toBe(true);
+		const save = screen.getByRole("button", { name: "Save" });
+		expect(greyed(save)).toBe(true);
+		fireEvent.click(save);
+		expect(writes).toEqual([]);
+	});
+
+	test("keeps the main action's place for a side with nothing to offer", async () => {
+		const { container } = await renderBar({
+			staged: true,
+			onStaged: undefined,
+			onUnstaged: undefined,
+		});
+
+		expect(barButtons(container)).toEqual([
+			"notes.txt",
+			"Previous change",
+			"Next change",
+			"",
+			"More actions",
+		]);
+		expect(action(container).tagName).toBe("SPAN");
 	});
 
 	test("offers no line action for a bare cursor, even on a changed line", async () => {
@@ -2558,14 +2756,15 @@ describe("action bar", () => {
 		});
 
 		expect(barButtons(container)).toEqual([
-			"More actions",
+			"notes.txt",
 			"Previous change",
 			"Next change",
 			"Stage file",
+			"More actions",
 		]);
 	});
 
-	test("offers Stage selection ahead of the file action for a selection on a change", async () => {
+	test("offers Stage selection in the file action's place for a selection on a change", async () => {
 		const { container, view } = await renderBar({
 			fileAction: { label: "Stage file", onClick: () => {} },
 		});
@@ -2574,56 +2773,97 @@ describe("action bar", () => {
 
 		await enabledButton("Stage selection");
 		expect(barButtons(container)).toEqual([
-			"More actions",
+			"notes.txt",
 			"Previous change",
 			"Next change",
 			"Stage selection",
-			"Stage file",
+			"More actions",
 		]);
-		expect(isPrimary("Stage selection")).toBe(true);
-		expect(isPrimary("Stage file")).toBe(false);
 
 		// A selection of unchanged lines names nothing to stage.
 		selectLines(view, 3);
 		expect(barButtons(container)).toEqual([
-			"More actions",
+			"notes.txt",
 			"Previous change",
 			"Next change",
 			"Stage file",
+			"More actions",
 		]);
-		expect(isPrimary("Stage file")).toBe(true);
 	});
 
-	test("offers the picked lines and Clear picks in place of the file action", async () => {
+	test("offers the picked lines in the file action's place, and Clear picks in the menu", async () => {
 		const { container } = await renderBar({
 			fileAction: { label: "Stage file", onClick: () => {} },
 		});
+
+		const clearPicks = () =>
+			within(openMenu()).getByRole("menuitem", { name: "Clear picks" });
+		expect((clearPicks() as HTMLButtonElement).disabled).toBe(true);
+		fireEvent.click(screen.getByRole("button", { name: "More actions" }));
 
 		await tap(container, 2);
 		await tap(container, 4);
 
 		await enabledButton("Stage 2 lines");
 		expect(barButtons(container)).toEqual([
-			"More actions",
-			"Clear picks",
+			"notes.txt",
 			"Previous change",
 			"Next change",
 			"Stage 2 lines",
+			"More actions",
 		]);
 
-		fireEvent.click(screen.getByRole("button", { name: "Clear picks" }));
+		const clear = clearPicks();
+		expect((clear as HTMLButtonElement).disabled).toBe(false);
+		fireEvent.click(clear);
 
 		await waitFor(() => {
 			expect(barButtons(container)).toEqual([
-				"More actions",
+				"notes.txt",
 				"Previous change",
 				"Next change",
 				"Stage file",
+				"More actions",
 			]);
 		});
+		expect(screen.queryByRole("menu")).toBeNull();
 		expect(pickTargets(container).filter(([, , text]) => text === "✓")).toEqual(
 			[],
 		);
+	});
+
+	test("keeps one main action, at one width, whatever it offers", async () => {
+		const { container, view } = await renderBar({
+			fileAction: { label: "Stage file", onClick: () => {} },
+		});
+		const button = action(container);
+		const count = container.querySelector(".text-file-editor-bar")?.children
+			.length;
+
+		await tap(container, 2);
+		await enabledButton("Stage 1 line");
+		await tap(container, 2);
+		selectLines(view, 2);
+		await enabledButton("Stage selection");
+		act(() => {
+			view.dispatch({ changes: { from: 0, insert: "x" } });
+		});
+		await enabledButton("Save");
+
+		// The same button throughout, so nothing beside it moves.
+		expect(action(container)).toBe(button);
+		expect(
+			container.querySelector(".text-file-editor-bar")?.children.length,
+		).toBe(count);
+		// Its width is set, not taken from its label.
+		const css = readFileSync(
+			resolve(import.meta.dir, "../components/TextFileEditor.css"),
+			"utf-8",
+		);
+		const rule = /\.text-file-editor-action \{([^}]*)\}/.exec(css)?.[1] ?? "";
+		expect(rule).toMatch(/\swidth: var\(--file-action-width\);/);
+		expect(rule).toMatch(/flex-shrink: 0;/);
+		expect(rule).not.toMatch(/min-width|max-width/);
 	});
 
 	test("offers only Save while the buffer holds unsaved edits", async () => {
@@ -2642,12 +2882,12 @@ describe("action bar", () => {
 		await enabledButton("Save");
 		expect(barStatus(container)).toBe("Unsaved changes");
 		expect(barButtons(container)).toEqual([
-			"More actions",
+			"notes.txt",
 			"Previous change",
 			"Next change",
 			"Save",
+			"More actions",
 		]);
-		expect(isPrimary("Save")).toBe(true);
 	});
 
 	test("says so while the picked lines stage or unstage", async () => {
@@ -2677,7 +2917,7 @@ describe("action bar", () => {
 			fireEvent.click(await enabledButton(label));
 
 			const pending = await screen.findByRole("button", { name: busy });
-			expect(pending.hasAttribute("disabled")).toBe(true);
+			expect(greyed(pending)).toBe(true);
 
 			await act(async () => {
 				finish();
@@ -2689,6 +2929,34 @@ describe("action bar", () => {
 			});
 			cleanup();
 		}
+	});
+
+	test("has neither a side nor change controls for a file without sides", async () => {
+		globalThis.fetch = (async () =>
+			new Response("a\nb\n", {
+				headers: { "x-file-mtime-ms": "1" },
+			})) as unknown as typeof fetch;
+		const { container } = render(
+			<Editor
+				filePath="docs/notes.txt"
+				repo="test-repo"
+				onBack={() => {}}
+				backLabel="Back to file tree"
+			/>,
+		);
+		await waitFor(() => {
+			expect(container.querySelector(".cm-content")).not.toBeNull();
+		});
+
+		expect(barButtons(container)).toEqual([
+			"Back to file tree",
+			"notes.txt",
+			"Save",
+			"More actions",
+		]);
+		const name = container.querySelector(".text-file-editor-name");
+		expect(name?.tagName).toBe("SPAN");
+		expect(container.querySelector(".text-file-editor-name-side")).toBeNull();
 	});
 });
 
@@ -2830,7 +3098,7 @@ describe("refreshed change context", () => {
 		});
 		const save = screen.getByRole("button", { name: "Save" });
 		await waitFor(() => {
-			expect(save.hasAttribute("disabled")).toBe(false);
+			expect(greyed(save)).toBe(false);
 		});
 		fireEvent.click(save);
 		await waitFor(() => {
@@ -3163,7 +3431,7 @@ describe("menu", () => {
 		);
 	}
 
-	test("opens from More actions at the start of the bar, and closes again", async () => {
+	test("opens upward from More actions at the end of the bar, and closes again", async () => {
 		const container = await renderEditor();
 		const more = screen.getByRole("button", { name: "More actions" });
 		expect(more.getAttribute("aria-expanded")).toBe("false");
@@ -3175,7 +3443,7 @@ describe("menu", () => {
 		expect(
 			container
 				.querySelector(".text-file-editor-bar")
-				?.firstElementChild?.contains(screen.getByRole("menu")),
+				?.lastElementChild?.contains(screen.getByRole("menu")),
 		).toBe(true);
 		expect(menuItems()).toEqual([
 			["menuitemcheckbox", "Wrap lines"],
@@ -3184,6 +3452,22 @@ describe("menu", () => {
 
 		fireEvent.click(more);
 		expect(screen.queryByRole("menu") === null).toBe(true);
+	});
+
+	test("offers Clear picks where lines can be picked", async () => {
+		await renderEditor({
+			comparisonContent: "alpha\n",
+			changeDiff: "@@ -1 +1,2 @@\n alpha\n+beta\n",
+			changeType: "modified",
+			onStaged: () => {},
+		});
+		fireEvent.click(screen.getByRole("button", { name: "More actions" }));
+
+		expect(menuItems()).toEqual([
+			["menuitemcheckbox", "Wrap lines"],
+			["menuitem", "Reload"],
+			["menuitem", "Clear picks"],
+		]);
 	});
 
 	test("Reload rereads the file and closes the menu", async () => {
@@ -3218,27 +3502,6 @@ describe("menu", () => {
 		fireEvent.pointerDown(container.querySelector(".cm-content") as Element);
 		expect(screen.queryByRole("menu") === null).toBe(true);
 		expect(more.getAttribute("aria-expanded")).toBe("false");
-	});
-
-	test("goes in the page's host for it when given one", async () => {
-		const host = document.createElement("div");
-		document.body.append(host);
-		try {
-			const container = await renderEditor({ menuHost: host });
-			const more = screen.getByRole("button", { name: "More actions" });
-			expect(host.contains(more)).toBe(true);
-			expect(container.contains(more)).toBe(false);
-
-			fireEvent.click(more);
-			expect(host.contains(screen.getByRole("menu"))).toBe(true);
-
-			// A tap in the editor is outside the menu, wherever the menu is.
-			fireEvent.pointerDown(container.querySelector(".cm-content") as Element);
-			expect(screen.queryByRole("menu") === null).toBe(true);
-		} finally {
-			cleanup();
-			host.remove();
-		}
 	});
 });
 
@@ -3281,7 +3544,7 @@ describe("saving", () => {
 
 		const save = await screen.findByRole("button", { name: "Save" });
 		await waitFor(() => {
-			expect(save.hasAttribute("disabled")).toBe(false);
+			expect(greyed(save)).toBe(false);
 		});
 		fireEvent.click(save);
 
@@ -3355,7 +3618,7 @@ describe("saving", () => {
 
 			const save = screen.getByRole("button", { name: "Save" });
 			await waitFor(() => {
-				expect(save.hasAttribute("disabled")).toBe(false);
+				expect(greyed(save)).toBe(false);
 			});
 			fireEvent.click(save);
 			await waitFor(() => {
@@ -3378,7 +3641,7 @@ describe("saving", () => {
 			});
 			const save = screen.getByRole("button", { name: "Save" });
 			await waitFor(() => {
-				expect(save.hasAttribute("disabled")).toBe(false);
+				expect(greyed(save)).toBe(false);
 			});
 			fireEvent.click(save);
 			await screen.findByRole("button", { name: "Saving..." });
@@ -3444,7 +3707,7 @@ describe("saving", () => {
 				});
 				const save = screen.getByRole("button", { name: "Save" });
 				await waitFor(() => {
-					expect(save.hasAttribute("disabled")).toBe(false);
+					expect(greyed(save)).toBe(false);
 				});
 				fireEvent.click(save);
 				await screen.findByRole("button", { name: "Saving..." });
@@ -3570,7 +3833,7 @@ describe("saving", () => {
 				});
 				const save = screen.getByRole("button", { name: "Save" });
 				await waitFor(() => {
-					expect(save.hasAttribute("disabled")).toBe(false);
+					expect(greyed(save)).toBe(false);
 				});
 				fireEvent.click(save);
 				await screen.findByRole("button", { name: "Saving..." });
@@ -3882,9 +4145,7 @@ describe("saving", () => {
 			expect(screen.queryByRole("button", { name: "Restore" }) === null).toBe(
 				true,
 			);
-			expect(screen.queryByRole("button", { name: "Save" }) === null).toBe(
-				true,
-			);
+			expect(greyed(screen.getByRole("button", { name: "Save" }))).toBe(true);
 
 			// An answer that allows writes brings the offer, which holds the
 			// buffer until it is answered.
@@ -3949,7 +4210,7 @@ describe("saving", () => {
 
 		const save = screen.getByRole("button", { name: "Save" });
 		await waitFor(() => {
-			expect(save.hasAttribute("disabled")).toBe(false);
+			expect(greyed(save)).toBe(false);
 		});
 		fireEvent.click(save);
 		await waitFor(() => {

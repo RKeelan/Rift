@@ -281,6 +281,50 @@ function editorBar(container: HTMLElement) {
 	return bar;
 }
 
+// Whether a control in the bar is greyed out, which the bar marks rather
+// than disabling the control.
+function greyed(element: Element) {
+	return element.getAttribute("aria-disabled") === "true";
+}
+
+// The side of the open file named in the bar on screen, and whether the
+// name is greyed out because the other side has nothing to show.
+function side(container: HTMLElement) {
+	const name = editorBar(container).querySelector(".text-file-editor-name");
+	if (!name) throw new Error("no name in the bar");
+	const shown = name.querySelector(".text-file-editor-name-side")?.firstChild
+		?.textContent;
+	return `${shown}${greyed(name) ? " (greyed out)" : ""}`;
+}
+
+// Switches to the file's other side, from its name in the bar.
+function switchSide(container: HTMLElement) {
+	fireEvent.click(
+		editorBar(container).querySelector(".text-file-editor-name") as Element,
+	);
+}
+
+// The Back in the bar on screen. Each side of a file has a bar of its own.
+function backButton(container: HTMLElement) {
+	return within(editorBar(container)).getByRole("button", {
+		name: "Back to file list",
+	});
+}
+
+// A bar's contents in order: each control by its label or its text, the
+// file's name by the name alone, and the main action's empty place by "".
+function barContents(bar: Element) {
+	return [...bar.children].map((child) => {
+		if (child.classList.contains("text-file-editor-name")) {
+			return child.querySelector(".text-file-editor-name-file")?.textContent;
+		}
+		const control = child.classList.contains("text-file-editor-menu")
+			? child.querySelector("button")
+			: child;
+		return control?.getAttribute("aria-label") ?? control?.textContent;
+	});
+}
+
 // Waits for an editable buffer, with the page's whole-file action offered in
 // the editor's bar.
 async function findEditableEditor(container: HTMLElement) {
@@ -537,15 +581,14 @@ describe("FilesPage", () => {
 
 		fireEvent.click(container.querySelector(".changes-file-entry") as Element);
 
+		// The bar names the file, without its folder, with the side under it.
 		await waitFor(() => {
-			const filename = container.querySelector(".changes-diff-filename");
-			expect(filename).not.toBeNull();
-			expect(filename?.textContent).toBe("src/utils.ts");
+			expect(
+				editorBar(container).querySelector(".text-file-editor-name-file")
+					?.textContent,
+			).toBe("utils.ts");
 		});
-
-		expect(
-			screen.getByRole("tab", { name: "Staged" }).getAttribute("aria-selected"),
-		).toBe("true");
+		expect(side(container)).toBe("Staged (greyed out)");
 	});
 
 	test("opens editable files directly in the editor", async () => {
@@ -942,9 +985,7 @@ describe("FilesPage", () => {
 			// Staging the whole file acts on the file as saved, not as shown, so
 			// the edits are saved first.
 			const bar = within(editorBar(container));
-			expect(
-				bar.getByRole("button", { name: "Save" }).hasAttribute("disabled"),
-			).toBe(false);
+			expect(greyed(bar.getByRole("button", { name: "Save" }))).toBe(false);
 			expect(bar.queryByRole("button", { name: /^Stage/ }) === null).toBe(true);
 		});
 
@@ -1054,7 +1095,7 @@ describe("FilesPage", () => {
 		});
 		const save = screen.getByRole("button", { name: "Save" });
 		await waitFor(() => {
-			expect(save.hasAttribute("disabled")).toBe(false);
+			expect(greyed(save)).toBe(false);
 		});
 		fireEvent.click(save);
 
@@ -1119,7 +1160,7 @@ describe("FilesPage", () => {
 		});
 	});
 
-	test("puts the editor's menu in its header", async () => {
+	test("gives an open file the whole screen, with one bar at its foot", async () => {
 		mockFetchForChanges(
 			[{ path: "app.ts", status: "modified", staged: false }],
 			{
@@ -1140,64 +1181,145 @@ describe("FilesPage", () => {
 		fireEvent.click(container.querySelector(".changes-file-entry") as Element);
 		await findEditableEditor(container);
 
-		const slot = container.querySelector(
-			".changes-diff-header .changes-header-menu",
-		) as HTMLElement;
-		await waitFor(() => {
-			const more = screen.getByRole("button", { name: "More actions" });
-			expect(slot.contains(more)).toBe(true);
-			expect(editorBar(container).contains(more)).toBe(false);
-		});
+		// No header, and no row of tabs for the sides.
+		const view = container.querySelector(".changes-diff-view") as HTMLElement;
+		expect(view.querySelector("header")).toBeNull();
+		expect(within(view).queryByRole("tablist")).toBeNull();
+		expect(within(view).queryByRole("tab")).toBeNull();
+		expect(barContents(editorBar(container))).toEqual([
+			"Back to file list",
+			"app.ts",
+			"Previous change",
+			"Next change",
+			"Stage file",
+			"More actions",
+		]);
 
-		fireEvent.click(screen.getByRole("button", { name: "More actions" }));
-		expect(slot.contains(screen.getByRole("menu"))).toBe(true);
+		fireEvent.click(
+			within(editorBar(container)).getByRole("button", {
+				name: "More actions",
+			}),
+		);
+		expect(editorBar(container).contains(screen.getByRole("menu"))).toBe(true);
 	});
 
-	test("offers the action on the whole file in the editor's bar", async () => {
-		for (const { status, staged, label } of [
-			{ status: "modified", staged: false, label: "Stage file" },
-			{ status: "modified", staged: true, label: "Unstage file" },
-			{ status: "deleted", staged: false, label: "Stage deletion" },
-			{ status: "deleted", staged: true, label: "Unstage deletion" },
+	test("fills the bar for each kind of file", async () => {
+		// The working tree holds "current", HEAD "previous", and the index
+		// whatever the kind of file needs. The editor marks the changes from
+		// its own diff, since git's is left empty.
+		function mockKind(files: StatusFile[], index: string) {
+			globalThis.fetch = mock((input: string | URL | Request) => {
+				const url = String(input);
+				if (url.includes("/api/git/status")) {
+					return Promise.resolve(json({ files }));
+				}
+				if (url.includes("/api/git/diff")) {
+					return Promise.resolve(json({ diff: "", truncated: false }));
+				}
+				if (url.includes("/api/git/base-content")) {
+					return Promise.resolve(
+						new Response(url.includes("staged=true") ? "previous\n" : index),
+					);
+				}
+				return Promise.resolve(
+					new Response("current\n", { headers: { "x-file-mtime-ms": "1" } }),
+				);
+			}) as typeof fetch;
+		}
+		const unstaged = { path: "app.ts", status: "modified", staged: false };
+		const staged = { path: "app.ts", status: "modified", staged: true };
+		for (const kind of [
+			{
+				name: "changed",
+				files: [unstaged],
+				open: "false",
+				action: "Stage file",
+				side: "Unstaged (greyed out)",
+			},
+			{
+				name: "staged",
+				files: [staged],
+				index: "current\n",
+				open: "true",
+				action: "Unstage file",
+				side: "Staged (greyed out)",
+			},
+			{
+				name: "changed and staged",
+				files: [unstaged, staged],
+				index: "middle\n",
+				open: "false",
+				action: "Stage file",
+				side: "Unstaged",
+			},
+			{
+				name: "untracked",
+				files: [{ path: "app.ts", status: "untracked", staged: false }],
+				open: "false",
+				action: "Stage file",
+				side: "Unstaged (greyed out)",
+			},
+			{
+				name: "unchanged",
+				files: [],
+				index: "current\n",
+				open: "false",
+				action: "Stage file",
+				side: "Unstaged (greyed out)",
+				actionGreyed: true,
+				noChanges: true,
+			},
+			{
+				name: "deleted",
+				files: [{ path: "app.ts", status: "deleted", staged: false }],
+				open: "false",
+				action: "Stage deletion",
+				side: "Unstaged (greyed out)",
+				status: "Deleted file",
+			},
+			{
+				name: "deleted and staged",
+				files: [{ path: "app.ts", status: "deleted", staged: true }],
+				open: "true",
+				action: "Unstage deletion",
+				side: "Staged (greyed out)",
+				status: "Deleted file",
+			},
 		]) {
-			mockFetchForChanges([{ path: "app.ts", status, staged }], {
-				baseContent: { path: "app.ts", content: "previous\n" },
-				diff: {
-					path: "app.ts",
-					diff: "@@ -1 +1 @@\n-previous\n+current\n",
-					truncated: false,
-				},
-				fileContent: { path: "app.ts", content: "current\n" },
-			});
-
-			const { container } = renderFilesPage();
-			await waitFor(() => {
-				expect(container.querySelector(".changes-file-entry")).not.toBeNull();
-			});
-			fireEvent.click(
-				container.querySelector(".changes-file-entry") as Element,
-			);
+			mockKind(kind.files, kind.index ?? "previous\n");
+			const { container } = renderFilesPage([
+				`/files?path=app.ts&staged=${kind.open}`,
+			]);
 			await waitFor(() => {
 				expect(container.querySelector(".cm-content")).not.toBeNull();
+				expect(barContents(editorBar(container))).toEqual([
+					"Back to file list",
+					"app.ts",
+					"Previous change",
+					"Next change",
+					kind.action,
+					"More actions",
+				]);
 			});
-
-			const action = within(editorBar(container)).getByRole("button", {
-				name: label,
-			}) as HTMLButtonElement;
-			expect(action.disabled).toBe(false);
-			// The header holds no action of its own.
-			const header = container.querySelector(
-				".changes-diff-header",
-			) as HTMLElement;
-			expect(
-				within(header).queryByRole("button", { name: /Stage|Unstage/ }) ===
-					null,
-			).toBe(true);
-			if (status === "deleted") {
-				expect(
-					container.querySelector(".text-file-editor-status")?.textContent,
-				).toBe("Deleted file");
-			}
+			const bar = within(editorBar(container));
+			await waitFor(() => {
+				for (const name of ["Previous change", "Next change"]) {
+					expect([
+						kind.name,
+						greyed(bar.getByRole("button", { name })),
+					]).toEqual([kind.name, kind.noChanges === true]);
+				}
+				expect([
+					kind.name,
+					greyed(bar.getByRole("button", { name: kind.action })),
+				]).toEqual([kind.name, kind.actionGreyed === true]);
+			});
+			expect([kind.name, side(container)]).toEqual([kind.name, kind.side]);
+			expect([
+				kind.name,
+				editorBar(container).querySelector(".text-file-editor-status")
+					?.textContent,
+			]).toEqual([kind.name, kind.status ?? ""]);
 			cleanup();
 		}
 	});
@@ -1257,7 +1379,7 @@ describe("FilesPage", () => {
 		// The action waits for the server, rather than being sent twice.
 		await waitFor(() => {
 			expect(stageBodies.length).toBe(1);
-			expect(stageFile.disabled).toBe(true);
+			expect(greyed(stageFile)).toBe(true);
 		});
 		expect(JSON.parse(stageBodies[0])).toEqual({ path: "app.ts" });
 
@@ -1329,7 +1451,7 @@ describe("FilesPage", () => {
 			const button = within(editorBar(container)).getByRole("button", {
 				name: "Stage file",
 			}) as HTMLButtonElement;
-			expect(button.disabled).toBe(false);
+			expect(greyed(button)).toBe(false);
 			return button;
 		});
 		fireEvent.click(stageFile);
@@ -1548,7 +1670,7 @@ describe("FilesPage", () => {
 		const [stageFile] = stageButtons;
 		expect(stageFile.textContent).toBe("Stage file");
 		expect(editorBar(container).contains(stageFile)).toBe(true);
-		expect(stageFile.disabled).toBe(true);
+		expect(greyed(stageFile)).toBe(true);
 		expect(stageFile.title).toBe("The server does not allow changes");
 	});
 
@@ -1596,7 +1718,7 @@ describe("FilesPage", () => {
 		const stageFile = within(editorBar(container)).getByRole("button", {
 			name: "Stage file",
 		}) as HTMLButtonElement;
-		expect(stageFile.disabled).toBe(true);
+		expect(greyed(stageFile)).toBe(true);
 		expect(stageFile.hasAttribute("title")).toBe(false);
 	});
 
@@ -1862,16 +1984,6 @@ describe("switching between a file's unstaged and staged changes", () => {
 		});
 	}
 
-	function tabs() {
-		return screen.getAllByRole("tab").map((tab) => {
-			const marks = [
-				tab.getAttribute("aria-selected") === "true" ? "selected" : "",
-				tab.hasAttribute("disabled") ? "disabled" : "",
-			].filter(Boolean);
-			return `${tab.textContent}${marks.length ? ` (${marks.join(", ")})` : ""}`;
-		});
-	}
-
 	// Each side's editor, and whether it is the one on screen.
 	function editors(container: HTMLElement) {
 		return [...container.querySelectorAll(".changes-editor-view")].map(
@@ -1882,13 +1994,20 @@ describe("switching between a file's unstaged and staged changes", () => {
 		);
 	}
 
-	test("offers both sides, greying out a side with no changes", async () => {
+	test("greys out the file's name while the other side has no changes", async () => {
 		mockFile([{ path: "app.ts", status: "modified", staged: false }]);
 		const { container } = renderFilesPage(["/files?path=app.ts&staged=false"]);
 
-		await screen.findByRole("tablist", { name: "Changes to show" });
-		expect(tabs()).toEqual(["Unstaged (selected)", "Staged (disabled)"]);
+		await waitFor(() => {
+			expect(side(container)).toBe("Unstaged (greyed out)");
+		});
 		expect(editors(container)).toEqual(["shown"]);
+
+		switchSide(container);
+		expect(side(container)).toBe("Unstaged (greyed out)");
+		expect(screen.getByTestId("location-search").textContent).toBe(
+			"?path=app.ts&staged=false",
+		);
 	});
 
 	test("shows the other side at once, without loading it again", async () => {
@@ -1900,16 +2019,16 @@ describe("switching between a file's unstaged and staged changes", () => {
 		await waitFor(() => {
 			expect(container.querySelectorAll(".cm-content").length).toBe(2);
 		});
-		expect(tabs()).toEqual(["Unstaged (selected)", "Staged"]);
+		expect(side(container)).toBe("Unstaged");
 		expect(editors(container)).toEqual(["shown", "hidden"]);
 		const { calls } = (
 			globalThis.fetch as unknown as { mock: { calls: unknown[] } }
 		).mock;
 		const before = calls.length;
 
-		fireEvent.click(screen.getByRole("tab", { name: "Staged" }));
+		switchSide(container);
 
-		expect(tabs()).toEqual(["Unstaged", "Staged (selected)"]);
+		expect(side(container)).toBe("Staged");
 		expect(editors(container)).toEqual(["hidden", "shown"]);
 		expect(screen.getByTestId("location-search").textContent).toBe(
 			"?path=app.ts&staged=true",
@@ -2007,11 +2126,11 @@ describe("switching between a file's unstaged and staged changes", () => {
 		});
 		await screen.findByText("Unsaved changes");
 
-		fireEvent.click(screen.getByRole("tab", { name: "Staged" }));
+		switchSide(container);
 
-		expect(tabs()).toEqual(["Unstaged", "Staged (selected)"]);
+		expect(side(container)).toBe("Staged");
 		expect(editors(container)).toEqual(["hidden", "shown"]);
-		fireEvent.click(screen.getByRole("tab", { name: "Unstaged" }));
+		switchSide(container);
 		expect(view?.state.doc.toString()).toBe("edited current\n");
 	});
 
@@ -2029,7 +2148,7 @@ describe("switching between a file's unstaged and staged changes", () => {
 			view?.dispatch({ changes: { from: 0, insert: "edited " } });
 		});
 		await screen.findByText("Unsaved changes");
-		fireEvent.click(screen.getByRole("tab", { name: "Staged" }));
+		switchSide(container);
 
 		fireEvent.click(
 			within(editorBar(container)).getByRole("button", {
@@ -2039,7 +2158,7 @@ describe("switching between a file's unstaged and staged changes", () => {
 
 		await waitFor(() => {
 			expect(urls.some((url) => url.includes("/api/git/unstage"))).toBe(true);
-			expect(tabs()).toEqual(["Unstaged (selected)", "Staged"]);
+			expect(side(container)).toBe("Unstaged");
 		});
 		expect(screen.getByTestId("location-search").textContent).toBe(
 			"?path=app.ts&staged=false",
@@ -2128,7 +2247,7 @@ describe("switching between a file's unstaged and staged changes", () => {
 		await waitFor(() => {
 			expect(shownTargets()).toEqual(["1", "2", "3"]);
 		});
-		expect(tabs()).toEqual(["Unstaged (selected)", "Staged (disabled)"]);
+		expect(side(container)).toBe("Unstaged (greyed out)");
 		act(() => {
 			fireEvent.click(
 				container.querySelector(
@@ -2138,14 +2257,14 @@ describe("switching between a file's unstaged and staged changes", () => {
 		});
 		const stage = await screen.findByRole("button", { name: "Stage 1 line" });
 		await waitFor(() => {
-			expect(stage.hasAttribute("disabled")).toBe(false);
+			expect(greyed(stage)).toBe(false);
 		});
 		fireEvent.click(stage);
 
 		// The file is now a staged new file with the rest of its lines unstaged,
 		// and the editor stays open on the lines still to stage.
 		await waitFor(() => {
-			expect(tabs()).toEqual(["Unstaged (selected)", "Staged"]);
+			expect(side(container)).toBe("Unstaged");
 			expect(shownTargets()).toEqual(["1", "3"]);
 		});
 		expect(stageBodies).toEqual([
@@ -2172,13 +2291,13 @@ describe("switching between a file's unstaged and staged changes", () => {
 			false,
 		);
 
-		fireEvent.click(screen.getByRole("tab", { name: "Staged" }));
+		switchSide(container);
 		await waitFor(() => {
 			expect(shownTargets()).toEqual(["1"]);
 		});
 
 		// The list shows the file in both sections.
-		fireEvent.click(screen.getByRole("button", { name: "Back to file list" }));
+		fireEvent.click(backButton(container));
 		await waitFor(() => {
 			expect(sectionHeaders(container)).toEqual([
 				"Staged1",
@@ -2249,7 +2368,7 @@ describe("switching between a file's unstaged and staged changes", () => {
 				urls.slice(before).some((url) => url.includes("/api/git/unstage")),
 			).toBe(true);
 		});
-		fireEvent.click(screen.getByRole("button", { name: "Back to file list" }));
+		fireEvent.click(backButton(container));
 
 		// Nothing is staged now.
 		await waitFor(() => {
@@ -2270,14 +2389,10 @@ describe("switching between a file's unstaged and staged changes", () => {
 			urls.filter((url) => url.includes("/api/git/status")).length;
 		const before = statusReads();
 
-		// The menu of the side on screen sits in the header.
-		const header = container.querySelector(
-			".changes-diff-header",
-		) as HTMLElement;
-		fireEvent.click(
-			within(header).getByRole("button", { name: "More actions" }),
-		);
-		fireEvent.click(within(header).getByRole("menuitem", { name: "Reload" }));
+		// The menu of the side on screen sits in its bar.
+		const bar = within(editorBar(container));
+		fireEvent.click(bar.getByRole("button", { name: "More actions" }));
+		fireEvent.click(bar.getByRole("menuitem", { name: "Reload" }));
 
 		await waitFor(() => {
 			expect(statusReads()).toBe(before + 1);
@@ -2299,8 +2414,8 @@ describe("switching between a file's unstaged and staged changes", () => {
 		});
 		await screen.findByText("Unsaved changes");
 
-		fireEvent.click(screen.getByRole("tab", { name: "Staged" }));
-		fireEvent.click(screen.getByRole("tab", { name: "Unstaged" }));
+		switchSide(container);
+		switchSide(container);
 
 		expect(view?.state.doc.toString()).toBe("edited current\n");
 		expect(screen.getByText("Unsaved changes")).toBeDefined();
@@ -2567,16 +2682,12 @@ describe("the tree of unchanged files", () => {
 		expect(screen.getByTestId("location-search").textContent).toBe(
 			"?path=README.md&staged=false",
 		);
-		expect(
-			screen
-				.getAllByRole("tab")
-				.map((tab) => `${tab.textContent} ${tab.hasAttribute("disabled")}`),
-		).toEqual(["Unstaged false", "Staged true"]);
+		expect(side(container)).toBe("Unstaged (greyed out)");
 		const stageFile = () =>
 			within(editorBar(container)).getByRole("button", {
 				name: "Stage file",
 			}) as HTMLButtonElement;
-		expect(stageFile().disabled).toBe(true);
+		expect(greyed(stageFile())).toBe(true);
 		expect(container.querySelector(".cm-changedLine") === null).toBe(true);
 
 		const { EditorView } = await import("@codemirror/view");
@@ -2591,7 +2702,7 @@ describe("the tree of unchanged files", () => {
 		});
 		const save = await screen.findByRole("button", { name: "Save" });
 		await waitFor(() => {
-			expect(save.hasAttribute("disabled")).toBe(false);
+			expect(greyed(save)).toBe(false);
 		});
 
 		// The edit stays marked from the save until the status arrives.
@@ -2624,7 +2735,7 @@ describe("the tree of unchanged files", () => {
 			answerStatus?.();
 		});
 		await waitFor(() => {
-			expect(stageFile().disabled).toBe(false);
+			expect(greyed(stageFile())).toBe(false);
 		});
 		observer.disconnect();
 		expect(leastMarked).toBeGreaterThan(0);
@@ -2924,7 +3035,7 @@ describe("a directory without git", () => {
 		});
 	});
 
-	test("opens a file in the editor alone, under its path", async () => {
+	test("opens a file in the editor alone, with a bar that names no side", async () => {
 		mockNotGit();
 		const { container } = renderFilesPage(
 			["/files"],
@@ -2942,19 +3053,13 @@ describe("a directory without git", () => {
 		expect(screen.getByTestId("location-search").textContent).toBe(
 			"?path=hello.txt",
 		);
-		expect(container.querySelector(".breadcrumbs")?.textContent).toContain(
-			"hello.txt",
-		);
-		expect(screen.getByRole("button", { name: "Save" })).not.toBeNull();
-		expect(screen.queryByRole("tablist") === null).toBe(true);
-		await waitFor(() => {
-			const more = screen.getByRole("button", { name: "More actions" });
-			expect(
-				container
-					.querySelector(".files-header .files-header-menu")
-					?.contains(more),
-			).toBe(true);
-		});
+		const viewer = container.querySelector(".file-viewer") as HTMLElement;
+		expect(viewer.querySelector("header")).toBeNull();
+		expect(within(viewer).queryByRole("tablist")).toBeNull();
+		expect(
+			barContents(viewer.querySelector(".text-file-editor-bar") as Element),
+		).toEqual(["Back to file tree", "hello.txt", "Save", "More actions"]);
+		expect(viewer.querySelector(".text-file-editor-name-side")).toBeNull();
 	});
 
 	test("says why a file cannot be opened", async () => {

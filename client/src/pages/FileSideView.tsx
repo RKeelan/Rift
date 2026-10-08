@@ -206,7 +206,10 @@ export interface FileSideViewProps extends ChangeContextOptions {
 	// Bumped when the index changes from the other side, as when the working
 	// tree stages lines, so the staged side reloads its content.
 	contentToken: number;
-	menuHost: HTMLElement | null;
+	// Leaves the file, from the bar's Back.
+	onBack: () => void;
+	// The file's other side, which a tap on the file's name switches to.
+	otherSide: { available: boolean; show: () => void };
 	// The page's action on the whole file, for this side.
 	fileAction: (label: string) => FileAction;
 	onSaved: () => void;
@@ -228,7 +231,8 @@ export function FileSideView({
 	canWrite,
 	readOnlyLabel,
 	contentToken,
-	menuHost,
+	onBack,
+	otherSide,
 	fileAction,
 	onSaved,
 	onStaged,
@@ -256,7 +260,9 @@ export function FileSideView({
 					fileAction={fileAction(
 						staged ? "Unstage deletion" : "Stage deletion",
 					)}
-					menuHost={active ? menuHost : null}
+					onBack={onBack}
+					backLabel="Back to file list"
+					otherSide={otherSide}
 				/>
 			) : staged ? (
 				<TextFileEditor
@@ -272,7 +278,9 @@ export function FileSideView({
 					onUnstaged={onUnstaged}
 					onReload={onReload}
 					fileAction={fileAction("Unstage file")}
-					menuHost={active ? menuHost : null}
+					onBack={onBack}
+					backLabel="Back to file list"
+					otherSide={otherSide}
 				/>
 			) : (
 				<TextFileEditor
@@ -292,7 +300,9 @@ export function FileSideView({
 					fileAction={
 						status === "untracked" ? undefined : fileAction("Stage file")
 					}
-					menuHost={active ? menuHost : null}
+					onBack={onBack}
+					backLabel="Back to file list"
+					otherSide={otherSide}
 				/>
 			)}
 		</div>

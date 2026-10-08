@@ -1,4 +1,9 @@
-import { ChevronDown, ChevronUp, EllipsisVertical, X } from "lucide-react";
+import {
+	ArrowLeft,
+	ChevronDown,
+	ChevronUp,
+	EllipsisVertical,
+} from "lucide-react";
 import {
 	useCallback,
 	useEffect,
@@ -6,7 +11,6 @@ import {
 	useState,
 	useSyncExternalStore,
 } from "react";
-import { createPortal } from "react-dom";
 import { apiUrl } from "../apiUrl.ts";
 import {
 	applyDiff,
@@ -828,11 +832,18 @@ export interface TextFileEditorProps {
 	// leaving the file or acting on it from outside the editor.
 	onDirtyChange?: (dirty: boolean) => void;
 	// The page's action on the whole file, such as staging it, offered in the
-	// action bar when no lines are picked or selected.
+	// bar when no lines are picked or selected.
 	fileAction?: FileAction;
-	// Where the editor's menu goes, such as the page's header. Without one, the
-	// menu sits at the start of the action bar.
-	menuHost?: HTMLElement | null;
+	// Leaves the file, from the button at the start of the bar, which
+	// backLabel names.
+	onBack?: () => void;
+	backLabel?: string;
+	// The file's other side, which a tap on the file's name in the bar
+	// switches to: its staged changes from its unstaged ones, or back. The
+	// name is greyed out while that side has nothing to show. A file of a
+	// directory without git has no sides, so its bar names none and has no
+	// buttons to move between changes.
+	otherSide?: { available: boolean; show: () => void };
 }
 
 export function TextFileEditor({
@@ -854,7 +865,9 @@ export function TextFileEditor({
 	onReload,
 	onDirtyChange,
 	fileAction,
-	menuHost,
+	onBack,
+	backLabel = "Back",
+	otherSide,
 }: TextFileEditorProps) {
 	const editorRef = useRef<HTMLDivElement>(null);
 	const viewRef = useRef<import("@codemirror/view").EditorView | null>(null);
@@ -1220,6 +1233,7 @@ export function TextFileEditor({
 		if (content === null || !editorRef.current) return;
 
 		let destroyed = false;
+		let stopFollowingResize = () => {};
 		setEditorReady(false);
 		openedAtChangeRef.current = false;
 
@@ -1743,6 +1757,23 @@ export function TextFileEditor({
 				parent: editorRef.current,
 			});
 			viewRef.current = view;
+			// Chrome on Android shrinks the layout for the on-screen keyboard,
+			// which can leave the cursor's line under the bar. An editor with
+			// focus that shrinks brings the cursor back into view, as typing
+			// there would.
+			let scrollerHeight = view.scrollDOM.clientHeight;
+			const followResize = () => {
+				const height = view.scrollDOM.clientHeight;
+				if (height < scrollerHeight && view.hasFocus) {
+					view.dispatch({
+						effects: EditorView.scrollIntoView(view.state.selection.main.head),
+					});
+				}
+				scrollerHeight = height;
+			};
+			window.addEventListener("resize", followResize);
+			stopFollowingResize = () =>
+				window.removeEventListener("resize", followResize);
 			refreshDecorationsRef.current = () => {
 				view.dispatch({ effects: refreshChangeDecorations.of() });
 			};
@@ -1852,6 +1883,7 @@ export function TextFileEditor({
 
 		return () => {
 			destroyed = true;
+			stopFollowingResize();
 			setEditorReady(false);
 			refreshDecorationsRef.current = null;
 			applyLineWrapRef.current = null;
@@ -2293,16 +2325,24 @@ export function TextFileEditor({
 				? "Unstaging..."
 				: "Staging..."
 			: `${staged ? "Unstage" : "Stage"} ${lines}`;
+	// An untracked file stages whole through the editor itself when the page
+	// offers no action on the whole file.
 	const wholeFileAction: FileAction | undefined =
 		fileAction ??
-		(!readOnly && !staged && !deleted && onStaged && changeType === "untracked"
+		(!staged && !deleted && onStaged && changeType === "untracked"
 			? {
 					label: staging ? "Staging..." : "Stage file",
 					onClick: () => {
 						void handleStage("file");
 					},
 					// An empty file marks no lines, but still stages.
-					disabled: loading || saving || staging || dirty || draftOfferPending,
+					disabled:
+						readOnly ||
+						loading ||
+						saving ||
+						staging ||
+						dirty ||
+						draftOfferPending,
 				}
 			: undefined);
 	// The page's action on the whole file waits on the editor too, as the
@@ -2320,54 +2360,49 @@ export function TextFileEditor({
 			: dirty
 				? "Unsaved changes"
 				: null;
-
-	const menu = (
-		<div className="text-file-editor-menu" ref={menuRef}>
-			<button
-				type="button"
-				className="text-file-editor-button text-file-editor-button--icon"
-				onClick={() => setMenuOpen((open) => !open)}
-				aria-haspopup="menu"
-				aria-expanded={menuOpen}
-				aria-label="More actions"
-				title="More actions"
-			>
-				<EllipsisVertical size={20} aria-hidden="true" />
-			</button>
-			{menuOpen && (
-				<div className="text-file-editor-menu-list" role="menu">
-					<button
-						type="button"
-						role="menuitemcheckbox"
-						aria-checked={lineWrap}
-						className="text-file-editor-menu-item"
-						onClick={() => {
-							setMenuOpen(false);
-							toggleLineWrap();
-						}}
-					>
-						Wrap lines
-					</button>
-					<button
-						type="button"
-						role="menuitem"
-						className="text-file-editor-menu-item"
-						disabled={loading || saving}
-						onClick={() => {
-							setMenuOpen(false);
-							handleReload();
-						}}
-					>
-						Reload
-					</button>
-				</div>
-			)}
-		</div>
-	);
+	const mismatchTitle = gitDiffMismatch
+		? "Git's diff doesn't match this file"
+		: undefined;
+	// The bar's main action: Save while there are unsaved edits, Stage or
+	// Unstage for the picked lines or else a selection that covers a change,
+	// and otherwise the action on the whole file. The working tree offers Save
+	// greyed out when there is nothing else, and a side without even that keeps
+	// the action's place empty.
+	const mainAction: FileAction | null =
+		dirty && editable
+			? {
+					label: saving ? "Saving..." : "Save",
+					onClick: () => {
+						void handleSave();
+					},
+					disabled: loading || saving || mtimeMs === null,
+				}
+			: showPicks || showSelection
+				? {
+						label: lineActionLabel(
+							showPicks ? describeLineCount(pickedCount) : "selection",
+						),
+						onClick: runLineAction,
+						disabled: lineActionDisabled,
+						title: mismatchTitle,
+					}
+				: wholeFileAction
+					? {
+							...wholeFileAction,
+							disabled: wholeFileAction.disabled || fileActionBlocked,
+						}
+					: !staged && !deleted
+						? { label: "Save", onClick: () => {}, disabled: true }
+						: null;
+	// Nothing in the bar moves sideways: the name takes whatever room is left,
+	// and the main action keeps one width whatever it says. A control that
+	// does not apply is greyed out, and marked rather than made disabled, so a
+	// tap on it still takes focus from the editor instead of raising the
+	// keyboard.
+	const fileName = filePath.slice(filePath.lastIndexOf("/") + 1);
 
 	return (
 		<div className="text-file-editor">
-			{menuHost && createPortal(menu, menuHost)}
 			{loading && <div className="text-file-editor-message">Loading...</div>}
 			{error && <div className="text-file-editor-error">{error}</div>}
 			{draftNotKept && (
@@ -2415,104 +2450,135 @@ export function TextFileEditor({
 				/>
 			)}
 			<div className="text-file-editor-bar">
-				{!menuHost && menu}
-				{showPicks && (
+				{onBack && (
 					<button
 						type="button"
-						className="text-file-editor-button text-file-editor-button--icon"
-						onClick={() => pickerRef.current?.clear()}
-						aria-label="Clear picks"
-						title="Clear picks"
+						className="text-file-editor-bar-button text-file-editor-back"
+						onClick={onBack}
+						aria-label={backLabel}
+						title={backLabel}
 					>
-						<X size={20} aria-hidden="true" />
+						<ArrowLeft size={22} aria-hidden="true" />
 					</button>
 				)}
-				<span className="text-file-editor-status">{barStatus}</span>
-				{changeCount > 0 && (
+				{otherSide ? (
+					<button
+						type="button"
+						className="text-file-editor-name"
+						onClick={() => {
+							if (otherSide.available) otherSide.show();
+						}}
+						aria-disabled={!otherSide.available}
+					>
+						<span className="text-file-editor-name-file">{fileName}</span>
+						<span className="text-file-editor-name-side">
+							{staged ? "Staged" : "Unstaged"}
+							<span className="text-file-editor-status">{barStatus}</span>
+						</span>
+					</button>
+				) : (
+					<span className="text-file-editor-name">
+						<span className="text-file-editor-name-file">{fileName}</span>
+					</span>
+				)}
+				{otherSide && (
 					<>
 						<button
 							type="button"
-							className="text-file-editor-button text-file-editor-button--icon"
-							onClick={() => goToChange(-1)}
+							className="text-file-editor-bar-button"
+							onClick={() => {
+								if (changeCount > 0) goToChange(-1);
+							}}
+							aria-disabled={changeCount === 0}
 							aria-label="Previous change"
 							title="Previous change"
 						>
-							<ChevronUp size={20} aria-hidden="true" />
+							<ChevronUp size={22} aria-hidden="true" />
 						</button>
 						<button
 							type="button"
-							className="text-file-editor-button text-file-editor-button--icon"
-							onClick={() => goToChange(1)}
+							className="text-file-editor-bar-button"
+							onClick={() => {
+								if (changeCount > 0) goToChange(1);
+							}}
+							aria-disabled={changeCount === 0}
 							aria-label="Next change"
 							title="Next change"
 						>
-							<ChevronDown size={20} aria-hidden="true" />
+							<ChevronDown size={22} aria-hidden="true" />
 						</button>
 					</>
 				)}
-				{dirty && editable ? (
+				{mainAction ? (
 					<button
 						type="button"
-						className="text-file-editor-button text-file-editor-button--primary"
-						onClick={handleSave}
-						disabled={loading || saving || mtimeMs === null}
+						className="text-file-editor-action"
+						onClick={() => {
+							if (!mainAction.disabled) mainAction.onClick();
+						}}
+						aria-disabled={Boolean(mainAction.disabled)}
+						title={mainAction.title}
 					>
-						{saving ? "Saving..." : "Save"}
-					</button>
-				) : showPicks ? (
-					<button
-						type="button"
-						className="text-file-editor-button text-file-editor-button--primary"
-						onClick={runLineAction}
-						disabled={lineActionDisabled}
-						title={
-							gitDiffMismatch ? "Git's diff doesn't match this file" : undefined
-						}
-					>
-						{lineActionLabel(describeLineCount(pickedCount))}
+						{mainAction.label}
 					</button>
 				) : (
-					<>
-						{showSelection && (
+					<span className="text-file-editor-action text-file-editor-action--empty" />
+				)}
+				<div className="text-file-editor-menu" ref={menuRef}>
+					<button
+						type="button"
+						className="text-file-editor-bar-button"
+						onClick={() => setMenuOpen((open) => !open)}
+						aria-haspopup="menu"
+						aria-expanded={menuOpen}
+						aria-label="More actions"
+						title="More actions"
+					>
+						<EllipsisVertical size={22} aria-hidden="true" />
+					</button>
+					{menuOpen && (
+						<div className="text-file-editor-menu-list" role="menu">
 							<button
 								type="button"
-								className="text-file-editor-button text-file-editor-button--primary"
-								onClick={runLineAction}
-								disabled={lineActionDisabled}
-								title={
-									gitDiffMismatch
-										? "Git's diff doesn't match this file"
-										: undefined
-								}
+								role="menuitemcheckbox"
+								aria-checked={lineWrap}
+								className="text-file-editor-menu-item"
+								onClick={() => {
+									setMenuOpen(false);
+									toggleLineWrap();
+								}}
 							>
-								{lineActionLabel("selection")}
+								Wrap lines
 							</button>
-						)}
-						{wholeFileAction ? (
 							<button
 								type="button"
-								className={`text-file-editor-button${
-									showSelection ? "" : " text-file-editor-button--primary"
-								}`}
-								onClick={wholeFileAction.onClick}
-								disabled={wholeFileAction.disabled || fileActionBlocked}
-								title={wholeFileAction.title}
+								role="menuitem"
+								className="text-file-editor-menu-item"
+								disabled={loading || saving}
+								onClick={() => {
+									setMenuOpen(false);
+									handleReload();
+								}}
 							>
-								{wholeFileAction.label}
+								Reload
 							</button>
-						) : (
-							editable && (
+							{lineActionAvailable && (
 								<button
 									type="button"
-									className="text-file-editor-button text-file-editor-button--primary"
-									disabled
+									role="menuitem"
+									className="text-file-editor-menu-item"
+									disabled={pickedCount === 0}
+									onClick={() => {
+										setMenuOpen(false);
+										pickerRef.current?.clear();
+									}}
 								>
-									Save
+									Clear picks
 								</button>
-							)
-						)}
-					</>
-				)}
+							)}
+						</div>
+					)}
+				</div>
 			</div>
 		</div>
 	);

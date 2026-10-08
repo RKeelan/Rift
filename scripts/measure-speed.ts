@@ -1003,7 +1003,7 @@ class Client {
 			"back to the list",
 			{ done: `document.querySelector(${js(`${LIST} .changes-file-row`)})` },
 			await this.point(
-				`document.querySelector('[aria-label="Back to file list"]')`,
+				`document.querySelector(${js(`${ACTIVE} [aria-label="Back to file list"]`)})`,
 			),
 			record,
 		);
@@ -1031,8 +1031,9 @@ class Client {
 	}
 
 	// Stages the first change from its strip, timed until the strip has gone
-	// and the editor's other strips are ready again. With the switch, the
-	// Staged tab becoming available shows that the status has caught up.
+	// and the editor's other strips are ready again. With sides to switch
+	// between, the file's name no longer being greyed out shows that the
+	// status has caught up.
 	async stageFromStrip() {
 		const button = `document.querySelector(${js(`${ACTIVE} ${ENABLED_STRIP}`)})`;
 		const point = await this.point(button);
@@ -1043,30 +1044,31 @@ class Client {
 			done: `!document.querySelector(${js(`${ACTIVE} .cm-changeStrip[data-start="${start}"]`)}) && !document.querySelector(${js(`${ACTIVE} ${DISABLED_STRIP}`)})`,
 		};
 		if (await this.hasSwitch()) {
-			conditions.status = `!${this.tab("Staged")}.disabled`;
+			conditions.status = `${this.sideSwitch()}.getAttribute("aria-disabled") === "false"`;
 		}
 		await this.measure("stage a change from its strip", conditions, point);
 	}
 
-	private tab(label: string) {
-		return `[...document.querySelectorAll(".changes-view-switch [role=tab]")].find((tab) => tab.textContent.trim() === ${js(label)})`;
+	// The file's name in the bar on screen, which switches to its other side.
+	private sideSwitch() {
+		return `document.querySelector(${js(`${ACTIVE} button.text-file-editor-name`)})`;
 	}
 
 	hasSwitch() {
-		return this.browser.evaluate<boolean>(
-			`Boolean(document.querySelector(".changes-view-switch"))`,
-		);
+		return this.browser.evaluate<boolean>(`Boolean(${this.sideSwitch()})`);
 	}
 
-	// Moves between the file's unstaged and staged changes, timed until the
-	// other view shows and none of its strips is waiting.
+	// Moves between the file's unstaged and staged changes from its name,
+	// timed until the other view shows, named for its side, and none of its
+	// strips is waiting.
 	async flip(label: "Staged" | "Unstaged") {
+		const side = `document.querySelector(${js(`${ACTIVE} .text-file-editor-name-side`)})?.firstChild?.textContent`;
 		await this.measure(
 			`switch to ${label}`,
 			{
-				done: `${this.tab(label)}.getAttribute("aria-selected") === "true" && document.querySelector(${js(`${ACTIVE} .cm-line`)}) && !document.querySelector(${js(`${ACTIVE} ${DISABLED_STRIP}`)})`,
+				done: `${side} === ${js(label)} && document.querySelector(${js(`${ACTIVE} .cm-line`)}) && !document.querySelector(${js(`${ACTIVE} ${DISABLED_STRIP}`)})`,
 			},
-			await this.point(this.tab(label)),
+			await this.point(this.sideSwitch()),
 		);
 	}
 
@@ -1089,7 +1091,7 @@ class Client {
 	}
 
 	private saveButton() {
-		return `[...document.querySelectorAll(${js(`${ACTIVE} .text-file-editor-button`)})].find((button) => /^Sav/.test(button.textContent))`;
+		return `[...document.querySelectorAll(${js(`${ACTIVE} .text-file-editor-action`)})].find((button) => /^Sav/.test(button.textContent))`;
 	}
 
 	// Types a character at the end of the line under the first strip and saves
