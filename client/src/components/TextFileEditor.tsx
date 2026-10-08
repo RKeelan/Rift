@@ -661,6 +661,56 @@ const insertNewline: import("@codemirror/state").StateCommand = ({
 	return true;
 };
 
+// A line's list and quote markup, such as `*`, `1.`, `>` or `> - [ ]`, without
+// the spaces that end it.
+const LINE_MARKUP = /^(?:[ \t]*(?:>|[-+*]|\d+[.)]))+(?:[ \t]+\[[ xX]\])?$/;
+
+/**
+ * Markdown's binding for Enter, which continues a list or a quote on the new
+ * line. It trims the spaces before the cursor, so a line split mid-text is
+ * left with no trailing space, but just after a line's markup those spaces
+ * belong to the markup: Enter just after `* ` in `* text` leaves an empty `* `
+ * item above `* text`, not `*`.
+ */
+function continueMarkup(
+	insertNewlineContinueMarkup: import("@codemirror/state").StateCommand,
+): import("@codemirror/state").StateCommand {
+	return ({ state, dispatch }) => {
+		if (state.readOnly) return false;
+		const { head } = state.selection.main;
+		const line = state.doc.lineAt(head);
+		const before = line.text.slice(0, head - line.from);
+		const spaces = /[ \t]*$/.exec(before)?.[0] ?? "";
+		const from = head - spaces.length;
+		if (spaces === "" || !LINE_MARKUP.test(before.slice(0, from - line.from))) {
+			return insertNewlineContinueMarkup({ state, dispatch });
+		}
+		return insertNewlineContinueMarkup({
+			state,
+			dispatch: (transaction) => {
+				let trimmed = false;
+				transaction.changes.iterChanges((fromA, toA) => {
+					if (fromA === from && toA === head) trimmed = true;
+				});
+				// The spaces go back after the markup, ahead of the line break.
+				dispatch(
+					trimmed
+						? state.update(
+								{
+									changes: transaction.changes,
+									selection: transaction.selection,
+									scrollIntoView: true,
+									userEvent: "input",
+								},
+								{ changes: { from, insert: spaces }, sequential: true },
+							)
+						: transaction,
+				);
+			},
+		});
+	};
+}
+
 type LanguageLoader = () => Promise<
 	import("@codemirror/language").LanguageSupport
 >;
@@ -697,8 +747,32 @@ function getLanguageLoader(filename: string): LanguageLoader | null {
 		case "md":
 		case "markdown":
 			return async () => {
-				const { markdown } = await import("@codemirror/lang-markdown");
-				return markdown();
+				const { insertNewlineContinueMarkupCommand, markdown } = await import(
+					"@codemirror/lang-markdown"
+				);
+				const { LanguageSupport } = await import("@codemirror/language");
+				const { Prec } = await import("@codemirror/state");
+				const { keymap } = await import("@codemirror/view");
+				// Markdown's own keymap also binds Backspace, to delete list and
+				// quote markup a level at a time, so it is left out and Backspace
+				// deletes one character, as it does everywhere else. Its Enter
+				// runs ahead of the editor's own. Enter in an empty item ends the
+				// list, the second item of a two-item list included, where by
+				// default it would put a blank line above that item instead.
+				const { language, support } = markdown({ addKeymap: false });
+				return new LanguageSupport(language, [
+					support,
+					Prec.high(
+						keymap.of([
+							{
+								key: "Enter",
+								run: continueMarkup(
+									insertNewlineContinueMarkupCommand({ nonTightLists: false }),
+								),
+							},
+						]),
+					),
+				]);
 			};
 		case "css":
 		case "scss":
@@ -875,6 +949,14 @@ export function TextFileEditor({
 	const applyLineWrapRef = useRef<((wrap: boolean) => void) | null>(null);
 	const scrollToLineRef = useRef<((lineNumber: number) => void) | null>(null);
 	const replaceDocRef = useRef<((text: string) => void) | null>(null);
+	// Undo and Redo in the menu reach the editor's history through this, and
+	// are greyed out while it holds nothing to undo or redo.
+	const historyCommandsRef = useRef<{
+		undo: () => void;
+		redo: () => void;
+	} | null>(null);
+	const [canUndo, setCanUndo] = useState(false);
+	const [canRedo, setCanRedo] = useState(false);
 	const originalContentRef = useRef("");
 	const lineSeparatorRef = useRef<"\r\n" | "\n">("\n");
 	// Anchor lines of the current change regions and the last one we jumped to,
@@ -883,8 +965,7 @@ export function TextFileEditor({
 	const changeCountRef = useRef(0);
 	const lastNavLineRef = useRef(0);
 	const [changeCount, setChangeCount] = useState(0);
-	// Whether the editor view is built and has its language, which replaces its
-	// state, so a position set before then would be lost.
+	// Whether the editor view is built.
 	const [editorReady, setEditorReady] = useState(false);
 	// Whether this view has been moved to the file's first change yet.
 	const openedAtChangeRef = useRef(false);
@@ -1238,7 +1319,7 @@ export function TextFileEditor({
 		openedAtChangeRef.current = false;
 
 		(async () => {
-			const { Compartment, EditorState, StateEffect, StateField } =
+			const { Compartment, EditorState, StateEffect, StateField, Transaction } =
 				await import("@codemirror/state");
 			const {
 				Decoration,
@@ -1252,6 +1333,8 @@ export function TextFileEditor({
 			const { HighlightStyle, syntaxHighlighting } = await import(
 				"@codemirror/language"
 			);
+			const { history, historyKeymap, redo, redoDepth, undo, undoDepth } =
+				await import("@codemirror/commands");
 			const { tags: t } = await import("@lezer/highlight");
 			const {
 				clearPickedLines,
@@ -1632,6 +1715,7 @@ export function TextFileEditor({
 			const lineWrapCompartment = new Compartment();
 			const linePickingCompartment = new Compartment();
 			const draftLockCompartment = new Compartment();
+			const languageCompartment = new Compartment();
 			const draftLock = [
 				EditorView.editable.of(false),
 				EditorState.readOnly.of(true),
@@ -1694,6 +1778,14 @@ export function TextFileEditor({
 						);
 					}
 				}),
+				// An answer that hasn't changed re-renders nothing, so typing
+				// re-renders only when Undo or Redo turns on or off.
+				EditorView.updateListener.of((update) => {
+					if (update.transactions.length === 0) return;
+					setCanUndo(undoDepth(update.state) > 0);
+					setCanRedo(redoDepth(update.state) > 0);
+				}),
+				languageCompartment.of([]),
 				EditorView.theme({
 					"&": {
 						// Material's body text size for Android.
@@ -1745,6 +1837,20 @@ export function TextFileEditor({
 				baseExtensions.unshift(
 					EditorView.editable.of(false),
 					EditorState.readOnly.of(true),
+				);
+			} else {
+				// Every load builds a new editor, so text that comes from disk is
+				// never a step that can be undone, and neither is anything typed
+				// before it.
+				baseExtensions.push(
+					history(),
+					keymap.of([
+						// historyKeymap binds Mod-Shift-z on macOS and Ctrl-Shift-z on
+						// Linux, Android included, but neither on Windows. This one,
+						// ahead of it, redoes on every platform.
+						{ key: "Mod-Shift-z", run: redo, preventDefault: true },
+						...historyKeymap,
+					]),
 				);
 			}
 
@@ -1833,41 +1939,36 @@ export function TextFileEditor({
 					effects: EditorView.scrollIntoView(pos, { y: "center" }),
 				});
 			};
+			// Text put in place of the buffer's, a restored draft or the index
+			// after an unstage, is where the history starts, as a loaded file is,
+			// so Undo cannot go back past it. Nothing comes before it: a draft is
+			// offered only for a buffer without edits, which stays locked until
+			// the offer is answered, and a staged view keeps no history.
 			replaceDocRef.current = (text: string) => {
 				view.dispatch({
 					changes: getLineChanges(view.state.doc.toString(), text),
+					annotations: Transaction.addToHistory.of(false),
 				});
 			};
+			historyCommandsRef.current = {
+				undo: () => undo(view),
+				redo: () => redo(view),
+			};
+			setEditorReady(true);
 
 			const loader = getLanguageLoader(filePath);
 			if (loader) {
 				try {
 					const langSupport = await loader();
 					if (destroyed || viewRef.current !== view) return;
-					const picks = view.state.field(pickedLines);
-					view.setState(
-						EditorState.create({
-							doc: view.state.doc.toString(),
-							extensions: [...baseExtensions, langSupport],
-						}),
-					);
-					// The fresh state reverts to the settings captured when the
-					// extensions were built, so re-apply whatever is current now, and
-					// keep any lines picked while the language loaded.
-					applyLineWrapRef.current(lineWrapRef.current);
-					applyLinePickingRef.current(linePickingEnabledRef.current);
-					applyDraftLockRef.current(draftOfferRef.current !== null);
-					if (picks.size > 0) {
-						view.dispatch({
-							effects: [...picks].map((line) => togglePickedLine.of(line)),
-						});
-					}
+					// Added in place, so whatever was typed, picked or set while it
+					// loaded is kept, the history included.
+					view.dispatch({
+						effects: languageCompartment.reconfigure(langSupport),
+					});
 				} catch {
 					// Plain text is fine if language support fails.
 				}
-			}
-			if (!destroyed && viewRef.current === view) {
-				setEditorReady(true);
 			}
 		})().catch((cause: unknown) => {
 			// CodeMirror arrives through dynamic imports, so a chunk that fails
@@ -1892,9 +1993,12 @@ export function TextFileEditor({
 			applyDraftLockRef.current = null;
 			scrollToLineRef.current = null;
 			replaceDocRef.current = null;
+			historyCommandsRef.current = null;
 			pickerRef.current = null;
 			setPickedCount(0);
 			setSelectionCoversChange(false);
+			setCanUndo(false);
+			setCanRedo(false);
 			if (viewRef.current) {
 				viewRef.current.destroy();
 				viewRef.current = null;
@@ -1927,9 +2031,9 @@ export function TextFileEditor({
 		return () => document.removeEventListener("pointerdown", closeOutside);
 	}, [menuOpen]);
 
-	// A file opens at its first change rather than at its top, once the view has
-	// its language and the change context has placed the changes. A reader who
-	// has already moved the cursor or scrolled is left where they are.
+	// A file opens at its first change rather than at its top, once the view is
+	// built and the change context has placed the changes. A reader who has
+	// already moved the cursor or scrolled is left where they are.
 	useEffect(() => {
 		const view = viewRef.current;
 		if (!editorReady || changeCount === 0 || !view) return;
@@ -2538,6 +2642,30 @@ export function TextFileEditor({
 					</button>
 					{menuOpen && (
 						<div className="text-file-editor-menu-list" role="menu">
+							<button
+								type="button"
+								role="menuitem"
+								className="text-file-editor-menu-item"
+								disabled={!canUndo}
+								onClick={() => {
+									setMenuOpen(false);
+									historyCommandsRef.current?.undo();
+								}}
+							>
+								Undo
+							</button>
+							<button
+								type="button"
+								role="menuitem"
+								className="text-file-editor-menu-item"
+								disabled={!canRedo}
+								onClick={() => {
+									setMenuOpen(false);
+									historyCommandsRef.current?.redo();
+								}}
+							>
+								Redo
+							</button>
 							<button
 								type="button"
 								role="menuitemcheckbox"
