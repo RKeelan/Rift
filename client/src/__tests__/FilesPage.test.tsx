@@ -1189,9 +1189,9 @@ describe("FilesPage", () => {
 		expect(barContents(editorBar(container))).toEqual([
 			"Back to file list",
 			"app.ts",
+			"Stage file",
 			"Previous change",
 			"Next change",
-			"Stage file",
 			"More actions",
 		]);
 
@@ -1295,9 +1295,9 @@ describe("FilesPage", () => {
 				expect(barContents(editorBar(container))).toEqual([
 					"Back to file list",
 					"app.ts",
+					kind.action,
 					"Previous change",
 					"Next change",
-					kind.action,
 					"More actions",
 				]);
 			});

@@ -2585,6 +2585,21 @@ export function TextFileEditor({
 						<span className="text-file-editor-name-file">{fileName}</span>
 					</span>
 				)}
+				{mainAction ? (
+					<button
+						type="button"
+						className="text-file-editor-action"
+						onClick={() => {
+							if (!mainAction.disabled) mainAction.onClick();
+						}}
+						aria-disabled={Boolean(mainAction.disabled)}
+						title={mainAction.title}
+					>
+						{mainAction.label}
+					</button>
+				) : (
+					<span className="text-file-editor-action text-file-editor-action--empty" />
+				)}
 				{otherSide && (
 					<>
 						<button
@@ -2612,21 +2627,6 @@ export function TextFileEditor({
 							<ChevronDown size={22} aria-hidden="true" />
 						</button>
 					</>
-				)}
-				{mainAction ? (
-					<button
-						type="button"
-						className="text-file-editor-action"
-						onClick={() => {
-							if (!mainAction.disabled) mainAction.onClick();
-						}}
-						aria-disabled={Boolean(mainAction.disabled)}
-						title={mainAction.title}
-					>
-						{mainAction.label}
-					</button>
-				) : (
-					<span className="text-file-editor-action text-file-editor-action--empty" />
 				)}
 				<div className="text-file-editor-menu" ref={menuRef}>
 					<button

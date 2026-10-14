@@ -2633,9 +2633,9 @@ describe("bar", () => {
 		expect(barButtons(container)).toEqual([
 			"Back to file list",
 			"notes.txt",
+			"Stage file",
 			"Previous change",
 			"Next change",
-			"Stage file",
 			"More actions",
 		]);
 		expect(barStatus(container)).toBe("");
@@ -2718,9 +2718,9 @@ describe("bar", () => {
 
 		expect(barButtons(container)).toEqual([
 			"notes.txt",
+			"Save",
 			"Previous change",
 			"Next change",
-			"Save",
 			"More actions",
 		]);
 		const save = screen.getByRole("button", { name: "Save" });
@@ -2738,9 +2738,9 @@ describe("bar", () => {
 
 		expect(barButtons(container)).toEqual([
 			"notes.txt",
+			"",
 			"Previous change",
 			"Next change",
-			"",
 			"More actions",
 		]);
 		expect(action(container).tagName).toBe("SPAN");
@@ -2757,9 +2757,9 @@ describe("bar", () => {
 
 		expect(barButtons(container)).toEqual([
 			"notes.txt",
+			"Stage file",
 			"Previous change",
 			"Next change",
-			"Stage file",
 			"More actions",
 		]);
 	});
@@ -2774,9 +2774,9 @@ describe("bar", () => {
 		await enabledButton("Stage selection");
 		expect(barButtons(container)).toEqual([
 			"notes.txt",
+			"Stage selection",
 			"Previous change",
 			"Next change",
-			"Stage selection",
 			"More actions",
 		]);
 
@@ -2784,9 +2784,9 @@ describe("bar", () => {
 		selectLines(view, 3);
 		expect(barButtons(container)).toEqual([
 			"notes.txt",
+			"Stage file",
 			"Previous change",
 			"Next change",
-			"Stage file",
 			"More actions",
 		]);
 	});
@@ -2807,9 +2807,9 @@ describe("bar", () => {
 		await enabledButton("Stage 2 lines");
 		expect(barButtons(container)).toEqual([
 			"notes.txt",
+			"Stage 2 lines",
 			"Previous change",
 			"Next change",
-			"Stage 2 lines",
 			"More actions",
 		]);
 
@@ -2820,9 +2820,9 @@ describe("bar", () => {
 		await waitFor(() => {
 			expect(barButtons(container)).toEqual([
 				"notes.txt",
+				"Stage file",
 				"Previous change",
 				"Next change",
-				"Stage file",
 				"More actions",
 			]);
 		});
@@ -2883,9 +2883,9 @@ describe("bar", () => {
 		expect(barStatus(container)).toBe("Unsaved changes");
 		expect(barButtons(container)).toEqual([
 			"notes.txt",
+			"Save",
 			"Previous change",
 			"Next change",
-			"Save",
 			"More actions",
 		]);
 	});
