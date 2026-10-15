@@ -1871,6 +1871,52 @@ describe("line picking", () => {
 		});
 	});
 
+	test("leaves a cursor at the end of the selection once the picked lines are staged", async () => {
+		const { container, view, requests } = await renderForPicking();
+		selectLines(view, 1, 2);
+		await tap(container, 4);
+
+		fireEvent.click(await enabledButton("Stage 1 line"));
+
+		await waitFor(() => {
+			expect(view.state.selection.main.empty).toBe(true);
+		});
+		expect(view.state.selection.main.head).toBe(view.state.doc.line(2).to);
+		expect(requests[0]).toEqual({ path: "notes.txt", ranges: [[4, 4]] });
+		// The selected change, which the picks left out, is not offered next.
+		expect(
+			screen.queryByRole("button", { name: "Stage selection" }),
+		).toBeNull();
+	});
+
+	test("leaves the picks and the selection when the picked lines fail to stage", async () => {
+		const { container, view } = await renderForPicking();
+		selectLines(view, 1, 2);
+		const selection = view.state.selection;
+		await tap(container, 4);
+
+		const load = globalThis.fetch;
+		globalThis.fetch = (async (input: string, init?: RequestInit) => {
+			if (init?.method !== "POST") return load(input, init);
+			return new Response(
+				JSON.stringify({
+					error: {
+						code: "DIFF_CHANGED",
+						message: "The diff changed since it was read",
+					},
+				}),
+				{ status: 409, headers: { "Content-Type": "application/json" } },
+			);
+		}) as unknown as typeof fetch;
+		fireEvent.click(await enabledButton("Stage 1 line"));
+
+		await screen.findByText(
+			"The file changed since it was loaded. Reload before staging.",
+		);
+		expect(view.state.selection.eq(selection)).toBe(true);
+		expect(await enabledButton("Stage 1 line")).toBeDefined();
+	});
+
 	test("names the diff the picked lines come from", async () => {
 		const blobs = `${"a".repeat(40)}..${"b".repeat(40)}`;
 		const { container, requests } = await renderForPicking(
@@ -2310,6 +2356,27 @@ describe("line picking", () => {
 		expect(requests[0]).toEqual({ path: "notes.txt", ranges: [[4, 4]] });
 	});
 
+	test("leaves a cursor at the end of the selection once the picked lines are unstaged", async () => {
+		const { container, view, requests } = await renderForPicking({
+			staged: true,
+			onStaged: undefined,
+			onUnstaged: () => {},
+		});
+		selectLines(view, 1, 2);
+		await tap(container, 4);
+
+		fireEvent.click(await enabledButton("Unstage 1 line"));
+
+		await waitFor(() => {
+			expect(view.state.selection.main.empty).toBe(true);
+		});
+		expect(view.state.selection.main.head).toBe(view.state.doc.line(2).to);
+		expect(requests[0]).toEqual({ path: "notes.txt", ranges: [[4, 4]] });
+		expect(
+			screen.queryByRole("button", { name: "Unstage selection" }),
+		).toBeNull();
+	});
+
 	test("offers no Unstage for the unseen cursor's line, only for a pick", async () => {
 		const { container, view } = await renderForPicking({
 			staged: true,
@@ -2509,6 +2576,24 @@ describe("change strips", () => {
 		});
 		expect(requests[0].body).toEqual({ path: "notes.txt", ranges: [[2, 2]] });
 		expect(await enabledButton("Stage 1 line")).toBeDefined();
+	});
+
+	test("leaves the selection as it is", async () => {
+		let staged = 0;
+		const { view } = await renderWithStrips({
+			onStaged: () => {
+				staged += 1;
+			},
+		});
+		selectLines(view, 1, 2);
+		const selection = view.state.selection;
+
+		fireEvent.click(await enabledButton("Stage the change at line 5"));
+
+		await waitFor(() => {
+			expect(staged).toBe(1);
+		});
+		expect(view.state.selection.eq(selection)).toBe(true);
 	});
 
 	test("follows its change when the context is refetched", async () => {
