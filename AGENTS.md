@@ -5,6 +5,7 @@ Read `README.md` first for the product overview, environment behaviour, and the 
 ## Repository Guidance
 
 - Give every endpoint that changes a file or a repo a method other than `GET`, `HEAD`, or `OPTIONS`. The `RIFT_ALLOW_WRITES` switch refuses requests by method, so a mutating `GET` would bypass it.
+- Put a rule that the server and the client must both follow, such as which line a deleted line is staged with, in the `shared` workspace rather than writing it twice. Its package exports its TypeScript source, which Bun, Vite and tsx load directly, so nothing in it has to be built before the tests or the dev servers run.
 - Validate API changes with tests, and UI changes in the real client on Android (see Testing on Android).
 - Hold every change to the speed requirements, and measure one that could slow an interaction (see Speed requirements).
 - Run `bun run lint`, `bun run format:check`, and `bun test` before handing work off.

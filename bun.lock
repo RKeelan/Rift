@@ -53,6 +53,7 @@
       "version": "0.1.0",
       "dependencies": {
         "express": "5.2.1",
+        "shared": "workspace:*",
         "simple-git": "4.0.2",
       },
       "devDependencies": {

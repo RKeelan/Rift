@@ -7,6 +7,7 @@ import {
 	lineNumbers,
 	type WidgetType,
 } from "@codemirror/view";
+import { deletionStagingLine } from "shared";
 import { swallowPressInEditor } from "../onScreenKeyboard.ts";
 
 /**
@@ -16,34 +17,74 @@ import { swallowPressInEditor } from "../onScreenKeyboard.ts";
  * keyboard that pops up over the buffer.
  *
  * A pick is a 1-based line number in the editor's document, which is the file
- * git diffed, so picks go to the server unchanged as `ranges`. A deletion has
- * no line of its own: it is picked through its anchor, the line just below it,
- * which is also the line the server's partial patch stages it with.
+ * git diffed, so picks go to the server unchanged as `ranges`. A deleted line
+ * has no line of its own: it is picked through the line the server's partial
+ * patch stages it with, by the rule in `deletionStagingLine`. In a modified
+ * run that is the added line in its place, and for a pure deletion the line
+ * just below it.
  */
+
+/** A chunk of deleted lines, drawn in front of line `anchorIndex + 1`. */
+interface DeletedChunkShape {
+	anchorIndex: number;
+	/** How many lines its change adds, from the line it sits in front of. */
+	added: number;
+	lines: readonly string[];
+}
 
 interface ChangeShape {
 	lineHighlights: readonly { kind: "added" | "deleted"; lineNumber: number }[];
-	deletedChunks: readonly { anchorIndex: number; lines: readonly string[] }[];
+	deletedChunks: readonly DeletedChunkShape[];
 }
 
 /** The lines a pick can name, derived from the editor's change decorations. */
 export interface PickTargets {
 	/** Added or modified lines, each picked through its own gutter cell. */
 	lines: ReadonlySet<number>;
-	/** Each deletion's anchor line, mapped to the number of lines it removes. */
+	/**
+	 * Each line that deleted lines are picked through, mapped to the number of
+	 * deleted lines that go with it.
+	 */
 	deletions: ReadonlyMap<number, number>;
 }
 
 /**
- * The line a deletion is picked and staged with: the line below it. A deletion
- * at the end of a file without a trailing newline has no line below, and git
- * reports the last line as modified there, so it anchors to that last line.
+ * The line each of a chunk's deleted lines is picked and staged with. A
+ * deletion at the end of a file without a trailing newline has no line below,
+ * and git reports the last line as modified there, so it goes with that last
+ * line.
  */
-export function deletionAnchorLine(
-	chunk: { anchorIndex: number },
+export function deletionPickLines(
+	chunk: DeletedChunkShape,
 	docLines: number,
-): number {
-	return Math.min(chunk.anchorIndex + 1, docLines);
+): number[] {
+	return chunk.lines.map((_line, index) =>
+		Math.min(
+			deletionStagingLine(index, chunk.added, chunk.anchorIndex + 1),
+			docLines,
+		),
+	);
+}
+
+/**
+ * Splits a chunk's deleted lines into runs that are picked through the same
+ * line, as `[from, to)` offsets into its lines. Each run is drawn with a pick
+ * target of its own.
+ */
+export function deletionPickGroups(
+	chunk: DeletedChunkShape,
+	docLines: number,
+): { pickLine: number; from: number; to: number }[] {
+	const groups: { pickLine: number; from: number; to: number }[] = [];
+	deletionPickLines(chunk, docLines).forEach((pickLine, index) => {
+		const last = groups[groups.length - 1];
+		if (last && last.pickLine === pickLine) {
+			last.to = index + 1;
+		} else {
+			groups.push({ pickLine, from: index, to: index + 1 });
+		}
+	});
+	return groups;
 }
 
 export function getPickTargets(
@@ -59,8 +100,9 @@ export function getPickTargets(
 
 	const deletions = new Map<number, number>();
 	for (const chunk of changes.deletedChunks) {
-		const anchor = deletionAnchorLine(chunk, docLines);
-		deletions.set(anchor, (deletions.get(anchor) ?? 0) + chunk.lines.length);
+		for (const line of deletionPickLines(chunk, docLines)) {
+			deletions.set(line, (deletions.get(line) ?? 0) + 1);
+		}
 	}
 
 	return { lines, deletions };
@@ -115,9 +157,9 @@ export function rangesCoverTarget(
 
 /**
  * Counts the changed lines the picks cover, for the Stage and Unstage labels.
- * A picked added line counts once, taking any deletion anchored to it along as
- * one modified line. A picked deletion with no added line of its own counts
- * the lines it removes.
+ * A picked added line counts once, taking any deleted lines that go with it
+ * along as one modified line. A picked deletion with no added line of its own
+ * counts the lines it removes.
  */
 export function countPickedLines(
 	picked: ReadonlySet<number>,
@@ -214,20 +256,23 @@ export interface LinePickerOptions {
 	 * dimmed and taps on them are ignored.
 	 */
 	canPick: (state: EditorState) => boolean;
-	/** The anchor line of a deleted-lines widget, or null for any other widget. */
-	widgetAnchor: (widget: WidgetType) => number | null;
+	/**
+	 * The line a deleted-lines widget's lines are picked through, or null for
+	 * any other widget.
+	 */
+	widgetPickLine: (widget: WidgetType) => number | null;
 }
 
 /**
  * A gutter beside the line numbers with a tap target for every changed line
- * and every deletion. Unchanged lines get no target and so cannot be picked.
- * A changed line's number picks it too, so the column can stay narrow while
- * the target spans both.
+ * and every block of deleted lines. Unchanged lines get no target and so
+ * cannot be picked. A changed line's number picks it too, so the column can
+ * stay narrow while the target spans both.
  */
 export function linePickerGutter({
 	targets,
 	canPick,
-	widgetAnchor,
+	widgetPickLine,
 }: LinePickerOptions) {
 	// A press on a target leaves the cursor and the on-screen keyboard as they
 	// were.
@@ -264,12 +309,12 @@ export function linePickerGutter({
 			);
 		},
 		widgetMarker(view, widget) {
-			const anchor = widgetAnchor(widget);
-			if (anchor === null) return null;
+			const line = widgetPickLine(widget);
+			if (line === null) return null;
 			return new PickMarker(
-				anchor,
+				line,
 				"deletion",
-				view.state.field(pickedLines).has(anchor),
+				view.state.field(pickedLines).has(line),
 				!canPick(view.state),
 			);
 		},

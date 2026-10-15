@@ -1,3 +1,4 @@
+export { deletionStagingLine } from "./lineStaging.js";
 export type {
 	ClientMessage,
 	ServerMessage,

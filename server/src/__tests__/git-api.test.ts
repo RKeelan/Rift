@@ -840,8 +840,8 @@ describe("POST /api/git/stage (line ranges)", () => {
 			.send({ path: "dash.sql", ranges: [[3, 3]] });
 
 		expect(res.status).toBe(200);
-		// Only C is staged; the deletions anchored to line 2 stay in the index.
-		expect(indexContent("dash.sql")).toBe("a\n-- note\nb\nc\nC\n");
+		// C replaces b and c; "-- note", which goes with B, stays in the index.
+		expect(indexContent("dash.sql")).toBe("a\n-- note\nC\n");
 
 		execSync("git reset -q HEAD dash.sql", { cwd: repoDir });
 		execSync("git checkout -- dash.sql", { cwd: repoDir });
@@ -1182,7 +1182,8 @@ describe("POST /api/git/unstage (line ranges)", () => {
 			.send({ path: "dash.sql", ranges: [[3, 3]] });
 
 		expect(res.status).toBe(200);
-		expect(indexContent("dash.sql")).toBe("a\nB\n");
+		// b and c, which C replaced, return in its place.
+		expect(indexContent("dash.sql")).toBe("a\nB\nb\nc\n");
 
 		execSync("git reset -q HEAD dash.sql", { cwd: repoDir });
 		execSync("git checkout -- dash.sql", { cwd: repoDir });

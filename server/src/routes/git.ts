@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import type { Request, Response } from "express";
 import { Router } from "express";
+import { deletionStagingLine } from "shared";
 import type { StatusResult } from "simple-git";
 import {
 	type RepoRoot,
@@ -136,13 +137,103 @@ function lineSelected(line: number, ranges: LineRange[]): boolean {
 	return false;
 }
 
+// A changed line of a hunk, without its prefix, and the "\ No newline at end
+// of file" marker that follows it when it ends its side of the file without
+// one.
+interface ChangedLine {
+	text: string;
+	marker: string | null;
+}
+
+/**
+ * Rebuilds a run of a hunk, its deleted lines and the lines added directly
+ * after them, keeping the lines the selection covers. The run splits into
+ * units, one for each line it adds, holding that line and the deleted lines
+ * that go with it by `deletionStagingLine`, or a single unit of all its
+ * deleted lines when it adds none. A unit is selected through the new-file
+ * line it adds or, for a pure deletion, the line it sits in front of.
+ *
+ * The units are written out in order, each with its deleted lines first, so
+ * a deleted line that stays as context keeps its place among the lines of
+ * the run on both sides of the patch. The work is linear in the run's size.
+ */
+function rebuildRun(
+	deleted: ChangedLine[],
+	added: ChangedLine[],
+	firstLine: number,
+	ranges: LineRange[],
+	reverse: boolean,
+): { body: string[]; changed: boolean; keptAddition: boolean } {
+	const unitDeleted: ChangedLine[][] = Array.from(
+		{ length: Math.max(added.length, 1) },
+		() => [],
+	);
+	deleted.forEach((line, index) => {
+		const pickLine = deletionStagingLine(index, added.length, firstLine);
+		unitDeleted[pickLine - firstLine].push(line);
+	});
+
+	// Each line to write, with the line ending its unit's added line uses,
+	// which a line of the unit that gains a newline takes too.
+	const entries: { prefix: "-" | "+" | " "; line: ChangedLine; eol: string }[] =
+		[];
+	let changed = false;
+	let keptAddition = false;
+	unitDeleted.forEach((unitLines, unit) => {
+		const unitAdded = added.slice(unit, unit + 1);
+		const eol = unitAdded[0]?.text.endsWith("\r") ? "\r" : "";
+		if (lineSelected(firstLine + unit, ranges)) {
+			for (const line of unitLines) entries.push({ prefix: "-", line, eol });
+			for (const line of unitAdded) entries.push({ prefix: "+", line, eol });
+			changed = true;
+		} else if (reverse) {
+			// Unstaging leaves an unselected staged addition in the index, so it
+			// stays as context to reconstruct the index side exactly, and drops an
+			// unselected staged deletion, which the index omits.
+			for (const line of unitAdded) entries.push({ prefix: " ", line, eol });
+			keptAddition ||= unitAdded.length > 0;
+		} else {
+			// Staging drops an unselected addition and keeps an unselected
+			// deletion as context, to reconstruct the index side exactly.
+			for (const line of unitLines) entries.push({ prefix: " ", line, eol });
+		}
+	});
+
+	// Where the last addition and the last context line fall, which say
+	// whether a line without a newline has others after it on its side.
+	let lastAddition = -1;
+	let lastContext = -1;
+	entries.forEach(({ prefix }, at) => {
+		if (prefix === "+") lastAddition = at;
+		if (prefix === " ") lastContext = at;
+	});
+
+	const body: string[] = [];
+	entries.forEach(({ prefix, line, eol }, at) => {
+		if (line.marker === null) {
+			body.push(`${prefix}${line.text}`);
+		} else if (prefix === " " && !reverse && lastAddition > at) {
+			// The index's last line, kept as context, lacks a newline, but the
+			// staged lines that go after it need one there.
+			body.push(`-${line.text}`, line.marker, `+${line.text}${eol}`);
+		} else if (prefix === "-" && reverse && lastContext > at) {
+			// HEAD's last line, returning to the index, lacks a newline, but the
+			// staged lines that stay after it need one there.
+			body.push(`-${line.text}${eol}`);
+		} else {
+			body.push(`${prefix}${line.text}`, line.marker);
+		}
+	});
+	return { body, changed, keptAddition };
+}
+
 /**
  * Rebuilds a partial patch from a `git diff` that keeps only the lines the
- * selection covers. Context lines stay context; a selected `+` stays `+` and a
- * selected `-` stays `-`. Deletions anchor to the new-file line they sit in
- * front of, matching the editor's widgets, so a modification (delete paired
- * with an add) is kept as a unit and a pure deletion is kept when the line
- * just below it is selected.
+ * selection covers. Context lines stay context. A modified run pairs its
+ * deleted and added lines in order, by `deletionStagingLine`, as the editor's
+ * pick targets do, so selecting an added line stages the deleted lines that go
+ * with it, and selecting the line just below a pure deletion stages the
+ * deletion (see rebuildRun).
  *
  * Staging (the default) reads an index→worktree diff and reconstructs the old
  * (index) side exactly, so the patch applies cleanly with `git apply --cached`:
@@ -188,6 +279,25 @@ export function buildPartialPatch(
 	// Whether unstaging leaves any staged addition in the index.
 	let keptAddition = false;
 
+	// Reads the changed lines with the given prefix from `index` on, each with
+	// the marker that may follow it. The preamble loop consumed the file
+	// headers, so inside a hunk a line starting "+++" or "---" is a changed
+	// line beginning with "++" or "--".
+	function readChangedLines(prefix: "-" | "+"): ChangedLine[] {
+		const read: ChangedLine[] = [];
+		while (index < lines.length && lines[index].startsWith(prefix)) {
+			const text = lines[index].slice(1);
+			index += 1;
+			let marker: string | null = null;
+			if (index < lines.length && lines[index].startsWith("\\")) {
+				marker = lines[index];
+				index += 1;
+			}
+			read.push({ text, marker });
+		}
+		return read;
+	}
+
 	while (index < lines.length && lines[index].startsWith("@@")) {
 		const header = lines[index];
 		index += 1;
@@ -198,7 +308,6 @@ export function buildPartialPatch(
 
 		const body: string[] = [];
 		let hunkChanged = false;
-		let lastDropped = false;
 
 		while (
 			index < lines.length &&
@@ -206,55 +315,24 @@ export function buildPartialPatch(
 			!lines[index].startsWith("diff --git")
 		) {
 			const line = lines[index];
-			index += 1;
 
-			if (line.startsWith("\\")) {
-				// A "\ No newline at end of file" marker follows the fate of the
-				// line it trails: keep it only when that line survived.
-				if (!lastDropped) body.push(line);
+			if (line.startsWith("-") || line.startsWith("+")) {
+				// A run: the deleted lines, then the lines added directly after them.
+				const deleted = readChangedLines("-");
+				const added = readChangedLines("+");
+				const run = rebuildRun(deleted, added, newLine, ranges, reverse);
+				body.push(...run.body);
+				hunkChanged ||= run.changed;
+				keptAddition ||= run.keptAddition;
+				newLine += added.length;
 				continue;
 			}
 
-			// The preamble loop consumed the file headers, so inside a hunk a line
-			// starting "+++" or "---" is a changed line beginning with "++" or "--".
-			if (line.startsWith("+")) {
-				if (lineSelected(newLine, ranges)) {
-					body.push(line);
-					hunkChanged = true;
-					lastDropped = false;
-				} else if (reverse) {
-					// Unstaging leaves an unselected staged addition in the index, so
-					// it stays as context to reconstruct the index side exactly.
-					body.push(` ${line.slice(1)}`);
-					keptAddition = true;
-					lastDropped = false;
-				} else {
-					lastDropped = true;
-				}
-				newLine += 1;
-				continue;
-			}
-
-			if (line.startsWith("-")) {
-				if (lineSelected(newLine, ranges)) {
-					body.push(line);
-					hunkChanged = true;
-					lastDropped = false;
-				} else if (reverse) {
-					// The index omits an unselected staged deletion, so drop it to keep
-					// the reconstructed index side matching what git reverses against.
-					lastDropped = true;
-				} else {
-					body.push(` ${line.slice(1)}`);
-					lastDropped = false;
-				}
-				continue;
-			}
-
-			// Context line (present in both index and working tree).
+			// A context line, present on both sides, or the marker that follows
+			// one at the end of the file.
 			body.push(line);
-			lastDropped = false;
-			newLine += 1;
+			index += 1;
+			if (!line.startsWith("\\")) newLine += 1;
 		}
 
 		if (hunkChanged) {

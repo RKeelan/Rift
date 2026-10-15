@@ -212,6 +212,7 @@ describe("getEditorChangeDecorations", () => {
 		expect(decorations.deletedChunks).toEqual([
 			{
 				anchorIndex: 1,
+				added: 0,
 				lines: ["added line"],
 			},
 		]);
@@ -310,7 +311,7 @@ describe("getEditorChangeDecorations", () => {
 			{ kind: "added", lineNumber: 2 },
 		]);
 		expect(decorations.deletedChunks).toEqual([
-			{ anchorIndex: 1, lines: ["-- note"] },
+			{ anchorIndex: 1, added: 1, lines: ["-- note"] },
 		]);
 	});
 
@@ -324,7 +325,7 @@ describe("getEditorChangeDecorations", () => {
 
 		expect(decorations.lineHighlights).toEqual([]);
 		expect(decorations.deletedChunks).toEqual([
-			{ anchorIndex: 0, lines: ["a", "b"] },
+			{ anchorIndex: 0, added: 0, lines: ["a", "b"] },
 		]);
 	});
 
@@ -345,8 +346,8 @@ describe("getEditorChangeDecorations", () => {
 			{ kind: "added", lineNumber: 1501 },
 		]);
 		expect(decorations.deletedChunks).toEqual([
-			{ anchorIndex: 100, lines: ["line 100"] },
-			{ anchorIndex: 1500, lines: ["line 1500"] },
+			{ anchorIndex: 100, added: 1, lines: ["line 100"] },
+			{ anchorIndex: 1500, added: 1, lines: ["line 1500"] },
 		]);
 	});
 
@@ -363,14 +364,18 @@ describe("getEditorChangeDecorations", () => {
 			{ kind: "added", lineNumber: 3 },
 		]);
 		expect(decorations.deletedChunks).toEqual([
-			{ anchorIndex: 1, lines: ["r"] },
+			{ anchorIndex: 1, added: 2, lines: ["r"] },
 		]);
 	});
 
 	describe("with git's diff", () => {
 		// git deletes c() whole, just above d(). The editor's own diff, left to
 		// itself, deletes from b()'s closing brace to the middle of c().
-		const GIT_PLACEMENT = { anchorIndex: 5, lines: ["c() {", "\ts", "}", ""] };
+		const GIT_PLACEMENT = {
+			anchorIndex: 5,
+			added: 0,
+			lines: ["c() {", "\ts", "}", ""],
+		};
 
 		test("follows git's placement when its diff describes the buffer", () => {
 			const { base, current, diff } = gitCase(
@@ -417,8 +422,8 @@ describe("getEditorChangeDecorations", () => {
 				{ kind: "added", lineNumber: 3 },
 			]);
 			expect(decorations.deletedChunks).toEqual([
-				{ anchorIndex: 0, lines: ["title"] },
-				{ anchorIndex: 2, lines: ["c"] },
+				{ anchorIndex: 0, added: 1, lines: ["title"] },
+				{ anchorIndex: 2, added: 1, lines: ["c"] },
 			]);
 		});
 
@@ -532,7 +537,7 @@ describe("getChangeRegions", () => {
 		const regions = getChangeRegions(
 			{
 				lineHighlights: [{ kind: "added", lineNumber: 4 }],
-				deletedChunks: [{ anchorIndex: 3, lines: ["old"] }],
+				deletedChunks: [{ anchorIndex: 3, added: 1, lines: ["old"] }],
 			},
 			10,
 		);
@@ -544,7 +549,7 @@ describe("getChangeRegions", () => {
 		const regions = getChangeRegions(
 			{
 				lineHighlights: [],
-				deletedChunks: [{ anchorIndex: 4, lines: ["gone"] }],
+				deletedChunks: [{ anchorIndex: 4, added: 0, lines: ["gone"] }],
 			},
 			10,
 		);
@@ -556,7 +561,7 @@ describe("getChangeRegions", () => {
 		const regions = getChangeRegions(
 			{
 				lineHighlights: [{ kind: "added", lineNumber: 5 }],
-				deletedChunks: [{ anchorIndex: 3, lines: ["gone"] }],
+				deletedChunks: [{ anchorIndex: 3, added: 0, lines: ["gone"] }],
 			},
 			10,
 		);
@@ -571,7 +576,7 @@ describe("getWordMarks", () => {
 	const lineText = (lineNumber: number) => lines[lineNumber];
 
 	test("pairs a changed line with the line it replaced", () => {
-		const chunk = { anchorIndex: 0, lines: ["the quick brown fox"] };
+		const chunk = { anchorIndex: 0, added: 1, lines: ["the quick brown fox"] };
 		const marks = getWordMarks(
 			{
 				lineHighlights: [{ kind: "added", lineNumber: 1 }],
@@ -585,7 +590,7 @@ describe("getWordMarks", () => {
 	});
 
 	test("pairs the lines of a multi-line replacement in order", () => {
-		const chunk = { anchorIndex: 1, lines: ["one", "lines"] };
+		const chunk = { anchorIndex: 1, added: 2, lines: ["one", "lines"] };
 		const marks = getWordMarks(
 			{
 				lineHighlights: [
@@ -605,7 +610,7 @@ describe("getWordMarks", () => {
 	});
 
 	test("leaves a change that adds more lines than it removes unmarked", () => {
-		const chunk = { anchorIndex: 1, lines: ["one"] };
+		const chunk = { anchorIndex: 1, added: 2, lines: ["one"] };
 		const marks = getWordMarks(
 			{
 				lineHighlights: [
@@ -2039,6 +2044,119 @@ describe("line picking", () => {
 			expect(requests.length).toBe(1);
 		});
 		expect(requests[0]).toEqual({ path: "notes.txt", ranges: [[2, 2]] });
+	});
+
+	// Lines 2 to 4 are each modified, so git lists their three deleted lines
+	// together, above the three lines that replace them.
+	const RUN = {
+		file: "a\nB\nC\nD\ne\n",
+		comparison: "a\nb\nc\nd\ne\n",
+		diff: "@@ -1,5 +1,5 @@\n a\n-b\n-c\n-d\n+B\n+C\n+D\n e\n",
+	};
+
+	// Each block of deleted lines drawn, by its text and whether it is picked.
+	function deletedBlocks(container: HTMLElement) {
+		return [...container.querySelectorAll(".cm-deletedChunk")].map((block) => [
+			block.textContent,
+			block.classList.contains("cm-deletedChunk--picked") ? "picked" : "",
+		]);
+	}
+
+	test("offers each deleted line of a modified run through the line in its place", async () => {
+		const { container } = await renderForPicking({}, RUN);
+
+		await waitFor(() => {
+			expect(pickTargets(container)).toEqual([
+				["deletion", 2, "−"],
+				["deletion", 3, "−"],
+				["deletion", 4, "−"],
+				["line", 2, "+"],
+				["line", 3, "+"],
+				["line", 4, "+"],
+			]);
+		});
+		// The deleted lines are drawn a line to a block, joined into one.
+		expect(
+			[...container.querySelectorAll(".cm-deletedChunk")].map(
+				(block) => block.className,
+			),
+		).toEqual([
+			"cm-deletedChunk cm-deletedChunk--joinedBelow",
+			"cm-deletedChunk cm-deletedChunk--joinedAbove cm-deletedChunk--joinedBelow",
+			"cm-deletedChunk cm-deletedChunk--joinedAbove",
+		]);
+	});
+
+	test("picking a modified run's last line picks only the deleted line in its place", async () => {
+		const { container, requests } = await renderForPicking({}, RUN);
+
+		await tap(container, 4);
+
+		const stage = await enabledButton("Stage 1 line");
+		expect(pickTargets(container)).toEqual([
+			["deletion", 2, "−"],
+			["deletion", 3, "−"],
+			["deletion", 4, "✓"],
+			["line", 2, "+"],
+			["line", 3, "+"],
+			["line", 4, "✓"],
+		]);
+		expect(deletedBlocks(container)).toEqual([
+			["b", ""],
+			["c", ""],
+			["d", "picked"],
+		]);
+
+		fireEvent.click(stage);
+		await waitFor(() => {
+			expect(requests.length).toBe(1);
+		});
+		expect(requests[0]).toEqual({ path: "notes.txt", ranges: [[4, 4]] });
+	});
+
+	test("a modified run's deleted line picks the line in its place", async () => {
+		const { container } = await renderForPicking({}, RUN);
+
+		await tap(container, 3, "deletion");
+
+		await enabledButton("Stage 1 line");
+		expect(contentLine(container, 3).classList.contains("cm-pickedLine")).toBe(
+			true,
+		);
+		expect(deletedBlocks(container)).toEqual([
+			["b", ""],
+			["c", "picked"],
+			["d", ""],
+		]);
+	});
+
+	test("picks a run's extra deleted lines with its last added line", async () => {
+		// B and C take the place of b, c and d, so C goes with both c and d.
+		const { container } = await renderForPicking(
+			{},
+			{
+				file: "a\nB\nC\ne\n",
+				comparison: "a\nb\nc\nd\ne\n",
+				diff: "@@ -1,5 +1,4 @@\n a\n-b\n-c\n-d\n+B\n+C\n e\n",
+			},
+		);
+
+		await waitFor(() => {
+			expect(pickTargets(container)).toEqual([
+				["deletion", 2, "−"],
+				["deletion", 3, "−"],
+				["line", 2, "+"],
+				["line", 3, "+"],
+			]);
+		});
+
+		await tap(container, 3);
+
+		await enabledButton("Stage 1 line");
+		expect(deletedBlocks(container)).toEqual([
+			["b", ""],
+			["cd", "picked"],
+		]);
 	});
 
 	test("ignores taps until git's diff arrives", async () => {
