@@ -3600,8 +3600,8 @@ describe("refreshed change context", () => {
 				).not.toBeNull();
 			});
 			const drawn = watchNotices(container);
-			// Hands over the change context the page refetches after the stage,
-			// whose comparison and diff land one after the other.
+			// Hands over the change context refetched after the stage a part at
+			// a time: none, then the comparison, then git's diff.
 			const refetch = (diff: string) => {
 				rerender(
 					<TextFileEditor

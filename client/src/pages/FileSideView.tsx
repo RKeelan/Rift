@@ -40,7 +40,8 @@ interface ChangeContextOptions {
 /**
  * What one side of a file's changes is compared against, and git's diff of
  * it: the index and the unstaged diff for the working tree, HEAD and the
- * staged diff for the index.
+ * staged diff for the index. The two are fetched together, and the diff
+ * counts as loading until both have landed.
  */
 export function useChangeContext({
 	repoName,
@@ -52,10 +53,14 @@ export function useChangeContext({
 	headToken,
 	showError,
 }: ChangeContextOptions) {
-	// The copy of the file that this side compares against: its text, null
-	// when git has no copy of it, or undefined while it loads or when it is
-	// too large or binary to show.
-	const [base, setBase] = useState<string | null | undefined>(undefined);
+	// The last answer to a request for the copy of the file that this side
+	// compares against, kept with the request it answers, as git's diff is:
+	// its text, null when git has no copy of it, or undefined when it is too
+	// large or binary to show, or the request failed.
+	const [baseAnswer, setBaseAnswer] = useState<{
+		request: string;
+		base: string | null | undefined;
+	} | null>(null);
 	// The last answer to a request for git's diff, kept with the request it
 	// answers, so that an earlier request's diff is never taken for the
 	// current one's. A failed request's answer has no diff.
@@ -77,14 +82,16 @@ export function useChangeContext({
 		? `${refreshToken}`
 		: `${refreshToken}.${diffRefreshToken}`;
 
+	const baseRequest = needsBase
+		? JSON.stringify([repoName, path, staged, comparisonKey])
+		: null;
+
 	useEffect(() => {
-		if (!needsBase) {
-			setBase(undefined);
-			return;
-		}
+		if (baseRequest === null) return;
 
 		const controller = new AbortController();
-		setBase(undefined);
+		const answer = (base: string | null | undefined) =>
+			setBaseAnswer({ request: baseRequest, base });
 
 		void (async () => {
 			try {
@@ -99,30 +106,37 @@ export function useChangeContext({
 				});
 				if (!res.ok) {
 					if (res.status === 404) {
-						setBase(null);
+						answer(null);
 						return;
 					}
 					// A copy too large or binary to show belongs to a file the
 					// editor refuses too, and says so itself.
-					if (res.status === 413 || res.status === 415) return;
-					const body = await res.json().catch(() => null);
-					showError(body?.error?.message ?? `Request failed (${res.status})`);
+					if (res.status !== 413 && res.status !== 415) {
+						const body = await res.json().catch(() => null);
+						showError(body?.error?.message ?? `Request failed (${res.status})`);
+					}
+					answer(undefined);
 					return;
 				}
 
-				setBase(await res.text());
+				answer(await res.text());
 			} catch (err) {
 				if (err instanceof DOMException && err.name === "AbortError") {
 					return;
 				}
 				showError(err instanceof Error ? err.message : "Network error");
+				answer(undefined);
 			}
 		})();
 
 		return () => {
 			controller.abort();
 		};
-	}, [needsBase, repoName, path, staged, showError, comparisonKey]);
+	}, [baseRequest, repoName, path, staged, showError, comparisonKey]);
+
+	const baseAnswered =
+		baseAnswer !== null && baseAnswer.request === baseRequest;
+	const base = baseAnswered ? baseAnswer.base : undefined;
 
 	let comparisonContent: string | undefined;
 	if (status === "untracked") {
@@ -212,9 +226,44 @@ export function useChangeContext({
 	const answered = diffAnswer !== null && diffAnswer.request === diffRequest;
 	const diff = answered ? diffAnswer.diff : null;
 	const diffExact = answered ? diffAnswer.exact : true;
-	const diffLoading = diffRequest !== null && !answered;
+	const loading =
+		(baseRequest !== null && !baseAnswered) ||
+		(diffRequest !== null && !answered);
 
-	return { comparisonContent, diff, diffExact, diffLoading };
+	// The comparison and git's diff land one after the other, and the editor
+	// redraws the changes from whatever it is handed: with no comparison it
+	// draws no deleted lines at all, and with the new comparison alone a
+	// staged change's deleted lines go before its strip. So while a refetch
+	// is out, as after a stage, the side goes on handing over the context it
+	// last had in full, and hands over the new one once both parts have
+	// landed, for the editor to redraw in one step.
+	const side = JSON.stringify([repoName, path, staged]);
+	const [held, setHeld] = useState<{
+		side: string;
+		comparisonContent: string | undefined;
+		diff: string | null;
+		diffExact: boolean;
+	} | null>(null);
+	if (
+		!loading &&
+		(held === null ||
+			held.side !== side ||
+			held.comparisonContent !== comparisonContent ||
+			held.diff !== diff ||
+			held.diffExact !== diffExact)
+	) {
+		setHeld({ side, comparisonContent, diff, diffExact });
+	}
+	if (loading && held !== null && held.side === side) {
+		return {
+			comparisonContent: held.comparisonContent,
+			diff: held.diff,
+			diffExact: held.diffExact,
+			diffLoading: true,
+		};
+	}
+
+	return { comparisonContent, diff, diffExact, diffLoading: loading };
 }
 
 export interface FileSideViewProps extends ChangeContextOptions {
