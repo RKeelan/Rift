@@ -42,7 +42,7 @@ interface ChangeContextOptions {
  * it: the index and the unstaged diff for the working tree, HEAD and the
  * staged diff for the index.
  */
-function useChangeContext({
+export function useChangeContext({
 	repoName,
 	path,
 	staged,
@@ -56,8 +56,14 @@ function useChangeContext({
 	// when git has no copy of it, or undefined while it loads or when it is
 	// too large or binary to show.
 	const [base, setBase] = useState<string | null | undefined>(undefined);
-	const [diff, setDiff] = useState<string | null>(null);
-	const [diffExact, setDiffExact] = useState(true);
+	// The last answer to a request for git's diff, kept with the request it
+	// answers, so that an earlier request's diff is never taken for the
+	// current one's. A failed request's answer has no diff.
+	const [diffAnswer, setDiffAnswer] = useState<{
+		request: string;
+		diff: string | null;
+		exact: boolean;
+	} | null>(null);
 	// A deleted file decorates straight from its content, and an untracked one
 	// compares against nothing. Every other side compares against the same
 	// copy whether or not the status lists a change in it, so the base stays
@@ -150,14 +156,17 @@ function useChangeContext({
 		diffKind = "tracked";
 	}
 
+	// Each request is named by everything it asks for, so a new one makes the
+	// diff load again from the render that asks for it.
+	const diffRequest =
+		diffKind === null
+			? null
+			: JSON.stringify([repoName, path, staged, diffKind, diffKey]);
+
 	useEffect(() => {
-		if (diffKind === null) {
-			setDiff(null);
-			return;
-		}
+		if (diffRequest === null) return;
 
 		const controller = new AbortController();
-		setDiff(null);
 
 		void (async () => {
 			try {
@@ -174,26 +183,38 @@ function useChangeContext({
 				if (!res.ok) {
 					const body = await res.json().catch(() => null);
 					showError(body?.error?.message ?? `Request failed (${res.status})`);
+					setDiffAnswer({ request: diffRequest, diff: null, exact: true });
 					return;
 				}
 
 				const data: DiffResponse = await res.json();
-				setDiff(data.diff);
-				setDiffExact(data.exact !== false);
+				setDiffAnswer({
+					request: diffRequest,
+					diff: data.diff,
+					exact: data.exact !== false,
+				});
 			} catch (err) {
 				if (err instanceof DOMException && err.name === "AbortError") {
 					return;
 				}
 				showError(err instanceof Error ? err.message : "Network error");
+				setDiffAnswer({ request: diffRequest, diff: null, exact: true });
 			}
 		})();
 
 		return () => {
 			controller.abort();
 		};
-	}, [repoName, path, staged, diffKind, showError, diffKey]);
+	}, [repoName, path, staged, diffKind, showError, diffKey, diffRequest]);
 
-	return { comparisonContent, diff, diffExact };
+	// The diff loads until its request is answered. A side with no diff to
+	// read, and a request that failed, hand over no diff without loading.
+	const answered = diffAnswer !== null && diffAnswer.request === diffRequest;
+	const diff = answered ? diffAnswer.diff : null;
+	const diffExact = answered ? diffAnswer.exact : true;
+	const diffLoading = diffRequest !== null && !answered;
+
+	return { comparisonContent, diff, diffExact, diffLoading };
 }
 
 export interface FileSideViewProps extends ChangeContextOptions {
@@ -243,7 +264,8 @@ export function FileSideView({
 	...context
 }: FileSideViewProps) {
 	const { repoName, path, staged, status } = context;
-	const { comparisonContent, diff, diffExact } = useChangeContext(context);
+	const { comparisonContent, diff, diffExact, diffLoading } =
+		useChangeContext(context);
 
 	return (
 		<div
@@ -268,6 +290,7 @@ export function FileSideView({
 				<TextFileEditor
 					comparisonContent={comparisonContent}
 					changeDiff={diff}
+					changeDiffLoading={diffLoading}
 					changeType={status}
 					filePath={path}
 					repo={repoName}
@@ -286,6 +309,7 @@ export function FileSideView({
 				<TextFileEditor
 					comparisonContent={comparisonContent}
 					changeDiff={diff}
+					changeDiffLoading={diffLoading}
 					changeDiffExact={diffExact}
 					changeType={status}
 					filePath={path}
