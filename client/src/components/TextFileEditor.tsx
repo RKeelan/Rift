@@ -1144,6 +1144,14 @@ export function TextFileEditor({
 	// Without picks, Stage and Unstage act on a selection, offered only when it
 	// covers a change: the server ignores lines that hold none.
 	const [selectionCoversChange, setSelectionCoversChange] = useState(false);
+	// Holds the selection a stage or unstage of selected lines acts on while
+	// the request is out. Once the lines are staged or unstaged, a selection
+	// left as it was gives way to a cursor at its end, so typing goes in after
+	// those lines rather than over them; one changed meanwhile stays.
+	const selectionHoldRef = useRef<{
+		hold: () => void;
+		release: (collapse: boolean) => void;
+	} | null>(null);
 
 	// A deleted file has no lines left to pick, so it stages and unstages whole.
 	// Every other change stages and unstages by line, a new file through its
@@ -1321,8 +1329,14 @@ export function TextFileEditor({
 		openedAtChangeRef.current = false;
 
 		(async () => {
-			const { Compartment, EditorState, StateEffect, StateField, Transaction } =
-				await import("@codemirror/state");
+			const {
+				Compartment,
+				EditorSelection,
+				EditorState,
+				StateEffect,
+				StateField,
+				Transaction,
+			} = await import("@codemirror/state");
 			const {
 				Decoration,
 				EditorView,
@@ -1362,6 +1376,24 @@ export function TextFileEditor({
 						if (effect.is(setStripsEnabled)) value = effect.value;
 					}
 					return value;
+				},
+			});
+
+			// The selection held for a stage or unstage, mapped through any edit
+			// made while it is held, so that a selection made since can be told
+			// apart from it.
+			const holdSelection = StateEffect.define<
+				import("@codemirror/state").EditorSelection | null
+			>();
+			const heldSelection = StateField.define<
+				import("@codemirror/state").EditorSelection | null
+			>({
+				create: () => null,
+				update(value, transaction) {
+					for (const effect of transaction.effects) {
+						if (effect.is(holdSelection)) return effect.value;
+					}
+					return value?.map(transaction.changes) ?? null;
 				},
 			});
 
@@ -1737,6 +1769,7 @@ export function TextFileEditor({
 				syntaxHighlighting(riftHighlightStyle),
 				changeField,
 				pickedLines,
+				heldSelection,
 				stripsEnabled,
 				EditorView.decorations.compute([changeField, pickedLines], (state) =>
 					buildChangeDecorations(
@@ -1908,6 +1941,36 @@ export function TextFileEditor({
 					}
 				},
 			};
+			selectionHoldRef.current = {
+				hold: () => {
+					view.dispatch({ effects: holdSelection.of(view.state.selection) });
+				},
+				release: (collapse) => {
+					const held = view.state.field(heldSelection);
+					if (held === null) return;
+					const collapsing = collapse && held.eq(view.state.selection);
+					view.dispatch({
+						effects: holdSelection.of(null),
+						selection: collapsing
+							? EditorSelection.cursor(held.main.to)
+							: undefined,
+					});
+					// An editor without focus can leave the browser's selection
+					// where it was made, and with it the handles and menu Chrome on
+					// Android draws over it, around lines no longer selected.
+					const browserSelection = document.getSelection();
+					if (
+						collapsing &&
+						!view.hasFocus &&
+						browserSelection !== null &&
+						browserSelection.rangeCount > 0 &&
+						view.contentDOM.contains(browserSelection.anchorNode) &&
+						view.contentDOM.contains(browserSelection.focusNode)
+					) {
+						browserSelection.removeAllRanges();
+					}
+				},
+			};
 			applyDraftLockRef.current = (locked: boolean) => {
 				view.dispatch({
 					effects: draftLockCompartment.reconfigure(locked ? draftLock : []),
@@ -1997,6 +2060,7 @@ export function TextFileEditor({
 			replaceDocRef.current = null;
 			historyCommandsRef.current = null;
 			pickerRef.current = null;
+			selectionHoldRef.current = null;
 			setPickedCount(0);
 			setSelectionCoversChange(false);
 			setCanUndo(false);
@@ -2230,6 +2294,7 @@ export function TextFileEditor({
 
 			setStaging(true);
 			setError(null);
+			let fromSelection = false;
 
 			try {
 				const body: {
@@ -2254,10 +2319,11 @@ export function TextFileEditor({
 						body.expectedMtimeMs = mtimeMs;
 					}
 				} else {
+					const picked = region ? null : pickerRef.current?.ranges();
+					fromSelection = !region && !picked;
 					body.ranges = region
 						? [[region.start, region.end]]
-						: (pickerRef.current?.ranges() ??
-							selectionToRanges(viewRef.current.state));
+						: (picked ?? selectionToRanges(viewRef.current.state));
 					if (body.ranges.length === 0) return;
 					const blobs = pickerRef.current?.diffBlobs() ?? null;
 					if (blobs !== null) {
@@ -2267,6 +2333,7 @@ export function TextFileEditor({
 						body.untracked = true;
 					}
 				}
+				if (fromSelection) selectionHoldRef.current?.hold();
 
 				const response = await fetch(
 					apiUrl(`/api/git/stage?repo=${encodeURIComponent(repo)}`),
@@ -2296,12 +2363,15 @@ export function TextFileEditor({
 				} else {
 					pickerRef.current?.clear();
 				}
+				if (fromSelection) selectionHoldRef.current?.release(true);
 				if (wholeFile && onFileStaged) {
 					onFileStaged(files);
 				} else {
 					onStaged?.(files);
 				}
 			} catch (err) {
+				// A selection whose lines were not staged stays for another try.
+				if (fromSelection) selectionHoldRef.current?.release(false);
 				setError(
 					err instanceof Error ? err.message : "Failed to stage changes",
 				);
@@ -2330,11 +2400,14 @@ export function TextFileEditor({
 
 			setUnstaging(true);
 			setError(null);
+			let fromSelection = false;
 
 			try {
 				// A staged change unstages exactly the change's lines, or the picked
 				// ones, or the selected ones when nothing is picked, and names the
 				// staged diff those line numbers come from, as staging does.
+				const picked = region ? null : pickerRef.current?.ranges();
+				fromSelection = !region && !picked;
 				const body: {
 					path: string;
 					ranges: [number, number][];
@@ -2343,14 +2416,14 @@ export function TextFileEditor({
 					path: filePath,
 					ranges: region
 						? [[region.start, region.end]]
-						: (pickerRef.current?.ranges() ??
-							selectionToRanges(viewRef.current.state)),
+						: (picked ?? selectionToRanges(viewRef.current.state)),
 				};
 				if (body.ranges.length === 0) return;
 				const blobs = pickerRef.current?.diffBlobs() ?? null;
 				if (blobs !== null) {
 					body.expectedBlobs = blobs;
 				}
+				if (fromSelection) selectionHoldRef.current?.hold();
 
 				const response = await fetch(
 					apiUrl(`/api/git/unstage?repo=${encodeURIComponent(repo)}`),
@@ -2373,6 +2446,7 @@ export function TextFileEditor({
 				const { files } = (await response.json()) as { files: ChangedFile[] };
 
 				pickerRef.current?.clear();
+				if (fromSelection) selectionHoldRef.current?.release(true);
 				// The index just changed, so bring the buffer up to the new staged
 				// content; the decorations then shrink to whatever remains staged.
 				// Editing the buffer in place keeps the editor's selection and scroll
@@ -2400,6 +2474,7 @@ export function TextFileEditor({
 				}
 				onUnstaged?.(files);
 			} catch (err) {
+				if (fromSelection) selectionHoldRef.current?.release(false);
 				setError(
 					err instanceof Error ? err.message : "Failed to unstage changes",
 				);
