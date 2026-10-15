@@ -751,6 +751,28 @@ function continueMarkup(
 	};
 }
 
+/**
+ * Gives a read-only editor focus as a touch on its text begins. Chrome on
+ * Android drops a long-press selection's handles and menu once the page sets
+ * the selection itself, and CodeMirror, given focus by the long-press, sets it
+ * again as the editor takes focus. With focus taken as the touch begins,
+ * CodeMirror takes the long-press's selection as Chrome made it. An editor
+ * that raises the on-screen keyboard can't take focus this way, since every
+ * touch, a scroll's included, would raise it.
+ */
+function focusOnTouch(
+	event: TouchEvent,
+	view: import("@codemirror/view").EditorView,
+): void {
+	if (
+		!view.hasFocus &&
+		event.target instanceof Element &&
+		event.target.closest(".cm-line") !== null
+	) {
+		view.focus();
+	}
+}
+
 type LanguageLoader = () => Promise<
 	import("@codemirror/language").LanguageSupport
 >;
@@ -932,8 +954,8 @@ export interface TextFileEditorProps {
 	changeType?: ChangeType | null;
 	// When set, the editor loads the file's staged (index) content instead of the
 	// working tree and presents it read-only, so a staged change can be viewed and
-	// unstaged line by line. Lines are picked through the gutter, as they are when
-	// staging, so the DOM is non-editable and viewing never raises the keyboard.
+	// unstaged line by line. Lines are picked through the gutter or selected, as
+	// they are when staging, and viewing never raises the keyboard.
 	staged?: boolean;
 	// When set, the file has been deleted, so there is no working-tree content to
 	// edit. The editor loads the version being removed—the index blob for an
@@ -2073,11 +2095,23 @@ export function TextFileEditor({
 				}),
 			];
 
-			if (readOnly || deleted || staged) {
-				// Nothing here is edited in place: a deleted file has no working tree,
-				// and staged content is the index blob, whose lines are picked through
-				// the gutter. Keep the DOM non-editable to spare mobile the pop-up
-				// keyboard.
+			if (staged && !readOnly && !deleted) {
+				// The index's content is never edited here, but its lines are
+				// selected to unstage them, as the working tree's are to stage
+				// them. On text that is not editable, a long-press in Chrome on
+				// Android opens Google's Touch to Search over the bar, and a drag
+				// carried on from it does not extend the selection. So the
+				// content stays editable and the state read-only, and the
+				// content asks for no on-screen keyboard.
+				baseExtensions.unshift(
+					EditorState.readOnly.of(true),
+					EditorView.contentAttributes.of({ inputmode: "none" }),
+					EditorView.domEventObservers({ touchstart: focusOnTouch }),
+				);
+			} else if (readOnly || deleted) {
+				// Nothing here is edited in place: a deleted file has no working
+				// tree, and a read-only view changes nothing. Keep the DOM
+				// non-editable to spare mobile the pop-up keyboard.
 				baseExtensions.unshift(
 					EditorView.editable.of(false),
 					EditorState.readOnly.of(true),

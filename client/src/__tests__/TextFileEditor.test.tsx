@@ -1596,6 +1596,66 @@ describe("unstaging", () => {
 		});
 	});
 
+	test("takes focus as a touch on its text begins, but not on a strip or a deletion", async () => {
+		const { container, view } = await renderForUnstaging();
+		const strip = await waitFor(() => {
+			const found = container.querySelector(".cm-changeStrip");
+			if (!found) throw new Error("no strip");
+			return found;
+		});
+		const deletion = container.querySelector(".cm-deletedChunkLine");
+		if (!deletion) throw new Error("no deleted line");
+
+		fireEvent.touchStart(strip);
+		fireEvent.touchStart(deletion);
+		expect(document.activeElement === view.contentDOM).toBe(false);
+
+		fireEvent.touchStart(container.querySelectorAll(".cm-line")[1]);
+		expect(document.activeElement === view.contentDOM).toBe(true);
+	});
+
+	test("leaves a touch on the working tree's text to the browser", async () => {
+		const { container, view } = await renderForUnstaging({
+			staged: false,
+			onUnstaged: undefined,
+			onStaged: () => {},
+		});
+
+		// Focus there raises the on-screen keyboard, which only a tap should do.
+		fireEvent.touchStart(container.querySelectorAll(".cm-line")[1]);
+		expect(document.activeElement === view.contentDOM).toBe(false);
+	});
+
+	test("changes nothing for a key, a paste or a cut", async () => {
+		const { view } = await renderForUnstaging();
+		act(() => view.focus());
+		selectLines(view, 2);
+
+		act(() => {
+			fireEvent.keyDown(view.contentDOM, { key: "Enter", keyCode: 13 });
+		});
+		act(() => {
+			fireEvent.paste(view.contentDOM, {
+				clipboardData: { getData: () => "pasted" },
+			});
+		});
+		let copied: string | null = null;
+		act(() => {
+			fireEvent.cut(view.contentDOM, {
+				clipboardData: {
+					clearData() {},
+					setData(_type: string, text: string) {
+						copied = text;
+					},
+				},
+			});
+		});
+
+		expect(view.state.doc.toString()).toBe("a\nB\nc\n");
+		// A cut copies the selected line, as a copy would.
+		expect(copied === "B").toBe(true);
+	});
+
 	test("names the staged diff its line numbers come from", async () => {
 		const { view, requests } = await renderForUnstaging({
 			changeDiff: B_MODIFIED_DIFF_WITH_BLOBS,
@@ -2816,16 +2876,19 @@ describe("line picking", () => {
 		);
 	});
 
-	test("the staged view is non-editable and unstages the picked lines", async () => {
-		const { container, requests } = await renderForPicking({
+	test("the staged view is read-only, asks for no keyboard, and unstages the picked lines", async () => {
+		const { container, view, requests } = await renderForPicking({
 			staged: true,
 			onStaged: undefined,
 			onUnstaged: () => {},
 		});
 
-		expect(
-			container.querySelector(".cm-content")?.getAttribute("contenteditable"),
-		).toBe("false");
+		// Editable content, so Chrome on Android selects in it by touch as it
+		// does on the working tree's side.
+		expect(view.contentDOM.getAttribute("contenteditable")).toBe("true");
+		expect(view.contentDOM.getAttribute("inputmode")).toBe("none");
+		expect(view.contentDOM.getAttribute("aria-readonly")).toBe("true");
+		expect(view.state.readOnly).toBe(true);
 
 		await tap(container, 4);
 
@@ -2857,7 +2920,7 @@ describe("line picking", () => {
 		).toBeNull();
 	});
 
-	test("offers no Unstage for the unseen cursor's line, only for a pick", async () => {
+	test("offers no Unstage for the cursor's line, only for a pick", async () => {
 		const { container, view } = await renderForPicking({
 			staged: true,
 			onStaged: undefined,
@@ -2867,8 +2930,7 @@ describe("line picking", () => {
 			expect(pickTargets(container).length).toBe(4);
 		});
 
-		// The non-editable view shows no cursor, so the cursor names nothing to
-		// unstage, even on a changed line.
+		// A cursor names nothing to unstage, even on a changed line.
 		act(() => {
 			view.dispatch({ selection: { anchor: view.state.doc.line(4).from } });
 		});
