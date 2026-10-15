@@ -5,6 +5,7 @@ import {
 	EllipsisVertical,
 } from "lucide-react";
 import {
+	type SyntheticEvent,
 	useCallback,
 	useEffect,
 	useRef,
@@ -26,6 +27,7 @@ import {
 	readDraft,
 	scheduleDraft,
 } from "../drafts.ts";
+import { onScreenKeyboardShowing } from "../onScreenKeyboard.ts";
 import { isChunkLoadError, reloadForStaleChunk } from "../staleChunk.ts";
 import "./TextFileEditor.css";
 
@@ -2031,6 +2033,19 @@ export function TextFileEditor({
 		return () => document.removeEventListener("pointerdown", closeOutside);
 	}, [menuOpen]);
 
+	// A press on the bar's actions, its menu, or a file name with no other
+	// side to switch to leaves the on-screen keyboard as it was. Chrome on Android lowers the keyboard when the editor loses
+	// focus, and the bar, which rides above the keyboard, would drop to the
+	// foot of the screen, so while the keyboard is up the press keeps focus in
+	// the editor, with the cursor where it was for typing to carry on. While
+	// it is down, the press takes focus from the editor as usual, since a tap
+	// while the editor has focus raises the keyboard.
+	const keepKeyboard = useCallback((event: SyntheticEvent) => {
+		if (viewRef.current?.hasFocus && onScreenKeyboardShowing()) {
+			event.preventDefault();
+		}
+	}, []);
+
 	// A file opens at its first change rather than at its top, once the view is
 	// built and the change context has placed the changes. A reader who has
 	// already moved the cursor or scrolled is left where they are.
@@ -2501,8 +2516,7 @@ export function TextFileEditor({
 	// Nothing in the bar moves sideways: the name takes whatever room is left,
 	// and the main action keeps one width whatever it says. A control that
 	// does not apply is greyed out, and marked rather than made disabled, so a
-	// tap on it still takes focus from the editor instead of raising the
-	// keyboard.
+	// tap on it reaches its press handler and leaves the keyboard as it was.
 	const fileName = filePath.slice(filePath.lastIndexOf("/") + 1);
 
 	return (
@@ -2569,6 +2583,11 @@ export function TextFileEditor({
 					<button
 						type="button"
 						className="text-file-editor-name"
+						// Switching hides this side's editor, so the press lets focus
+						// go, and the keyboard with it, rather than keep them in an
+						// editor out of sight. With nothing to switch to, the press
+						// leaves the keyboard as it was.
+						onMouseDown={otherSide.available ? undefined : keepKeyboard}
 						onClick={() => {
 							if (otherSide.available) otherSide.show();
 						}}
@@ -2589,6 +2608,7 @@ export function TextFileEditor({
 					<button
 						type="button"
 						className="text-file-editor-action"
+						onMouseDown={keepKeyboard}
 						onClick={() => {
 							if (!mainAction.disabled) mainAction.onClick();
 						}}
@@ -2605,6 +2625,7 @@ export function TextFileEditor({
 						<button
 							type="button"
 							className="text-file-editor-bar-button"
+							onMouseDown={keepKeyboard}
 							onClick={() => {
 								if (changeCount > 0) goToChange(-1);
 							}}
@@ -2617,6 +2638,7 @@ export function TextFileEditor({
 						<button
 							type="button"
 							className="text-file-editor-bar-button"
+							onMouseDown={keepKeyboard}
 							onClick={() => {
 								if (changeCount > 0) goToChange(1);
 							}}
@@ -2632,6 +2654,7 @@ export function TextFileEditor({
 					<button
 						type="button"
 						className="text-file-editor-bar-button"
+						onMouseDown={keepKeyboard}
 						onClick={() => setMenuOpen((open) => !open)}
 						aria-haspopup="menu"
 						aria-expanded={menuOpen}
@@ -2641,13 +2664,18 @@ export function TextFileEditor({
 						<EllipsisVertical size={22} aria-hidden="true" />
 					</button>
 					{menuOpen && (
-						<div className="text-file-editor-menu-list" role="menu">
+						<div
+							className="text-file-editor-menu-list"
+							role="menu"
+							onMouseDown={keepKeyboard}
+						>
 							<button
 								type="button"
 								role="menuitem"
 								className="text-file-editor-menu-item"
-								disabled={!canUndo}
+								aria-disabled={!canUndo}
 								onClick={() => {
+									if (!canUndo) return;
 									setMenuOpen(false);
 									historyCommandsRef.current?.undo();
 								}}
@@ -2658,8 +2686,9 @@ export function TextFileEditor({
 								type="button"
 								role="menuitem"
 								className="text-file-editor-menu-item"
-								disabled={!canRedo}
+								aria-disabled={!canRedo}
 								onClick={() => {
+									if (!canRedo) return;
 									setMenuOpen(false);
 									historyCommandsRef.current?.redo();
 								}}
@@ -2682,8 +2711,9 @@ export function TextFileEditor({
 								type="button"
 								role="menuitem"
 								className="text-file-editor-menu-item"
-								disabled={loading || saving}
+								aria-disabled={loading || saving}
 								onClick={() => {
+									if (loading || saving) return;
 									setMenuOpen(false);
 									handleReload();
 								}}
@@ -2695,8 +2725,9 @@ export function TextFileEditor({
 									type="button"
 									role="menuitem"
 									className="text-file-editor-menu-item"
-									disabled={pickedCount === 0}
+									aria-disabled={pickedCount === 0}
 									onClick={() => {
+										if (pickedCount === 0) return;
 										setMenuOpen(false);
 										pickerRef.current?.clear();
 									}}

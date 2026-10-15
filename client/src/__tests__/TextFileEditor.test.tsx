@@ -2698,6 +2698,141 @@ describe("bar", () => {
 		expect(shown).toBe(1);
 	});
 
+	describe("with the on-screen keyboard", () => {
+		// Chrome on Android takes the keyboard's height out of the page's.
+		const pageHeight = window.innerHeight;
+		function setPageHeight(height: number) {
+			act(() => {
+				(window as { innerHeight: number }).innerHeight = height;
+				window.dispatchEvent(new Event("resize"));
+			});
+		}
+		const raiseKeyboard = () => setPageHeight(pageHeight - 336);
+
+		afterEach(() => {
+			setPageHeight(pageHeight);
+		});
+
+		// The main action, the change controls and the menu, with the menu's
+		// items once it is open.
+		function presses(container: HTMLElement) {
+			return [
+				action(container),
+				screen.getByRole("button", { name: "Previous change" }),
+				screen.getByRole("button", { name: "Next change" }),
+				screen.getByRole("button", { name: "More actions" }),
+				...screen.queryAllByRole("menuitem"),
+			];
+		}
+
+		// fireEvent returns false when a handler prevented the default.
+		function pressesPrevented(container: HTMLElement) {
+			return presses(container).map((control) => [
+				control.getAttribute("aria-label") ?? control.textContent,
+				!fireEvent.mouseDown(control),
+			]);
+		}
+
+		test("keeps focus in the editor through a press while the keyboard is up, so it stays up", async () => {
+			const { container, view } = await renderBar();
+			act(() => view.focus());
+			act(() => {
+				view.dispatch({
+					changes: { from: 1, insert: "x" },
+					selection: { anchor: 2 },
+					userEvent: "input.type",
+				});
+			});
+			await enabledButton("Save");
+			raiseKeyboard();
+			const selection = view.state.selection;
+
+			expect(pressesPrevented(container)).toEqual([
+				["Save", true],
+				["Previous change", true],
+				["Next change", true],
+				["More actions", true],
+			]);
+			fireEvent.click(screen.getByRole("button", { name: "More actions" }));
+			expect(pressesPrevented(container).slice(4)).toEqual([
+				["Undo", true],
+				["Redo", true],
+				["Reload", true],
+				["Clear picks", true],
+			]);
+			expect(document.activeElement === view.contentDOM).toBe(true);
+			expect(view.state.selection.eq(selection)).toBe(true);
+		});
+
+		test("keeps focus through a press on a greyed-out control too", async () => {
+			const { container, view } = await renderBar();
+			act(() => view.focus());
+			raiseKeyboard();
+			fireEvent.click(screen.getByRole("button", { name: "More actions" }));
+
+			expect(greyed(action(container))).toBe(true);
+			expect(greyed(screen.getByRole("menuitem", { name: "Undo" }))).toBe(true);
+			expect(pressesPrevented(container)).toEqual([
+				["Save", true],
+				["Previous change", true],
+				["Next change", true],
+				["More actions", true],
+				["Undo", true],
+				["Redo", true],
+				["Reload", true],
+				["Clear picks", true],
+			]);
+		});
+
+		test("lets a press take focus from the editor while the keyboard is down, so it stays down", async () => {
+			const { container, view } = await renderBar();
+			act(() => view.focus());
+			fireEvent.click(screen.getByRole("button", { name: "More actions" }));
+
+			expect(
+				pressesPrevented(container).every(([, prevented]) => !prevented),
+			).toBe(true);
+		});
+
+		test("leaves a press alone while the editor does not have focus", async () => {
+			const { container } = await renderBar();
+			raiseKeyboard();
+			fireEvent.click(screen.getByRole("button", { name: "More actions" }));
+
+			expect(
+				pressesPrevented(container).every(([, prevented]) => !prevented),
+			).toBe(true);
+		});
+
+		test("keeps focus through a press on the file's name only while there is no side to switch to", async () => {
+			function name(container: HTMLElement) {
+				const found = container.querySelector(".text-file-editor-name");
+				if (!found) throw new Error("no name");
+				return found;
+			}
+
+			// The other side has nothing to show, so the name is greyed out.
+			const alone = await renderBar();
+			act(() => alone.view.focus());
+			expect(greyed(name(alone.container))).toBe(true);
+			expect(fireEvent.mouseDown(name(alone.container))).toBe(true);
+			raiseKeyboard();
+			expect(fireEvent.mouseDown(name(alone.container))).toBe(false);
+			expect(document.activeElement === alone.view.contentDOM).toBe(true);
+			cleanup();
+
+			// Switching hides this side's editor, so focus goes with the press,
+			// and the keyboard with it.
+			const paired = await renderBar({
+				otherSide: { available: true, show: () => {} },
+			});
+			act(() => paired.view.focus());
+			expect(fireEvent.mouseDown(name(paired.container))).toBe(true);
+			setPageHeight(pageHeight);
+			expect(fireEvent.mouseDown(name(paired.container))).toBe(true);
+		});
+	});
+
 	test("shows the file action as the page gives it", async () => {
 		await renderBar({
 			fileAction: {
@@ -2798,7 +2933,7 @@ describe("bar", () => {
 
 		const clearPicks = () =>
 			within(openMenu()).getByRole("menuitem", { name: "Clear picks" });
-		expect((clearPicks() as HTMLButtonElement).disabled).toBe(true);
+		expect(greyed(clearPicks())).toBe(true);
 		fireEvent.click(screen.getByRole("button", { name: "More actions" }));
 
 		await tap(container, 2);
@@ -2814,7 +2949,7 @@ describe("bar", () => {
 		]);
 
 		const clear = clearPicks();
-		expect((clear as HTMLButtonElement).disabled).toBe(false);
+		expect(greyed(clear)).toBe(false);
 		fireEvent.click(clear);
 
 		await waitFor(() => {
@@ -3754,24 +3889,27 @@ describe("Undo and Redo", () => {
 
 	test("undoes and redoes from the menu, each greyed out while there is nothing to do", async () => {
 		const { view } = await renderEditor();
-		expect(menuItem("Undo").disabled).toBe(true);
-		expect(menuItem("Redo").disabled).toBe(true);
+		expect(greyed(menuItem("Undo"))).toBe(true);
+		expect(greyed(menuItem("Redo"))).toBe(true);
+		// A tap on a greyed-out item does nothing, and the menu stays open.
+		fireEvent.click(menuItem("Redo"));
+		expect(screen.queryByRole("menu") === null).toBe(false);
 
 		// The menu follows the history as it changes, while it is open.
 		type(view, "new ");
-		expect(menuItem("Undo").disabled).toBe(false);
-		expect(menuItem("Redo").disabled).toBe(true);
+		expect(greyed(menuItem("Undo"))).toBe(false);
+		expect(greyed(menuItem("Redo"))).toBe(true);
 
 		fireEvent.click(menuItem("Undo"));
 		expect(view.state.doc.toString()).toBe("alpha\nbeta\n");
 		expect(screen.queryByRole("menu") === null).toBe(true);
-		expect(menuItem("Undo").disabled).toBe(true);
-		expect(menuItem("Redo").disabled).toBe(false);
+		expect(greyed(menuItem("Undo"))).toBe(true);
+		expect(greyed(menuItem("Redo"))).toBe(false);
 
 		fireEvent.click(menuItem("Redo"));
 		expect(view.state.doc.toString()).toBe("new alpha\nbeta\n");
-		expect(menuItem("Undo").disabled).toBe(false);
-		expect(menuItem("Redo").disabled).toBe(true);
+		expect(greyed(menuItem("Undo"))).toBe(false);
+		expect(greyed(menuItem("Redo"))).toBe(true);
 	});
 
 	// historyKeymap binds Ctrl+Shift+Z itself on Linux, but the editor's own
@@ -3836,7 +3974,7 @@ describe("Undo and Redo", () => {
 		fireEvent.click(await screen.findByRole("button", { name: "Restore" }));
 
 		expect(view.state.doc.toString()).toBe("draft\n");
-		expect(menuItem("Undo").disabled).toBe(true);
+		expect(greyed(menuItem("Undo"))).toBe(true);
 		pressKey(view, "z");
 		expect(view.state.doc.toString()).toBe("draft\n");
 		expect(barStatus(container)).toBe("Unsaved changes");
@@ -3881,7 +4019,7 @@ describe("Undo and Redo", () => {
 	test("drops the history on Reload, so Undo cannot bring back what the file held before", async () => {
 		const { container, view } = await renderEditor();
 		type(view, "mine ");
-		expect(menuItem("Undo").disabled).toBe(false);
+		expect(greyed(menuItem("Undo"))).toBe(false);
 		window.confirm = () => true;
 		onDisk = "theirs\n";
 
@@ -3895,8 +4033,8 @@ describe("Undo and Redo", () => {
 			).toBe("theirs\n");
 		});
 		const reloaded = await currentView(container);
-		expect(menuItem("Undo").disabled).toBe(true);
-		expect(menuItem("Redo").disabled).toBe(true);
+		expect(greyed(menuItem("Undo"))).toBe(true);
+		expect(greyed(menuItem("Redo"))).toBe(true);
 		pressKey(reloaded, "z");
 		expect(reloaded.state.doc.toString()).toBe("theirs\n");
 	});
@@ -3910,8 +4048,8 @@ describe("Undo and Redo", () => {
 				view.dispatch({ changes: { from: 0, insert: "new " } });
 			});
 
-			expect(menuItem("Undo").disabled).toBe(true);
-			expect(menuItem("Redo").disabled).toBe(true);
+			expect(greyed(menuItem("Undo"))).toBe(true);
+			expect(greyed(menuItem("Redo"))).toBe(true);
 			pressKey(view, "z");
 			expect(view.state.doc.toString()).toBe("new alpha\nbeta\n");
 		});

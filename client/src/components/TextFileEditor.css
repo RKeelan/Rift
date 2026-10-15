@@ -199,7 +199,7 @@ button.text-file-editor-name[aria-disabled="true"] {
 	cursor: pointer;
 }
 
-.text-file-editor-menu-item:disabled {
+.text-file-editor-menu-item[aria-disabled="true"] {
 	opacity: 0.5;
 	cursor: default;
 }
