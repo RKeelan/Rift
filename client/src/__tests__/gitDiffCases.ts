@@ -26,6 +26,34 @@ export const GIT_DIFF_CASES: GitDiffCase[] = [
 		diff: gitDiff("@@ -1,3 +1,3 @@", " a", "-b", "+B", " c"),
 	},
 	{
+		name: "a run of three lines modified line by line",
+		base: "1\n2\n3\n4\n5\n",
+		current: "1\nTWO\nTHREE\nFOUR\n5\n",
+		diff: gitDiff(
+			"@@ -1,5 +1,5 @@",
+			" 1",
+			"-2",
+			"-3",
+			"-4",
+			"+TWO",
+			"+THREE",
+			"+FOUR",
+			" 5",
+		),
+	},
+	{
+		name: "three lines replaced by one",
+		base: "1\n2\n3\n4\n5\n",
+		current: "1\n2 to 4\n5\n",
+		diff: gitDiff("@@ -1,5 +1,3 @@", " 1", "-2", "-3", "-4", "+2 to 4", " 5"),
+	},
+	{
+		name: "one line replaced by three",
+		base: "1\n2\n3\n",
+		current: "1\n2a\n2b\n2c\n3\n",
+		diff: gitDiff("@@ -1,3 +1,5 @@", " 1", "-2", "+2a", "+2b", "+2c", " 3"),
+	},
+	{
 		name: "a block deleted from between two similar ones",
 		base: "b() {\n\tr\n}\n\nc() {\n\ts\n}\n\nd() {\n}\n",
 		current: "b() {\n\tn\n\tr\n}\n\nd() {\n}\n",
@@ -105,6 +133,12 @@ export const GIT_DIFF_CASES: GitDiffCase[] = [
 		base: "a\nb",
 		current: "a\nb\n",
 		diff: gitDiff("@@ -1,2 +1,2 @@", " a", "-b", NO_NEWLINE, "+b"),
+	},
+	{
+		name: "a line added after a last line without a newline",
+		base: "a\nb",
+		current: "a\nb\nc\n",
+		diff: gitDiff("@@ -1,2 +1,3 @@", " a", "-b", NO_NEWLINE, "+b", "+c"),
 	},
 	{
 		name: "a final newline removed",

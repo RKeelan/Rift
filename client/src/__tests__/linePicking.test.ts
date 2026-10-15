@@ -3,7 +3,8 @@ import { EditorState } from "@codemirror/state";
 import {
 	clearPickedLines,
 	countPickedLines,
-	deletionAnchorLine,
+	deletionPickGroups,
+	deletionPickLines,
 	getPickTargets,
 	livePickedLines,
 	pickedLines,
@@ -103,13 +104,35 @@ describe("getPickTargets", () => {
 		const targets = getPickTargets(
 			{
 				lineHighlights: [],
-				deletedChunks: [{ anchorIndex: 1, lines: ["gone", "also gone"] }],
+				deletedChunks: [
+					{ anchorIndex: 1, added: 0, lines: ["gone", "also gone"] },
+				],
 			},
 			5,
 		);
 
 		expect([...targets.lines]).toEqual([]);
 		expect([...targets.deletions]).toEqual([[2, 2]]);
+	});
+
+	test("offers each deleted line of a modified run through the line in its place", () => {
+		const targets = getPickTargets(
+			{
+				lineHighlights: [6, 7, 8].map((lineNumber) => ({
+					kind: "added" as const,
+					lineNumber,
+				})),
+				deletedChunks: [{ anchorIndex: 5, added: 3, lines: ["6", "7", "8"] }],
+			},
+			10,
+		);
+
+		expect([...targets.lines]).toEqual([6, 7, 8]);
+		expect([...targets.deletions]).toEqual([
+			[6, 1],
+			[7, 1],
+			[8, 1],
+		]);
 	});
 });
 
@@ -118,12 +141,12 @@ describe("livePickedLines", () => {
 		const targets = getPickTargets(
 			{
 				lineHighlights: [{ kind: "added", lineNumber: 2 }],
-				deletedChunks: [{ anchorIndex: 5, lines: ["gone"] }],
+				deletedChunks: [{ anchorIndex: 5, added: 0, lines: ["gone"] }],
 			},
 			8,
 		);
 
-		// Line 4 was a deletion's anchor before git's diff moved it to line 6.
+		// Line 4 picked a deletion before git's diff moved it to line 6.
 		expect(livePickedLines(new Set([2, 4, 6]), targets)).toEqual([2, 6]);
 	});
 });
@@ -132,12 +155,12 @@ describe("rangesCoverTarget", () => {
 	const targets = getPickTargets(
 		{
 			lineHighlights: [{ kind: "added", lineNumber: 2 }],
-			deletedChunks: [{ anchorIndex: 5, lines: ["gone"] }],
+			deletedChunks: [{ anchorIndex: 5, added: 0, lines: ["gone"] }],
 		},
 		8,
 	);
 
-	test("is true when a range takes in an added line or a deletion's anchor", () => {
+	test("is true when a range takes in an added line or a deletion's pick line", () => {
 		expect(rangesCoverTarget([[2, 2]], targets)).toBe(true);
 		expect(rangesCoverTarget([[5, 7]], targets)).toBe(true);
 	});
@@ -156,13 +179,67 @@ describe("rangesCoverTarget", () => {
 	});
 });
 
-describe("deletionAnchorLine", () => {
-	test("anchors a deletion to the line below it", () => {
-		expect(deletionAnchorLine({ anchorIndex: 3 }, 10)).toBe(4);
+describe("deletionPickLines", () => {
+	test("picks a pure deletion through the line below it", () => {
+		expect(
+			deletionPickLines({ anchorIndex: 3, added: 0, lines: ["a", "b"] }, 10),
+		).toEqual([4, 4]);
 	});
 
-	test("anchors a deletion past the last line to the last line", () => {
-		expect(deletionAnchorLine({ anchorIndex: 5 }, 5)).toBe(5);
+	test("picks a deletion past the last line through the last line", () => {
+		expect(
+			deletionPickLines({ anchorIndex: 5, added: 0, lines: ["a"] }, 5),
+		).toEqual([5]);
+	});
+
+	test("pairs a modified run's deleted lines with its added lines in order", () => {
+		expect(
+			deletionPickLines(
+				{ anchorIndex: 5, added: 3, lines: ["a", "b", "c"] },
+				10,
+			),
+		).toEqual([6, 7, 8]);
+	});
+
+	test("picks the deletions past a run's last added line through that line", () => {
+		expect(
+			deletionPickLines(
+				{ anchorIndex: 5, added: 1, lines: ["a", "b", "c"] },
+				10,
+			),
+		).toEqual([6, 6, 6]);
+		expect(
+			deletionPickLines(
+				{ anchorIndex: 5, added: 2, lines: ["a", "b", "c", "d"] },
+				10,
+			),
+		).toEqual([6, 7, 7, 7]);
+	});
+
+	test("leaves a run's added lines past its last deletion without one", () => {
+		expect(
+			deletionPickLines({ anchorIndex: 5, added: 3, lines: ["a"] }, 10),
+		).toEqual([6]);
+	});
+});
+
+describe("deletionPickGroups", () => {
+	test("splits a chunk into the lines picked through each line", () => {
+		expect(
+			deletionPickGroups(
+				{ anchorIndex: 5, added: 2, lines: ["a", "b", "c", "d"] },
+				10,
+			),
+		).toEqual([
+			{ pickLine: 6, from: 0, to: 1 },
+			{ pickLine: 7, from: 1, to: 4 },
+		]);
+	});
+
+	test("keeps a pure deletion whole", () => {
+		expect(
+			deletionPickGroups({ anchorIndex: 5, added: 0, lines: ["a", "b"] }, 10),
+		).toEqual([{ pickLine: 6, from: 0, to: 2 }]);
 	});
 });
 
@@ -189,9 +266,9 @@ describe("countPickedLines", () => {
 			],
 			deletedChunks: [
 				// A modification: line 2 replaces this deleted line.
-				{ anchorIndex: 1, lines: ["old 2"] },
+				{ anchorIndex: 1, added: 1, lines: ["old 2"] },
 				// A pure deletion of three lines above line 6.
-				{ anchorIndex: 5, lines: ["x", "y", "z"] },
+				{ anchorIndex: 5, added: 0, lines: ["x", "y", "z"] },
 			],
 		},
 		8,

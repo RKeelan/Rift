@@ -114,7 +114,13 @@ interface ChangeLineHighlight {
 }
 
 interface DeletedLineChunk {
+	/** The 0-based index of the line the deleted lines sit in front of. */
 	anchorIndex: number;
+	/**
+	 * How many lines their change adds, from the line they sit in front of,
+	 * which decides the lines they are picked and staged with.
+	 */
+	added: number;
 	lines: string[];
 }
 
@@ -198,6 +204,7 @@ function getDiffDecorations(diff: string): ChangeDecorationsData {
 		if (pendingDeletedLines.length > 0) {
 			deletedChunks.push({
 				anchorIndex: nextNewLine - 1,
+				added: pendingInsertedLines.length,
 				lines: pendingDeletedLines,
 			});
 		}
@@ -376,6 +383,7 @@ function getLiveChangeDecorations(
 		if (originalMiddle.length > 0) {
 			deletedChunks.push({
 				anchorIndex: prefixLength,
+				added: currentMiddle.length,
 				lines: originalMiddle,
 			});
 		}
@@ -392,9 +400,9 @@ function getLiveChangeDecorations(
 		}
 
 		// The diff can interleave a run's insertions and deletions, but git lists
-		// a run's deletions first, anchored to the run's first new line, and
-		// stages them with that line. Anchor them there too, so a deletion is
-		// shown, picked, and staged at the same line.
+		// a run's deletions first, in front of the run's first new line, and
+		// stages them with its new lines in order. Place them there too, so a
+		// deletion is shown, picked, and staged alike.
 		const deletedLines: string[] = [];
 		const insertedLines: string[] = [];
 		while (index < ops.length && ops[index].type !== "equal") {
@@ -406,6 +414,7 @@ function getLiveChangeDecorations(
 		if (deletedLines.length > 0) {
 			deletedChunks.push({
 				anchorIndex: currentIndex,
+				added: insertedLines.length,
 				lines: deletedLines,
 			});
 		}
@@ -553,11 +562,12 @@ export interface ChangeRegion {
 /**
  * Collapses the per-line change decorations into change regions, so
  * Previous/Next can jump between changes the way VS Code's diff editor does,
- * and each change can be staged whole. Adjacent changed lines (and a deletion
- * sitting against them, through the line it is anchored to) count as a single
- * region; a gap of an unchanged line starts a new one. Every line of a region
- * is a changed line or a deletion's anchor, so staging the region's lines
- * stages exactly its changes.
+ * and each change can be staged whole. Adjacent changed lines (and deleted
+ * lines sitting against them, through the line they sit in front of) count as
+ * a single region; a gap of an unchanged line starts a new one. Every line of
+ * a region is a changed line or the line a pure deletion is picked through,
+ * and every deleted line is picked through a line of its region, so staging
+ * the region's lines stages exactly its changes.
  */
 export function getChangeRegions(
 	decorations: ChangeDecorationsData,
@@ -1415,7 +1425,7 @@ export function TextFileEditor({
 			const {
 				clearPickedLines,
 				countPickedLines,
-				deletionAnchorLine,
+				deletionPickGroups,
 				getPickTargets,
 				linePickerGutter,
 				livePickedLines,
@@ -1526,12 +1536,17 @@ export function TextFileEditor({
 				}
 			}
 
+			// The deleted lines of a chunk that are picked through one line. A
+			// chunk whose lines go with different lines, as a modified run's do,
+			// is drawn as one such widget for each, joined into a single block.
 			class DeletedLinesWidget extends WidgetType {
 				constructor(
 					readonly lines: string[],
-					readonly anchorLine: number,
+					readonly pickLine: number,
 					readonly picked: boolean,
 					readonly marks: (CharRange[] | null)[] | undefined,
+					readonly joinedAbove: boolean,
+					readonly joinedBelow: boolean,
 				) {
 					super();
 				}
@@ -1544,24 +1559,33 @@ export function TextFileEditor({
 				// place by that estimate moves the text by its error.
 				override eq(other: DeletedLinesWidget) {
 					return (
-						other.anchorLine === this.anchorLine &&
+						other.pickLine === this.pickLine &&
 						other.picked === this.picked &&
+						other.joinedAbove === this.joinedAbove &&
+						other.joinedBelow === this.joinedBelow &&
 						sameLines(other.lines, this.lines) &&
 						sameMarks(other.marks, this.marks)
 					);
 				}
 
 				// Each deleted line is one of the editor's 24px lines, inside the
-				// chunk's 2px of padding above and below. A wrapped line is
-				// taller, and is measured once drawn.
+				// chunk's 2px of padding above and below, which a widget joined
+				// to another leaves out on that side. A wrapped line is taller,
+				// and is measured once drawn.
 				override get estimatedHeight() {
-					return this.lines.length * 24 + 4;
+					return (
+						this.lines.length * 24 +
+						(this.joinedAbove ? 0 : 2) +
+						(this.joinedBelow ? 0 : 2)
+					);
 				}
 
 				override toDOM() {
 					const wrapper = document.createElement("div");
 					wrapper.className = `cm-deletedChunk${
 						this.picked ? " cm-deletedChunk--picked" : ""
+					}${this.joinedAbove ? " cm-deletedChunk--joinedAbove" : ""}${
+						this.joinedBelow ? " cm-deletedChunk--joinedBelow" : ""
 					}`;
 					this.lines.forEach((line, index) => {
 						const lineElement = document.createElement("div");
@@ -1673,19 +1697,25 @@ export function TextFileEditor({
 						chunk.anchorIndex >= doc.lines
 							? doc.length
 							: doc.line(chunk.anchorIndex + 1).from;
-					const anchorLine = deletionAnchorLine(chunk, doc.lines);
-					ranges.push(
-						Decoration.widget({
-							block: true,
-							side: -1,
-							widget: new DeletedLinesWidget(
-								chunk.lines,
-								anchorLine,
-								picked.has(anchorLine),
-								wordMarks.deleted.get(chunk),
-							),
-						}).range(anchor),
-					);
+					const marks = wordMarks.deleted.get(chunk);
+					const groups = deletionPickGroups(chunk, doc.lines);
+					// Widgets at one place keep the order they are added in.
+					groups.forEach(({ pickLine, from, to }, index) => {
+						ranges.push(
+							Decoration.widget({
+								block: true,
+								side: -1,
+								widget: new DeletedLinesWidget(
+									chunk.lines.slice(from, to),
+									pickLine,
+									picked.has(pickLine),
+									marks?.slice(from, to),
+									index > 0,
+									index < groups.length - 1,
+								),
+							}).range(anchor),
+						);
+					});
 				}
 
 				return Decoration.set(
@@ -1766,8 +1796,8 @@ export function TextFileEditor({
 				// The targets only name lines that staging acts on once git's diff
 				// describes the buffer, which also means the change context has loaded.
 				canPick: (state) => state.field(changeField).changes.matchesGitDiff,
-				widgetAnchor: (widget) =>
-					widget instanceof DeletedLinesWidget ? widget.anchorLine : null,
+				widgetPickLine: (widget) =>
+					widget instanceof DeletedLinesWidget ? widget.pickLine : null,
 			});
 			// Picking lines and staging a change whole are offered together, since
 			// both need a Stage or Unstage that acts by line.

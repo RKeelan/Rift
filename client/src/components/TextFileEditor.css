@@ -282,6 +282,16 @@ button.text-file-editor-name[aria-disabled="true"] {
 	box-shadow: inset 3px 0 0 #ffa198;
 }
 
+/* A chunk whose lines are picked through different lines is drawn as a block
+   for each, which meet without padding so the chunk reads as one. */
+.text-file-editor-surface .cm-deletedChunk--joinedAbove {
+	padding-top: 0;
+}
+
+.text-file-editor-surface .cm-deletedChunk--joinedBelow {
+	padding-bottom: 0;
+}
+
 .text-file-editor-surface .cm-deletedChunkLine {
 	padding: 0 0.75rem 0 0.875rem;
 	color: #ffa198;
