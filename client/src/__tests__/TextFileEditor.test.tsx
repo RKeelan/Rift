@@ -3665,6 +3665,193 @@ describe("refreshed change context", () => {
 
 		expect(saves[1]).toBe("X\na\nB\nY\n");
 	});
+
+	describe("the cursor's line", () => {
+		const FILE = "a\nB\nc\nD\ne\n";
+		// The second and fourth lines changed and unstaged.
+		const BOTH_UNSTAGED = {
+			comparison: "a\nb\nc\nd\ne\n",
+			diff: "@@ -1,5 +1,5 @@\n a\n-b\n+B\n c\n-d\n+D\n e\n",
+		};
+		// The change to the second line staged.
+		const ONE_STAGED = {
+			comparison: "a\nB\nc\nd\ne\n",
+			diff: "@@ -1,5 +1,5 @@\n a\n B\n c\n-d\n+D\n e\n",
+		};
+		// A strip, and one deleted line inside its 2px of padding each way.
+		const STRIP_AND_DELETION = 48 + 24 + 4;
+
+		// Opens the file with the cursor on its last line, which the test lays
+		// out at the given height on screen, in a scroller from 0 to 500px.
+		async function open(
+			context: { comparison: string; diff: string | null },
+			cursorTop: number,
+		) {
+			globalThis.fetch = (async () =>
+				new Response(FILE, {
+					headers: { "x-file-mtime-ms": "1" },
+				})) as typeof fetch;
+			const props = {
+				filePath: "notes.txt",
+				repo: "test-repo",
+				changeType: "modified" as const,
+				onStaged: () => {},
+			};
+			const { container, rerender } = render(
+				<TextFileEditor
+					{...props}
+					comparisonContent={context.comparison}
+					changeDiff={context.diff}
+				/>,
+			);
+			await waitFor(() => {
+				expect(container.querySelector(".cm-content")).not.toBeNull();
+			});
+			const view = await editorView(container);
+			const cursor = view.state.doc.line(5).from;
+			act(() => {
+				view.dispatch({ selection: { anchor: cursor } });
+			});
+
+			Object.defineProperty(view, "coordsAtPos", {
+				value: () => ({
+					left: 0,
+					right: 10,
+					top: cursorTop,
+					bottom: cursorTop + 24,
+				}),
+			});
+			view.scrollDOM.getBoundingClientRect = () =>
+				({ top: 0, bottom: 500, left: 0, right: 400 }) as DOMRect;
+			let scrollTop = 100;
+			Object.defineProperty(view.scrollDOM, "scrollTop", {
+				configurable: true,
+				get: () => scrollTop,
+				set: (value: number) => {
+					scrollTop = value;
+				},
+			});
+
+			// The scrolls the editor asks for from here on.
+			const { EditorView } = await import("@codemirror/view");
+			const scrollType = (
+				EditorView.scrollIntoView(0) as unknown as { type: unknown }
+			).type;
+			const scrolls: { range: { head: number }; target: object }[] = [];
+			const dispatch = view.dispatch.bind(view);
+			view.dispatch = ((...specs: Parameters<typeof view.dispatch>) => {
+				for (const spec of specs) {
+					const effects = (spec as { effects?: unknown }).effects;
+					for (const effect of [effects ?? []].flat()) {
+						const { type, value } = effect as {
+							type: unknown;
+							value: { range: { head: number } };
+						};
+						if (type === scrollType) {
+							scrolls.push({ range: value.range, target: value });
+						}
+					}
+				}
+				return dispatch(...specs);
+			}) as typeof view.dispatch;
+
+			// Scrolls as CodeMirror does once it has measured the redrawn
+			// decorations, through the editor's scroll handlers. It runs before
+			// the test DOM's empty layout can be measured, so every height is
+			// CodeMirror's estimate.
+			const { EditorSelection } = await import("@codemirror/state");
+			const applyScroll = () => {
+				const [{ range, target }] = scrolls;
+				for (const handler of view.state.facet(EditorView.scrollHandler)) {
+					if (
+						handler(
+							view,
+							EditorSelection.cursor(range.head),
+							target as Parameters<typeof handler>[2],
+						)
+					) {
+						return;
+					}
+				}
+				throw new Error("no handler took the scroll");
+			};
+			const handOver = (context: { comparison: string; diff: string }) => {
+				rerender(
+					<TextFileEditor
+						{...props}
+						comparisonContent={context.comparison}
+						changeDiff={context.diff}
+					/>,
+				);
+			};
+			return {
+				container,
+				cursor,
+				scrolls,
+				applyScroll,
+				handOver,
+				scrollTop: () => scrollTop,
+			};
+		}
+
+		test("stays put when a strip appears above it", async () => {
+			const editor = await open(ONE_STAGED, 300);
+
+			// Unstaging the second line gives it a strip and its deleted line.
+			editor.handOver(BOTH_UNSTAGED);
+
+			expect(editor.scrolls.map(({ range }) => range.head)).toEqual([
+				editor.cursor,
+			]);
+			editor.applyScroll();
+			expect(editor.scrollTop()).toBe(100 + STRIP_AND_DELETION);
+		});
+
+		test("stays put when a strip above it goes", async () => {
+			const editor = await open(BOTH_UNSTAGED, 300);
+
+			editor.handOver(ONE_STAGED);
+
+			editor.applyScroll();
+			expect(editor.scrollTop()).toBe(100 - STRIP_AND_DELETION);
+		});
+
+		test("is left to CodeMirror when it is off screen", async () => {
+			const editor = await open(ONE_STAGED, 520);
+
+			editor.handOver(BOTH_UNSTAGED);
+
+			expect(editor.scrolls).toEqual([]);
+		});
+
+		test("is left to CodeMirror as the file opens", async () => {
+			const editor = await open(
+				{ comparison: BOTH_UNSTAGED.comparison, diff: null },
+				300,
+			);
+
+			// git's diff places the first strips.
+			editor.handOver(BOTH_UNSTAGED);
+
+			expect(editor.scrolls).toEqual([]);
+		});
+
+		test("keeps the deleted lines drawn when the refreshed diff leaves them as they were", async () => {
+			const editor = await open(BOTH_UNSTAGED, 300);
+			const chunks = [...editor.container.querySelectorAll(".cm-deletedChunk")];
+			expect(chunks.length).toBe(2);
+
+			// The same changes, in git's diff with its headers.
+			editor.handOver({
+				comparison: BOTH_UNSTAGED.comparison,
+				diff: `diff --git a/notes.txt b/notes.txt\nindex ${B_MODIFIED_BLOBS} 100644\n--- a/notes.txt\n+++ b/notes.txt\n${BOTH_UNSTAGED.diff}`,
+			});
+
+			const after = [...editor.container.querySelectorAll(".cm-deletedChunk")];
+			expect(after.length).toBe(2);
+			expect(after[0] === chunks[0] && after[1] === chunks[1]).toBe(true);
+		});
+	});
 });
 
 describe("emptied files", () => {

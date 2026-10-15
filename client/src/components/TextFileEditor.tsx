@@ -517,6 +517,30 @@ export function getWordMarks(
 	return marks;
 }
 
+function sameLines(a: readonly string[], b: readonly string[]): boolean {
+	return a.length === b.length && a.every((line, index) => line === b[index]);
+}
+
+function sameMarks(
+	a: readonly (CharRange[] | null)[] | undefined,
+	b: readonly (CharRange[] | null)[] | undefined,
+): boolean {
+	if (a === undefined || b === undefined) return a === b;
+	return (
+		a.length === b.length &&
+		a.every((ranges, index) => {
+			const other = b[index];
+			if (ranges === null || other === null) return ranges === other;
+			return (
+				ranges.length === other.length &&
+				ranges.every(
+					([from, to], at) => from === other[at][0] && to === other[at][1],
+				)
+			);
+		})
+	);
+}
+
 /** A run of changed lines, inclusive and 1-based. */
 export interface ChangeRegion {
 	start: number;
@@ -1361,6 +1385,7 @@ export function TextFileEditor({
 				Transaction,
 			} = await import("@codemirror/state");
 			const {
+				BlockType,
 				Decoration,
 				EditorView,
 				WidgetType,
@@ -1502,13 +1527,26 @@ export function TextFileEditor({
 					super();
 				}
 
+				// The lines and their marks are worked out afresh whenever the
+				// changes are, so they are compared by content. An equal chunk
+				// keeps its drawing and its measured height. Counted as new, it
+				// would be drawn again and its height estimated again until the
+				// next measure, and CodeMirror keeping the top of the view in
+				// place by that estimate moves the text by its error.
 				override eq(other: DeletedLinesWidget) {
 					return (
-						other.lines === this.lines &&
 						other.anchorLine === this.anchorLine &&
 						other.picked === this.picked &&
-						other.marks === this.marks
+						sameLines(other.lines, this.lines) &&
+						sameMarks(other.marks, this.marks)
 					);
+				}
+
+				// Each deleted line is one of the editor's 24px lines, inside the
+				// chunk's 2px of padding above and below. A wrapped line is
+				// taller, and is measured once drawn.
+				override get estimatedHeight() {
+					return this.lines.length * 24 + 4;
 				}
 
 				override toDOM() {
@@ -1579,6 +1617,8 @@ export function TextFileEditor({
 					),
 					// The changes that get a strip, which only git's diff can place.
 					strips: changes.matchesGitDiff ? regions : [],
+					// Whether git's diff has placed the strips since the file loaded.
+					stripsPlaced: changes.matchesGitDiff,
 					targets: getPickTargets(changes, doc.lines),
 					// The blob ids of the git diff these targets were read from, kept
 					// beside them so a stage or unstage names the diff whose line
@@ -1704,7 +1744,11 @@ export function TextFileEditor({
 					// edits or while the context is refetched after a stage, the
 					// strips stay where they were, disabled. Adding or removing them
 					// would move the text below them, including the line being typed.
-					return { ...next, strips: mapStrips(value.strips, transaction) };
+					return {
+						...next,
+						strips: mapStrips(value.strips, transaction),
+						stripsPlaced: value.stripsPlaced,
+					};
 				},
 			});
 
@@ -1724,6 +1768,56 @@ export function TextFileEditor({
 					buildChangeStrips(state),
 				),
 			];
+
+			// The top of a line's text. CodeMirror counts the strip and deleted
+			// lines drawn above a line as part of its block, so the block's own
+			// top stays put when a strip appears there.
+			function textTop(
+				view: import("@codemirror/view").EditorView,
+				pos: number,
+			) {
+				const block = view.lineBlockAt(pos);
+				if (typeof block.type === "number") return block.top;
+				return (
+					block.type.find((part) => part.type === BlockType.Text)?.top ??
+					block.top
+				);
+			}
+
+			// Each scroll made to keep the cursor's line in place, with the top
+			// of the line's text when it was made.
+			const cursorLineTops = new WeakMap<object, number>();
+
+			// Keeps the cursor's line where it is on screen while the change
+			// decorations are redrawn, as when a save or a stage refetches git's
+			// diff and a strip appears or goes above the line. Left to itself,
+			// CodeMirror holds the line at the top of the view still, so a new
+			// strip pushes every line below it down, the one being typed
+			// included, which with the keyboard up can put it under the bar.
+			// Here the text above the strip moves up instead. CodeMirror makes
+			// the scroll in the measure that follows the redraw, so no frame
+			// shows the line moved.
+			function keepCursorLine(view: import("@codemirror/view").EditorView) {
+				// The first strips git's diff places come as the file opens, and
+				// the view opens at its first change instead.
+				if (!view.state.field(changeField).stripsPlaced) return [];
+				const { from } = view.state.doc.lineAt(view.state.selection.main.head);
+				// Reading coordinates brings the layout up to date first.
+				const line = view.coordsAtPos(from);
+				const visible = view.scrollDOM.getBoundingClientRect();
+				if (!line || line.bottom <= visible.top || line.top >= visible.bottom) {
+					return [];
+				}
+				const top = textTop(view, from);
+				// In CodeMirror's own terms, the line's top stays this far below
+				// the top of the view.
+				const scroll = EditorView.scrollIntoView(from, {
+					y: "start",
+					yMargin: top - view.scrollDOM.scrollTop,
+				});
+				cursorLineTops.set(scroll.value as object, top);
+				return [scroll];
+			}
 
 			const riftHighlightStyle = HighlightStyle.define([
 				{
@@ -1851,6 +1945,14 @@ export function TextFileEditor({
 					setCanRedo(redoDepth(update.state) > 0);
 				}),
 				languageCompartment.of([]),
+				// Moves the view by as far as the redrawn decorations moved the
+				// cursor's line.
+				EditorView.scrollHandler.of((view, range, target) => {
+					const top = cursorLineTops.get(target);
+					if (top === undefined) return false;
+					view.scrollDOM.scrollTop += textTop(view, range.head) - top;
+					return true;
+				}),
 				EditorView.theme({
 					"&": {
 						// Material's body text size for Android.
@@ -1946,7 +2048,9 @@ export function TextFileEditor({
 			stopFollowingResize = () =>
 				window.removeEventListener("resize", followResize);
 			refreshDecorationsRef.current = () => {
-				view.dispatch({ effects: refreshChangeDecorations.of() });
+				view.dispatch({
+					effects: [refreshChangeDecorations.of(), ...keepCursorLine(view)],
+				});
 			};
 			pickerRef.current = {
 				ranges: () => {
