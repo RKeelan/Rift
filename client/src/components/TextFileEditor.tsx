@@ -27,7 +27,10 @@ import {
 	readDraft,
 	scheduleDraft,
 } from "../drafts.ts";
-import { onScreenKeyboardShowing } from "../onScreenKeyboard.ts";
+import {
+	pressKeepsEditorFocus,
+	swallowPressInEditor,
+} from "../onScreenKeyboard.ts";
 import { isChunkLoadError, reloadForStaleChunk } from "../staleChunk.ts";
 import "./TextFileEditor.css";
 
@@ -1477,13 +1480,10 @@ export function TextFileEditor({
 				override toDOM(view: import("@codemirror/view").EditorView) {
 					const strip = document.createElement("div");
 					strip.className = "cm-changeStrip";
-					// Swallowing the press keeps the cursor where it was. Chrome on
-					// Android raises the keyboard on any tap while the editor has
-					// focus, so the press also takes focus from the editor: staging a
-					// change is not typing.
+					// A press on the strip, its label or its button leaves the cursor
+					// and the on-screen keyboard as they were.
 					strip.addEventListener("mousedown", (event) => {
-						event.preventDefault();
-						view.contentDOM.blur();
+						swallowPressInEditor(view, event);
 					});
 					const label = document.createElement("span");
 					label.className = "cm-changeStripLabel";
@@ -2241,16 +2241,12 @@ export function TextFileEditor({
 	}, [menuOpen]);
 
 	// A press on the bar's actions, its menu, or a file name with no other
-	// side to switch to leaves the on-screen keyboard as it was. Chrome on Android lowers the keyboard when the editor loses
-	// focus, and the bar, which rides above the keyboard, would drop to the
-	// foot of the screen, so while the keyboard is up the press keeps focus in
-	// the editor, with the cursor where it was for typing to carry on. While
-	// it is down, the press takes focus from the editor as usual, since a tap
-	// while the editor has focus raises the keyboard.
+	// side to switch to leaves the on-screen keyboard as it was, so the bar,
+	// which rides above the keyboard, stays where it is. Otherwise the press
+	// moves focus as usual.
 	const keepKeyboard = useCallback((event: SyntheticEvent) => {
-		if (viewRef.current?.hasFocus && onScreenKeyboardShowing()) {
-			event.preventDefault();
-		}
+		const view = viewRef.current;
+		if (view && pressKeepsEditorFocus(view)) event.preventDefault();
 	}, []);
 
 	// A file opens at its first change rather than at its top, once the view is

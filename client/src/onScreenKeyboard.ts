@@ -47,3 +47,34 @@ const pageKeyboard =
 export function onScreenKeyboardShowing(): boolean {
 	return pageKeyboard?.showing() ?? false;
 }
+
+/** The parts of an editor view that a press on one of its controls needs. */
+interface Editor {
+	readonly hasFocus: boolean;
+	readonly contentDOM: HTMLElement;
+}
+
+/**
+ * Whether a press on a control in or beside the editor keeps focus in the
+ * editor, which leaves the on-screen keyboard as it was. Chrome on Android
+ * lowers the keyboard when the editor loses focus, and raises it on any tap
+ * while the editor has focus. So while the keyboard is up, the press keeps
+ * focus in the editor, with the cursor where it was for typing to carry on,
+ * and while it is down, the press takes focus from the editor.
+ */
+export function pressKeepsEditorFocus(
+	editor: Pick<Editor, "hasFocus">,
+): boolean {
+	return editor.hasFocus && onScreenKeyboardShowing();
+}
+
+/**
+ * Handles a press on a tap target inside the editor, such as a change's strip
+ * or a line's pick target. Swallowing the press keeps the cursor where it was
+ * and starts no text selection, and the editor keeps or loses focus as
+ * `pressKeepsEditorFocus` decides.
+ */
+export function swallowPressInEditor(editor: Editor, event: Event): void {
+	event.preventDefault();
+	if (!pressKeepsEditorFocus(editor)) editor.contentDOM.blur();
+}
