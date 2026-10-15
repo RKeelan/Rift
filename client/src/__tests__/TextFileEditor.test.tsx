@@ -3369,6 +3369,207 @@ describe("refreshed change context", () => {
 		expect((await editorView(container)) === view).toBe(true);
 	});
 
+	// Records every mismatch notice the editor draws from now on, however
+	// briefly, and gives them once the observer has caught up.
+	function watchNotices(container: HTMLElement) {
+		const notices: string[] = [];
+		const observer = new MutationObserver((records) => {
+			for (const record of records) {
+				for (const node of record.addedNodes) {
+					if (
+						node instanceof HTMLElement &&
+						node.classList.contains("text-file-editor-notice")
+					) {
+						notices.push(node.textContent ?? "");
+					}
+				}
+			}
+		});
+		observer.observe(container, { childList: true, subtree: true });
+		return async () => {
+			await new Promise((resolve) => setTimeout(resolve, 0));
+			observer.disconnect();
+			return notices;
+		};
+	}
+
+	const MISMATCH =
+		"Git's diff doesn't match this file. Reload, or stage the whole file.";
+
+	describe("after a save", () => {
+		const COMPARISON = "a\nb\n";
+		const BEFORE = "@@ -1,2 +1,2 @@\n a\n-b\n+B\n";
+		// git's diff once the save has added a first line.
+		const AFTER = "@@ -1,2 +1,3 @@\n+X\n a\n-b\n+B\n";
+
+		// Opens a file whose second line is changed, adds a first line and
+		// saves, and watches for mismatch notices from then on.
+		async function save() {
+			globalThis.fetch = (async (_input: string, init?: RequestInit) =>
+				init?.method === "PUT"
+					? new Response(JSON.stringify({ mtimeMs: 2 }), {
+							headers: { "Content-Type": "application/json" },
+						})
+					: new Response("a\nB\n", {
+							headers: { "x-file-mtime-ms": "1" },
+						})) as unknown as typeof fetch;
+			const props = {
+				filePath: "notes.txt",
+				repo: "test-repo",
+				comparisonContent: COMPARISON,
+				changeType: "modified" as const,
+				onSaved: () => {},
+				onStaged: () => {},
+			};
+			const { container, rerender } = render(
+				<TextFileEditor {...props} changeDiff={BEFORE} />,
+			);
+			await waitFor(() => {
+				expect(container.querySelector(".cm-content")).not.toBeNull();
+			});
+			const view = await editorView(container);
+			act(() => {
+				view.dispatch({ changes: { from: 0, insert: "X\n" } });
+			});
+			fireEvent.click(await enabledButton("Save"));
+			await waitFor(() => {
+				expect(barStatus(container)).toBe("");
+			});
+
+			const drawn = watchNotices(container);
+			const handOver = (diff: string | null, loading: boolean) => {
+				rerender(
+					<TextFileEditor
+						{...props}
+						changeDiff={diff}
+						changeDiffLoading={loading}
+					/>,
+				);
+			};
+			return { container, view, handOver, drawn };
+		}
+
+		test("draws no mismatch while the refetched diff loads, nor once it lands", async () => {
+			const { container, handOver, drawn } = await save();
+
+			// The page starts the refetch, then hands over what it brought.
+			handOver(null, true);
+			handOver(AFTER, false);
+
+			await waitFor(() => {
+				expect(
+					container.querySelectorAll(".cm-changedLine--added").length,
+				).toBe(2);
+			});
+			expect(await drawn()).toEqual([]);
+		});
+
+		test("still reports a mismatch in the diff that lands", async () => {
+			const { container, handOver } = await save();
+
+			handOver(null, true);
+			// A diff that leaves out the saved line, as when the file changed on
+			// disk meanwhile.
+			handOver(BEFORE, false);
+
+			await waitFor(() => {
+				expect(
+					container.querySelector(".text-file-editor-notice")?.textContent,
+				).toBe(MISMATCH);
+			});
+		});
+	});
+
+	describe("after a stage", () => {
+		// The second line's change, unstaged, and once staged, which leaves the
+		// working tree without unstaged changes.
+		const UNSTAGED = {
+			comparison: "a\nb\n",
+			diff: "@@ -1,2 +1,2 @@\n a\n-b\n+B\n",
+		};
+		const STAGED = { comparison: "a\nB\n", diff: "" };
+
+		// Opens a file whose second line is changed and unstaged, and watches
+		// for mismatch notices from then on.
+		async function open() {
+			globalThis.fetch = (async () =>
+				new Response("a\nB\n", {
+					headers: { "x-file-mtime-ms": "1" },
+				})) as typeof fetch;
+			const props = {
+				filePath: "notes.txt",
+				repo: "test-repo",
+				changeType: "modified" as const,
+				onStaged: () => {},
+			};
+			const { container, rerender } = render(
+				<TextFileEditor
+					{...props}
+					comparisonContent={UNSTAGED.comparison}
+					changeDiff={UNSTAGED.diff}
+				/>,
+			);
+			await waitFor(() => {
+				expect(
+					container.querySelector(".cm-changedLine--added"),
+				).not.toBeNull();
+			});
+			const drawn = watchNotices(container);
+			// Hands over the change context the page refetches after the stage,
+			// whose comparison and diff land one after the other.
+			const refetch = (diff: string) => {
+				rerender(
+					<TextFileEditor
+						{...props}
+						comparisonContent={undefined}
+						changeDiff={null}
+						changeDiffLoading
+					/>,
+				);
+				rerender(
+					<TextFileEditor
+						{...props}
+						comparisonContent={STAGED.comparison}
+						changeDiff={null}
+						changeDiffLoading
+					/>,
+				);
+				rerender(
+					<TextFileEditor
+						{...props}
+						comparisonContent={STAGED.comparison}
+						changeDiff={diff}
+					/>,
+				);
+			};
+			return { container, refetch, drawn };
+		}
+
+		test("draws no mismatch as the refetched context lands", async () => {
+			const { container, refetch, drawn } = await open();
+
+			refetch(STAGED.diff);
+
+			await waitFor(() => {
+				expect(container.querySelector(".cm-changedLine")).toBeNull();
+			});
+			expect(await drawn()).toEqual([]);
+		});
+
+		test("still reports a mismatch in the context that lands", async () => {
+			const { container, refetch } = await open();
+
+			// git's diff of a working tree that has changed on disk meanwhile.
+			refetch("@@ -1,2 +1,2 @@\n a\n-B\n+C\n");
+
+			await waitFor(() => {
+				expect(
+					container.querySelector(".text-file-editor-notice")?.textContent,
+				).toBe(MISMATCH);
+			});
+		});
+	});
+
 	test("keeps an earlier save when a stage refreshes the change context", async () => {
 		let disk = "a\nB\n";
 		const saves: string[] = [];

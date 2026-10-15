@@ -875,6 +875,10 @@ export interface TextFileEditorProps {
 	readOnlyLabel?: string;
 	comparisonContent?: string;
 	changeDiff?: string | null;
+	// True while the page fetches git's diff. A null diff while nothing loads
+	// is all the page has to give: the side has no diff to read, or the fetch
+	// failed, which the page reports itself.
+	changeDiffLoading?: boolean;
 	// False when git's diff of an untracked file does not describe the file
 	// exactly, as for a file that is not UTF-8, so its lines cannot be staged
 	// from it.
@@ -929,6 +933,7 @@ export function TextFileEditor({
 	readOnlyLabel = "Read-only",
 	comparisonContent,
 	changeDiff = null,
+	changeDiffLoading = false,
 	changeDiffExact = true,
 	changeType = null,
 	staged = false,
@@ -1099,13 +1104,16 @@ export function TextFileEditor({
 			changeType,
 		};
 		refreshDecorationsRef.current?.();
-		setContextStale(false);
 	}, [comparisonContent, decoratedDiff, changeType]);
 
-	// An inexact diff is handed over too, though it draws nothing.
+	// The refetched context has been handed over once git's diff is not
+	// loading, whatever came of it: a diff, an inexact one that draws nothing,
+	// or none. The null diff the page hands over as it starts the refetch is not
+	// it.
+	// biome-ignore lint/correctness/useExhaustiveDependencies: a new diff ends the wait, as the end of a load does
 	useEffect(() => {
-		if (changeDiff !== null) setContextStale(false);
-	}, [changeDiff]);
+		if (!changeDiffLoading) setContextStale(false);
+	}, [changeDiff, changeDiffLoading]);
 
 	// An untracked file stages by line only when git's diff of it describes the
 	// file exactly as loaded. Otherwise, as when the file is not UTF-8, a clean
@@ -1165,8 +1173,21 @@ export function TextFileEditor({
 	// staging its lines would act on whichever lines now sit there.
 	const changeContextLoading =
 		comparisonContent === undefined || changeDiff === null || contextStale;
-	const matchesGitDiffRef = useRef(false);
-	const [matchesGitDiff, setMatchesGitDiff] = useState(false);
+	// Whether git's diff describes the buffer, as the editor last worked it
+	// out, with the change context it worked it out from. It is worked out as
+	// the decorations are redrawn, after the render that hands over a new
+	// context, so that render still holds the answer for the context before.
+	const gitDiffCheckRef = useRef<{
+		context: typeof changeContextRef.current | null;
+		matches: boolean;
+	}>({ context: null, matches: false });
+	const [gitDiffCheck, setGitDiffCheck] = useState(gitDiffCheckRef.current);
+	const matchesGitDiff = gitDiffCheck.matches;
+	const gitDiffChecked =
+		gitDiffCheck.context !== null &&
+		gitDiffCheck.context.comparisonContent === comparisonContent &&
+		gitDiffCheck.context.changeDiff === decoratedDiff &&
+		gitDiffCheck.context.changeType === changeType;
 	const byLineReady = !changeContextLoading && matchesGitDiff;
 	// While a draft from earlier waits for an answer the buffer is locked, and
 	// nothing acts on its lines: restoring the draft would replace them.
@@ -1181,12 +1202,14 @@ export function TextFileEditor({
 	// A file changed on disk since it loaded is the usual cause, but not the
 	// only one: a truncated diff or a clean filter can keep the two apart for
 	// good, so the notice offers the whole file as well as a reload. An
-	// untracked file in that state stages whole instead, with no notice.
+	// untracked file in that state stages whole instead, with no notice. Only
+	// an answer for the context on hand reports a mismatch.
 	const gitDiffMismatch =
 		linePickingEnabled &&
 		changeType !== "untracked" &&
 		!dirty &&
 		!changeContextLoading &&
+		gitDiffChecked &&
 		!matchesGitDiff;
 	const linePickingEnabledRef = useRef(linePickingEnabled);
 	const applyLinePickingRef = useRef<((enabled: boolean) => void) | null>(null);
@@ -1221,8 +1244,8 @@ export function TextFileEditor({
 		changeCountRef.current = 0;
 		lastNavLineRef.current = 0;
 		setChangeCount(0);
-		matchesGitDiffRef.current = false;
-		setMatchesGitDiff(false);
+		gitDiffCheckRef.current = { context: null, matches: false };
+		setGitDiffCheck(gitDiffCheckRef.current);
 		setUntrackedWhole(false);
 		offerDraft(null);
 		setDraftNotKept(false);
@@ -1515,8 +1538,8 @@ export function TextFileEditor({
 			// document or the change context changes; picking a line re-renders the
 			// decorations alone.
 			function computeChanges(doc: import("@codemirror/state").Text) {
-				const { comparisonContent, changeDiff, changeType } =
-					changeContextRef.current;
+				const context = changeContextRef.current;
+				const { comparisonContent, changeDiff, changeType } = context;
 				const changes = getEditorChangeDecorations({
 					currentContent: doc.toString(),
 					// The file as last loaded or saved, which is what git's diff describes.
@@ -1535,9 +1558,16 @@ export function TextFileEditor({
 					changeCountRef.current = changeRegionsRef.current.length;
 					setChangeCount(changeRegionsRef.current.length);
 				}
-				if (changes.matchesGitDiff !== matchesGitDiffRef.current) {
-					matchesGitDiffRef.current = changes.matchesGitDiff;
-					setMatchesGitDiff(changes.matchesGitDiff);
+				const check = gitDiffCheckRef.current;
+				if (
+					changes.matchesGitDiff !== check.matches ||
+					context !== check.context
+				) {
+					gitDiffCheckRef.current = {
+						context,
+						matches: changes.matchesGitDiff,
+					};
+					setGitDiffCheck(gitDiffCheckRef.current);
 				}
 
 				return {
