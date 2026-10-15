@@ -138,12 +138,46 @@ async function enabledButton(name: string) {
 	return button;
 }
 
+// Presses each of the editor's tap targets while the editor has focus and
+// lines 1 and 2 selected, and reports whether the press was swallowed, and
+// whether the editor kept its focus and its selection.
+function pressesInEditor(view: View, targets: Record<string, Element>) {
+	return Object.entries(targets).map(([name, target]) => {
+		act(() => view.focus());
+		selectLines(view, 1, 2);
+		const selection = view.state.selection;
+		// fireEvent returns false when a handler prevented the default.
+		const swallowed = !fireEvent.mouseDown(target);
+		return {
+			name,
+			swallowed,
+			focused: document.activeElement === view.contentDOM,
+			selectionKept: view.state.selection.eq(selection),
+		};
+	});
+}
+
+// Chrome on Android takes the on-screen keyboard's height out of the page's,
+// which the tests stand in for by shortening the window.
+const pageHeight = window.innerHeight;
+function setPageHeight(height: number) {
+	act(() => {
+		(window as { innerHeight: number }).innerHeight = height;
+		window.dispatchEvent(new Event("resize"));
+	});
+}
+const raiseKeyboard = () => setPageHeight(pageHeight - 336);
+const lowerKeyboard = () => setPageHeight(pageHeight);
+
 // An editor closed with unsaved edits keeps them as a draft in local storage,
 // which a later test opening the same file would be offered. This runs after
 // each block's own cleanup, which closes the editors.
 afterEach(() => {
 	globalThis.localStorage.clear();
 });
+
+// A test that raises the keyboard leaves it down for the next.
+afterEach(lowerKeyboard);
 
 describe("getEditorChangeDecorations", () => {
 	test("removes a prior addition when the editor returns to the git baseline", () => {
@@ -1825,26 +1859,66 @@ describe("line picking", () => {
 		);
 	});
 
-	test("swallows the press, and takes focus from the editor", async () => {
-		const { container, view } = await renderForPicking();
-
-		const target = await waitFor(() => {
-			const found = container.querySelector(".cm-pickTarget");
-			if (!found) throw new Error("no pick target");
-			return found;
+	// Each kind of target that picks line 2: its gutter cell, its deletion's
+	// gutter cell, and its number.
+	function linePickTargets(container: HTMLElement) {
+		return waitFor(() => {
+			const line = container.querySelector(
+				'.cm-pickTarget--line[data-pick-line="2"]',
+			);
+			const deletion = container.querySelector(
+				'.cm-pickTarget--deletion[data-pick-line="2"]',
+			);
+			const number = [
+				...container.querySelectorAll(".cm-lineNumbers .cm-gutterElement"),
+			].find((element) => element.textContent === "2");
+			if (!line || !deletion || !number) throw new Error("no pick targets");
+			return { line, deletion, number };
 		});
+	}
 
-		// fireEvent returns false when the handler prevented the default.
-		expect(fireEvent.mouseDown(target)).toBe(false);
+	test("swallows a press on a target, and takes focus from the editor while the keyboard is down", async () => {
+		const { container, view } = await renderForPicking();
+		const targets = await linePickTargets(container);
 
-		// A tap while the editor has focus would raise Android's keyboard. The
+		// The press is swallowed while the editor does not have focus too.
+		for (const target of Object.values(targets)) {
+			expect(fireEvent.mouseDown(target)).toBe(false);
+		}
+
+		// A tap while the editor has focus would raise the keyboard. The
 		// selection outlasts the focus.
-		act(() => view.focus());
-		selectLines(view, 1, 2);
+		expect(pressesInEditor(view, targets)).toEqual([
+			{ name: "line", swallowed: true, focused: false, selectionKept: true },
+			{
+				name: "deletion",
+				swallowed: true,
+				focused: false,
+				selectionKept: true,
+			},
+			{ name: "number", swallowed: true, focused: false, selectionKept: true },
+		]);
+	});
+
+	test("swallows a press on a target, and keeps focus in the editor while the keyboard is up", async () => {
+		const { container, view } = await renderForPicking();
+		const targets = await linePickTargets(container);
+		raiseKeyboard();
+
+		// Losing focus would lower the keyboard.
+		expect(pressesInEditor(view, targets)).toEqual([
+			{ name: "line", swallowed: true, focused: true, selectionKept: true },
+			{ name: "deletion", swallowed: true, focused: true, selectionKept: true },
+			{ name: "number", swallowed: true, focused: true, selectionKept: true },
+		]);
+
+		// The tap that follows the press still picks the line.
 		const selection = view.state.selection;
+		act(() => {
+			fireEvent.click(targets.line);
+		});
+		await screen.findByRole("button", { name: "Stage 1 line" });
 		expect(document.activeElement === view.contentDOM).toBe(true);
-		fireEvent.mouseDown(target);
-		expect(document.activeElement === view.contentDOM).toBe(false);
 		expect(view.state.selection.eq(selection)).toBe(true);
 	});
 
@@ -2645,29 +2719,51 @@ describe("change strips", () => {
 		expect(requests[0].body).toEqual({ path: "notes.md", ranges: [[5, 6]] });
 	});
 
-	test("swallows the press, and takes focus from the editor", async () => {
-		const { container, view } = await renderWithStrips();
-		const strip = await waitFor(() => {
-			const found = container.querySelector(".cm-changeStrip");
-			if (!found) throw new Error("no change strip");
-			return found;
-		});
+	// The first strip, its label and its Stage button.
+	async function stripTargets() {
+		const button = await enabledButton("Stage the change at line 2");
+		const strip = button.closest(".cm-changeStrip");
+		const label = strip?.querySelector(".cm-changeStripLabel");
+		if (!strip || !label) throw new Error("no change strip");
+		return { strip, label, button };
+	}
 
-		// fireEvent returns false when the handler prevented the default.
-		expect(fireEvent.mouseDown(strip)).toBe(false);
-		expect(
-			fireEvent.mouseDown(await enabledButton("Stage the change at line 2")),
-		).toBe(false);
+	test("swallows a press on a strip, and takes focus from the editor while the keyboard is down", async () => {
+		const { view } = await renderWithStrips();
+		const targets = await stripTargets();
 
-		// A tap while the editor has focus would raise Android's keyboard. The
+		// The press is swallowed while the editor does not have focus too.
+		for (const target of Object.values(targets)) {
+			expect(fireEvent.mouseDown(target)).toBe(false);
+		}
+
+		// A tap while the editor has focus would raise the keyboard. The
 		// selection outlasts the focus.
-		act(() => view.focus());
-		selectLines(view, 1, 2);
-		const selection = view.state.selection;
+		expect(pressesInEditor(view, targets)).toEqual([
+			{ name: "strip", swallowed: true, focused: false, selectionKept: true },
+			{ name: "label", swallowed: true, focused: false, selectionKept: true },
+			{ name: "button", swallowed: true, focused: false, selectionKept: true },
+		]);
+	});
+
+	test("swallows a press on a strip, and keeps focus in the editor while the keyboard is up", async () => {
+		const { view, requests } = await renderWithStrips();
+		const targets = await stripTargets();
+		raiseKeyboard();
+
+		// Losing focus would lower the keyboard.
+		expect(pressesInEditor(view, targets)).toEqual([
+			{ name: "strip", swallowed: true, focused: true, selectionKept: true },
+			{ name: "label", swallowed: true, focused: true, selectionKept: true },
+			{ name: "button", swallowed: true, focused: true, selectionKept: true },
+		]);
+
+		// The tap that follows the press still stages the change.
+		fireEvent.click(targets.button);
+		await waitFor(() => {
+			expect(requests.length).toBe(1);
+		});
 		expect(document.activeElement === view.contentDOM).toBe(true);
-		fireEvent.mouseDown(strip);
-		expect(document.activeElement === view.contentDOM).toBe(false);
-		expect(view.state.selection.eq(selection)).toBe(true);
 	});
 
 	test("disables the strips while a stage is in flight", async () => {
@@ -3006,20 +3102,6 @@ describe("bar", () => {
 	});
 
 	describe("with the on-screen keyboard", () => {
-		// Chrome on Android takes the keyboard's height out of the page's.
-		const pageHeight = window.innerHeight;
-		function setPageHeight(height: number) {
-			act(() => {
-				(window as { innerHeight: number }).innerHeight = height;
-				window.dispatchEvent(new Event("resize"));
-			});
-		}
-		const raiseKeyboard = () => setPageHeight(pageHeight - 336);
-
-		afterEach(() => {
-			setPageHeight(pageHeight);
-		});
-
 		// The main action, the change controls and the menu, with the menu's
 		// items once it is open.
 		function presses(container: HTMLElement) {
@@ -3135,7 +3217,7 @@ describe("bar", () => {
 			});
 			act(() => paired.view.focus());
 			expect(fireEvent.mouseDown(name(paired.container))).toBe(true);
-			setPageHeight(pageHeight);
+			lowerKeyboard();
 			expect(fireEvent.mouseDown(name(paired.container))).toBe(true);
 		});
 	});

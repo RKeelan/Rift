@@ -7,6 +7,7 @@ import {
 	lineNumbers,
 	type WidgetType,
 } from "@codemirror/view";
+import { swallowPressInEditor } from "../onScreenKeyboard.ts";
 
 /**
  * Line picking: tapping the gutter beside a changed line adds it to, or removes
@@ -228,16 +229,15 @@ export function linePickerGutter({
 	canPick,
 	widgetAnchor,
 }: LinePickerOptions) {
-	// Swallowing the press keeps the cursor where it was and starts no text
-	// selection. Chrome on Android raises the keyboard on any tap while the
-	// editor has focus, so the press also takes focus from the editor.
+	// A press on a target leaves the cursor and the on-screen keyboard as they
+	// were.
 	function pickOnTap(
 		pickLine: (view: EditorView, event: Event) => number | null,
 	) {
 		return {
 			mousedown(view: EditorView, _block: BlockInfo, event: Event) {
 				if (pickLine(view, event) === null) return false;
-				view.contentDOM.blur();
+				swallowPressInEditor(view, event);
 				return true;
 			},
 			click(view: EditorView, _block: BlockInfo, event: Event) {
