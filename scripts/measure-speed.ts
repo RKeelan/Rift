@@ -769,6 +769,9 @@ localStorage.setItem("rift:selected-repo", ${JSON.stringify(selectedRepo)});
 const ACTIVE = ".changes-editor-view:not(.changes-editor-view--hidden)";
 // The Files list on screen; it stays mounted, hidden, while a file is open.
 const LIST = ".changes-page:not(.changes-page--hidden) .changes-list";
+// The editor's text once it is on screen: the editor keeps it out of sight
+// until the change context has arrived.
+const SHOWN = `${ACTIVE} .text-file-editor-surface:not(.text-file-editor-surface--waiting)`;
 const ENABLED_STRIP = '.cm-changeStripButton[aria-disabled="false"]';
 const DISABLED_STRIP = '.cm-changeStripButton[aria-disabled="true"]';
 
@@ -965,8 +968,8 @@ class Client {
 		await this.measure(
 			"open a file",
 			{
-				shown: `document.querySelector(${js(`${ACTIVE} .cm-line`)})`,
-				marked: `document.querySelector(${js(`${ACTIVE} .cm-changedLine`)})`,
+				shown: `document.querySelector(${js(`${SHOWN} .cm-line`)})`,
+				marked: `document.querySelector(${js(`${SHOWN} .cm-changedLine`)})`,
 				done: `document.querySelector(${js(`${ACTIVE} ${ENABLED_STRIP}`)})`,
 			},
 			await this.point(row),
@@ -1066,7 +1069,7 @@ class Client {
 		await this.measure(
 			`switch to ${label}`,
 			{
-				done: `${side} === ${js(label)} && document.querySelector(${js(`${ACTIVE} .cm-line`)}) && !document.querySelector(${js(`${ACTIVE} ${DISABLED_STRIP}`)})`,
+				done: `${side} === ${js(label)} && document.querySelector(${js(`${SHOWN} .cm-line`)}) && !document.querySelector(${js(`${ACTIVE} ${DISABLED_STRIP}`)})`,
 			},
 			await this.point(this.sideSwitch()),
 		);

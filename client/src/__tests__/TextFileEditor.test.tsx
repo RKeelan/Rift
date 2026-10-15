@@ -10,7 +10,10 @@ import {
 	waitFor,
 	within,
 } from "@testing-library/react";
+import { type ReactNode, useLayoutEffect } from "react";
+import { createRoot } from "react-dom/client";
 import {
+	CONTEXT_WAIT_MS,
 	getChangeRegions,
 	getEditorChangeDecorations,
 	getLineChanges,
@@ -58,6 +61,21 @@ function gitCase(name: string) {
 // a test gives otherSide itself.
 function TextFileEditor(props: Parameters<typeof Editor>[0]) {
 	return <Editor otherSide={{ available: false, show: () => {} }} {...props} />;
+}
+
+// Calls onLayout as each of its renders is laid out, after the editor's own
+// layout effects and before the browser paints.
+function Painted({
+	children,
+	onLayout,
+}: {
+	children: ReactNode;
+	onLayout: () => void;
+}) {
+	useLayoutEffect(() => {
+		onLayout();
+	});
+	return children;
 }
 
 type View = import("@codemirror/view").EditorView;
@@ -722,6 +740,204 @@ describe("change navigation", () => {
 
 		await waitFor(() => {
 			expect(selectedLine(view)).toBe(2);
+		});
+	});
+
+	describe("while the change context loads", () => {
+		const COMPARISON = "a\nb\nc\nd\ne\n";
+		const DIFF = "@@ -1,5 +1,5 @@\n a\n-b\n+B\n c\n-d\n+D\n e\n";
+		const props = {
+			filePath: "notes.txt",
+			repo: "test-repo",
+			changeType: "modified" as const,
+			onStaged: () => {},
+		};
+
+		async function renderLoading(context: { comparisonContent?: string } = {}) {
+			globalThis.fetch = (async () =>
+				new Response("a\nB\nc\nD\ne\n", {
+					headers: { "x-file-mtime-ms": "1" },
+				})) as typeof fetch;
+			// What the editor shows in each frame the page renders.
+			const frames: {
+				waiting: boolean;
+				strips: number;
+				line: number | null;
+			}[] = [];
+			let view: View | null = null;
+			// Read from the document, which holds this editor alone, since the
+			// first frame is laid out before render returns its container.
+			const waiting = () =>
+				document
+					.querySelector(".text-file-editor-surface")
+					?.classList.contains("text-file-editor-surface--waiting") ?? false;
+			const note = () =>
+				frames.push({
+					waiting: waiting(),
+					strips: document.querySelectorAll(".cm-changeStrip").length,
+					line: view && selectedLine(view),
+				});
+			const { container, rerender, unmount } = render(
+				<Painted onLayout={note}>
+					<TextFileEditor {...props} {...context} changeDiffLoading />
+				</Painted>,
+			);
+			await waitFor(() => {
+				expect(container.querySelector(".cm-content")).not.toBeNull();
+			});
+			const { EditorView } = await import("@codemirror/view");
+			view = EditorView.findFromDOM(
+				container.querySelector(".cm-editor") as HTMLElement,
+			);
+			if (!view) throw new Error("editor view not found");
+			const handOver = () =>
+				rerender(
+					<Painted onLayout={note}>
+						<TextFileEditor
+							{...props}
+							comparisonContent={COMPARISON}
+							changeDiff={DIFF}
+						/>
+					</Painted>,
+				);
+			// Loads the file again, its change context still loading.
+			const reload = () =>
+				rerender(
+					<Painted onLayout={note}>
+						<TextFileEditor
+							{...props}
+							{...context}
+							changeDiffLoading
+							reloadKey={1}
+						/>
+					</Painted>,
+				);
+			return { container, view, frames, waiting, handOver, reload, unmount };
+		}
+
+		test("keeps the file out of sight, and shows it with its changes and their strips at its first change", async () => {
+			const { container, view, frames, waiting, handOver } =
+				await renderLoading();
+			expect(waiting()).toBe(true);
+			expect(
+				container.querySelector(".text-file-editor-message"),
+			).not.toBeNull();
+
+			handOver();
+
+			// The frame that hands the context over shows it all.
+			expect(frames.at(-1)).toEqual({ waiting: false, strips: 2, line: 2 });
+			expect(container.querySelector(".text-file-editor-message")).toBeNull();
+			expect(selectedLine(view)).toBe(2);
+		});
+
+		test("opens at the first change only once git's diff has placed the strips", async () => {
+			const { container, view, handOver } = await renderLoading({
+				comparisonContent: COMPARISON,
+			});
+			// The comparison alone marks the changes, but places no strips.
+			expect(container.querySelectorAll(".cm-deletedChunk").length).toBe(2);
+			expect(container.querySelectorAll(".cm-changeStrip").length).toBe(0);
+			expect(selectedLine(view)).toBe(1);
+
+			handOver();
+
+			expect(container.querySelectorAll(".cm-changeStrip").length).toBe(2);
+			expect(selectedLine(view)).toBe(2);
+		});
+
+		describe("for a while at most", () => {
+			// Holds back each timer the editor sets to stop waiting for the
+			// change context, which it names showText, for the test to run, and
+			// lets every other run.
+			const held = new Map<number, () => void>();
+			const { setTimeout: realSetTimeout, clearTimeout: realClearTimeout } =
+				globalThis;
+			beforeEach(() => {
+				let next = 1_000_000;
+				globalThis.setTimeout = ((
+					handler: () => void,
+					delay?: number,
+					...rest: unknown[]
+				) => {
+					if (handler.name !== "showText") {
+						return realSetTimeout(handler, delay, ...rest);
+					}
+					expect(delay).toBe(CONTEXT_WAIT_MS);
+					next += 1;
+					held.set(next, handler);
+					return next;
+				}) as typeof setTimeout;
+				globalThis.clearTimeout = ((id?: number) => {
+					if (!held.delete(id as number)) realClearTimeout(id);
+				}) as typeof clearTimeout;
+			});
+			afterEach(() => {
+				globalThis.setTimeout = realSetTimeout;
+				globalThis.clearTimeout = realClearTimeout;
+				held.clear();
+			});
+			const runHeld = () => {
+				for (const [id, handler] of held) {
+					held.delete(id);
+					act(() => handler());
+				}
+			};
+
+			test("shows nothing early when the context arrives in time", async () => {
+				const { waiting, handOver } = await renderLoading();
+				// The wait starts once the file's text has loaded.
+				expect(held.size).toBe(1);
+				expect(waiting()).toBe(true);
+
+				handOver();
+
+				expect(held.size).toBe(0);
+				expect(waiting()).toBe(false);
+				expect(document.querySelectorAll(".cm-changeStrip").length).toBe(2);
+			});
+
+			test("shows the text alone once the wait is over, and its changes when they land", async () => {
+				const { container, view, waiting, handOver } = await renderLoading();
+
+				runHeld();
+
+				expect(waiting()).toBe(false);
+				expect(container.querySelector(".text-file-editor-message")).toBeNull();
+				expect(container.querySelectorAll(".cm-changeStrip").length).toBe(0);
+				expect(selectedLine(view)).toBe(1);
+
+				handOver();
+
+				expect(container.querySelectorAll(".cm-changeStrip").length).toBe(2);
+				expect(selectedLine(view)).toBe(2);
+			});
+
+			test("starts the wait again for each load of the file", async () => {
+				const { container, waiting, reload } = await renderLoading();
+				const [first] = held.keys();
+
+				reload();
+				await waitFor(() => {
+					expect(held.size).toBe(1);
+					expect(container.querySelector(".cm-content")).not.toBeNull();
+				});
+				expect(held.has(first)).toBe(false);
+				expect(waiting()).toBe(true);
+
+				runHeld();
+
+				expect(waiting()).toBe(false);
+			});
+
+			test("stops waiting when the editor closes", async () => {
+				const { unmount } = await renderLoading();
+				expect(held.size).toBe(1);
+
+				unmount();
+
+				expect(held.size).toBe(0);
+			});
 		});
 	});
 
@@ -2328,6 +2544,78 @@ describe("line picking", () => {
 		expect(container.querySelector(".text-file-editor-notice") === null).toBe(
 			true,
 		);
+	});
+
+	test("shows an untracked file its diff does not describe exactly without a pick gutter from the first frame", async () => {
+		// React schedules this render as it does one for a fetched context,
+		// rather than in act(), which would run every later render before the
+		// test could look.
+		const actEnvironment = globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean };
+		const wasAct = actEnvironment.IS_REACT_ACT_ENVIRONMENT;
+		actEnvironment.IS_REACT_ACT_ENVIRONMENT = false;
+		globalThis.fetch = (async () =>
+			new Response(NEW_FILE.file, {
+				headers: { "x-file-mtime-ms": "1" },
+			})) as typeof fetch;
+		const container = document.createElement("div");
+		document.body.append(container);
+		const root = createRoot(container);
+		const until = async (condition: () => boolean) => {
+			for (let tries = 0; !condition(); tries++) {
+				if (tries > 200) throw new Error("timed out");
+				await new Promise((resolve) => setTimeout(resolve, 10));
+			}
+		};
+		// Whether each frame the page renders shows a pick gutter, read once
+		// the task that rendered it is done, as the browser would paint it.
+		// Each frame takes long enough that React leaves any further render
+		// to a later task, as it does on a phone.
+		const frames: boolean[] = [];
+		const now = performance.now.bind(performance);
+		let spent = 0;
+		performance.now = () => now() + spent;
+		const note = () => {
+			spent += 50;
+			queueMicrotask(() => {
+				frames.push(container.querySelector(".cm-pickGutter") !== null);
+			});
+		};
+		const props = {
+			filePath: "notes.txt",
+			repo: "test-repo",
+			changeType: "untracked" as const,
+			onStaged: () => {},
+		};
+		try {
+			root.render(
+				<Painted onLayout={note}>
+					<TextFileEditor {...props} changeDiffLoading />
+				</Painted>,
+			);
+			await until(() => container.querySelector(".cm-content") !== null);
+			expect(container.querySelector(".cm-pickGutter") === null).toBe(false);
+			// As a file that is not UTF-8: the server says its diff is not
+			// exact.
+			root.render(
+				<Painted onLayout={note}>
+					<TextFileEditor
+						{...props}
+						comparisonContent={NEW_FILE.comparison}
+						changeDiff={NEW_FILE.diff}
+						changeDiffExact={false}
+					/>
+				</Painted>,
+			);
+			await until(() => frames.length === 2);
+
+			// The first frame came before the file loaded.
+			expect(frames).toEqual([false, false]);
+		} finally {
+			root.unmount();
+			container.remove();
+			performance.now = now;
+			actEnvironment.IS_REACT_ACT_ENVIRONMENT = wasAct;
+		}
 	});
 
 	test("offers only Stage file, with no notice, for an untracked file its diff does not describe", async () => {
