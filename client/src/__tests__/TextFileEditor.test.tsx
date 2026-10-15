@@ -1007,6 +1007,187 @@ describe("staging", () => {
 		});
 	});
 
+	test("leaves a cursor at the end of the selection once its lines are staged", async () => {
+		const { view, requests } = await renderForStaging();
+
+		selectLines(view, 1, 2);
+		fireEvent.click(await enabledButton("Stage selection"));
+
+		// Typing then goes in after the staged lines rather than over them.
+		await waitFor(() => {
+			expect(view.state.selection.main.empty).toBe(true);
+		});
+		expect(view.state.selection.main.head).toBe(view.state.doc.line(2).to);
+		expect(JSON.parse(requests[0].body as string).ranges).toEqual([[1, 2]]);
+	});
+
+	test("leaves the selection for another try when the stage fails", async () => {
+		const { view } = await renderForStaging();
+		selectLines(view, 1, 2);
+		const selection = view.state.selection;
+
+		globalThis.fetch = (async () =>
+			new Response(
+				JSON.stringify({
+					error: {
+						code: "DIFF_CHANGED",
+						message: "The diff changed since it was read",
+					},
+				}),
+				{ status: 409, headers: { "Content-Type": "application/json" } },
+			)) as unknown as typeof fetch;
+		fireEvent.click(await enabledButton("Stage selection"));
+		await screen.findByText(
+			"The file changed since it was loaded. Reload before staging.",
+		);
+		expect(view.state.selection.eq(selection)).toBe(true);
+
+		globalThis.fetch = (async () => {
+			throw new TypeError("Failed to fetch");
+		}) as unknown as typeof fetch;
+		fireEvent.click(await enabledButton("Stage selection"));
+		await screen.findByText("Failed to fetch");
+		expect(view.state.selection.eq(selection)).toBe(true);
+	});
+
+	test("leaves a selection made while the stage is in flight", async () => {
+		let staged = 0;
+		const { view } = await renderForStaging({
+			onStaged: () => {
+				staged += 1;
+			},
+		});
+		let answer: (() => void) | null = null;
+		globalThis.fetch = (() =>
+			new Promise<Response>((resolve) => {
+				answer = () =>
+					resolve(
+						new Response(JSON.stringify({ files: [] }), {
+							headers: { "Content-Type": "application/json" },
+						}),
+					);
+			})) as unknown as typeof fetch;
+
+		selectLines(view, 1, 2);
+		fireEvent.click(await enabledButton("Stage selection"));
+		await waitFor(() => {
+			expect(answer).not.toBeNull();
+		});
+		selectLines(view, 2, 3);
+		const selection = view.state.selection;
+		await act(async () => {
+			answer?.();
+		});
+
+		await waitFor(() => {
+			expect(staged).toBe(1);
+		});
+		expect(view.state.selection.eq(selection)).toBe(true);
+	});
+
+	test("follows the selection through an edit made while the stage is in flight", async () => {
+		const { view } = await renderForStaging();
+		let answer: (() => void) | null = null;
+		globalThis.fetch = (() =>
+			new Promise<Response>((resolve) => {
+				answer = () =>
+					resolve(
+						new Response(JSON.stringify({ files: [] }), {
+							headers: { "Content-Type": "application/json" },
+						}),
+					);
+			})) as unknown as typeof fetch;
+
+		selectLines(view, 2);
+		fireEvent.click(await enabledButton("Stage selection"));
+		await waitFor(() => {
+			expect(answer).not.toBeNull();
+		});
+		// An edit above the selection moves it without changing it.
+		act(() => {
+			view.dispatch({ changes: { from: 0, insert: "z\n" } });
+		});
+		await act(async () => {
+			answer?.();
+		});
+
+		await waitFor(() => {
+			expect(view.state.selection.main.empty).toBe(true);
+		});
+		expect(view.state.selection.main.head).toBe(view.state.doc.line(3).to);
+	});
+
+	describe("the browser's selection", () => {
+		function browserSelection() {
+			const selection = document.getSelection();
+			if (!selection) throw new Error("no browser selection");
+			return selection;
+		}
+
+		afterEach(() => {
+			browserSelection().removeAllRanges();
+		});
+
+		test("goes with the selection when the editor lacks focus", async () => {
+			const { view } = await renderForStaging();
+			// The browser keeps the selection a person made after a tap on the
+			// bar takes focus from the editor, and Chrome on Android keeps its
+			// handles and menu over it.
+			browserSelection().selectAllChildren(view.contentDOM);
+			selectLines(view, 1, 2);
+
+			fireEvent.click(await enabledButton("Stage selection"));
+
+			await waitFor(() => {
+				expect(view.state.selection.main.empty).toBe(true);
+			});
+			expect(browserSelection().rangeCount).toBe(0);
+		});
+
+		test("stays when it lies outside the editor", async () => {
+			const { view } = await renderForStaging();
+			const elsewhere = document.createElement("p");
+			elsewhere.textContent = "elsewhere";
+			document.body.append(elsewhere);
+			browserSelection().selectAllChildren(elsewhere);
+			selectLines(view, 1, 2);
+
+			fireEvent.click(await enabledButton("Stage selection"));
+
+			await waitFor(() => {
+				expect(view.state.selection.main.empty).toBe(true);
+			});
+			expect(browserSelection().rangeCount).toBe(1);
+			expect(elsewhere.contains(browserSelection().anchorNode)).toBe(true);
+			elsewhere.remove();
+		});
+
+		test("is left to the editor while it has focus", async () => {
+			const { view } = await renderForStaging();
+			act(() => view.focus());
+			selectLines(view, 1, 2);
+			const selection = browserSelection();
+			let cleared = 0;
+			const removeAllRanges = selection.removeAllRanges.bind(selection);
+			selection.removeAllRanges = () => {
+				cleared += 1;
+				removeAllRanges();
+			};
+
+			try {
+				fireEvent.click(await enabledButton("Stage selection"));
+
+				await waitFor(() => {
+					expect(view.state.selection.main.empty).toBe(true);
+				});
+				expect(document.activeElement === view.contentDOM).toBe(true);
+				expect(cleared).toBe(0);
+			} finally {
+				selection.removeAllRanges = removeAllRanges;
+			}
+		});
+	});
+
 	test("offers Save in place of staging while the buffer is dirty", async () => {
 		const { view } = await renderForStaging();
 		selectLines(view, 2);
@@ -1419,6 +1600,47 @@ describe("unstaging", () => {
 		// buffer must change in place. Compared as a boolean, since printing two
 		// editor views on a mismatch takes the test runner practically forever.
 		expect(currentView() === view).toBe(true);
+	});
+
+	test("leaves a cursor at the end of the selection once its lines are unstaged", async () => {
+		let index = "a\nB\nc\nD\n";
+		globalThis.fetch = (async (_input: string, init?: RequestInit) => {
+			if (init?.method === "POST") {
+				index = "a\nb\nc\nD\n";
+				return new Response(JSON.stringify({ files: [] }), {
+					headers: { "Content-Type": "application/json" },
+				});
+			}
+			return new Response(index);
+		}) as unknown as typeof fetch;
+		const { container } = render(
+			<TextFileEditor
+				filePath="notes.txt"
+				repo="test-repo"
+				comparisonContent={"a\nb\nc\nd\n"}
+				changeDiff={"@@ -1,4 +1,4 @@\n a\n-b\n+B\n c\n-d\n+D\n"}
+				changeType="modified"
+				staged
+				onUnstaged={() => {}}
+			/>,
+		);
+		await waitFor(() => {
+			expect(container.querySelector(".cm-content")).not.toBeNull();
+		});
+		const { EditorView } = await import("@codemirror/view");
+		const view = EditorView.findFromDOM(
+			container.querySelector(".cm-editor") as HTMLElement,
+		);
+		if (!view) throw new Error("editor view not found");
+
+		selectLines(view, 2, 3);
+		fireEvent.click(await enabledButton("Unstage selection"));
+
+		await waitFor(() => {
+			expect(view.state.doc.toString()).toBe("a\nb\nc\nD\n");
+		});
+		expect(view.state.selection.main.empty).toBe(true);
+		expect(view.state.selection.main.head).toBe(view.state.doc.line(3).to);
 	});
 });
 
