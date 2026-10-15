@@ -1176,10 +1176,12 @@ export function TextFileEditor({
 	// Without picks, Stage and Unstage act on a selection, offered only when it
 	// covers a change: the server ignores lines that hold none.
 	const [selectionCoversChange, setSelectionCoversChange] = useState(false);
-	// Holds the selection a stage or unstage of selected lines acts on while
-	// the request is out. Once the lines are staged or unstaged, a selection
-	// left as it was gives way to a cursor at its end, so typing goes in after
-	// those lines rather than over them; one changed meanwhile stays.
+	// Holds the selection while a stage or unstage of picked or selected lines
+	// is out. Once the lines are staged or unstaged, a selection left as it was
+	// gives way to a cursor at its end, so typing goes in after it rather than
+	// over it, and the bar, its picks cleared, does not go on to offer the
+	// selection's lines. One changed meanwhile stays, and a stage or unstage
+	// from a change's strip leaves the selection alone.
 	const selectionHoldRef = useRef<{
 		hold: () => void;
 		release: (collapse: boolean) => void;
@@ -2428,7 +2430,7 @@ export function TextFileEditor({
 
 			setStaging(true);
 			setError(null);
-			let fromSelection = false;
+			let holdsSelection = false;
 
 			try {
 				const body: {
@@ -2454,7 +2456,7 @@ export function TextFileEditor({
 					}
 				} else {
 					const picked = region ? null : pickerRef.current?.ranges();
-					fromSelection = !region && !picked;
+					holdsSelection = !region;
 					body.ranges = region
 						? [[region.start, region.end]]
 						: (picked ?? selectionToRanges(viewRef.current.state));
@@ -2467,7 +2469,7 @@ export function TextFileEditor({
 						body.untracked = true;
 					}
 				}
-				if (fromSelection) selectionHoldRef.current?.hold();
+				if (holdsSelection) selectionHoldRef.current?.hold();
 
 				const response = await fetch(
 					apiUrl(`/api/git/stage?repo=${encodeURIComponent(repo)}`),
@@ -2497,15 +2499,15 @@ export function TextFileEditor({
 				} else {
 					pickerRef.current?.clear();
 				}
-				if (fromSelection) selectionHoldRef.current?.release(true);
+				if (holdsSelection) selectionHoldRef.current?.release(true);
 				if (wholeFile && onFileStaged) {
 					onFileStaged(files);
 				} else {
 					onStaged?.(files);
 				}
 			} catch (err) {
-				// A selection whose lines were not staged stays for another try.
-				if (fromSelection) selectionHoldRef.current?.release(false);
+				// Lines that were not staged stay picked or selected for another try.
+				if (holdsSelection) selectionHoldRef.current?.release(false);
 				setError(
 					err instanceof Error ? err.message : "Failed to stage changes",
 				);
@@ -2534,14 +2536,14 @@ export function TextFileEditor({
 
 			setUnstaging(true);
 			setError(null);
-			let fromSelection = false;
+			let holdsSelection = false;
 
 			try {
 				// A staged change unstages exactly the change's lines, or the picked
 				// ones, or the selected ones when nothing is picked, and names the
 				// staged diff those line numbers come from, as staging does.
 				const picked = region ? null : pickerRef.current?.ranges();
-				fromSelection = !region && !picked;
+				holdsSelection = !region;
 				const body: {
 					path: string;
 					ranges: [number, number][];
@@ -2557,7 +2559,7 @@ export function TextFileEditor({
 				if (blobs !== null) {
 					body.expectedBlobs = blobs;
 				}
-				if (fromSelection) selectionHoldRef.current?.hold();
+				if (holdsSelection) selectionHoldRef.current?.hold();
 
 				const response = await fetch(
 					apiUrl(`/api/git/unstage?repo=${encodeURIComponent(repo)}`),
@@ -2580,7 +2582,7 @@ export function TextFileEditor({
 				const { files } = (await response.json()) as { files: ChangedFile[] };
 
 				pickerRef.current?.clear();
-				if (fromSelection) selectionHoldRef.current?.release(true);
+				if (holdsSelection) selectionHoldRef.current?.release(true);
 				// The index just changed, so bring the buffer up to the new staged
 				// content; the decorations then shrink to whatever remains staged.
 				// Editing the buffer in place keeps the editor's selection and scroll
@@ -2608,7 +2610,7 @@ export function TextFileEditor({
 				}
 				onUnstaged?.(files);
 			} catch (err) {
-				if (fromSelection) selectionHoldRef.current?.release(false);
+				if (holdsSelection) selectionHoldRef.current?.release(false);
 				setError(
 					err instanceof Error ? err.message : "Failed to unstage changes",
 				);
