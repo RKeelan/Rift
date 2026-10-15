@@ -899,9 +899,12 @@ export interface TextFileEditorProps {
 	readOnlyLabel?: string;
 	comparisonContent?: string;
 	changeDiff?: string | null;
-	// True while the page fetches git's diff. A null diff while nothing loads
-	// is all the page has to give: the side has no diff to read, or the fetch
-	// failed, which the page reports itself.
+	// True while the page fetches git's diff and the comparison it is read
+	// against. While it refetches them, as after a stage, the page goes on
+	// handing over the ones it had before, so the changes stay drawn as they
+	// were until the new ones have both arrived. A null diff while nothing
+	// loads is all the page has to give: the side has no diff to read, or the
+	// fetch failed, which the page reports itself.
 	changeDiffLoading?: boolean;
 	// False when git's diff of an untracked file does not describe the file
 	// exactly, as for a file that is not UTF-8, so its lines cannot be staged
@@ -1132,8 +1135,8 @@ export function TextFileEditor({
 
 	// The refetched context has been handed over once git's diff is not
 	// loading, whatever came of it: a diff, an inexact one that draws nothing,
-	// or none. The null diff the page hands over as it starts the refetch is not
-	// it.
+	// or none. The context the page goes on handing over while the refetch
+	// loads is the one before, not it.
 	// biome-ignore lint/correctness/useExhaustiveDependencies: a new diff ends the wait, as the end of a load does
 	useEffect(() => {
 		if (!changeDiffLoading) setContextStale(false);
@@ -1193,12 +1196,16 @@ export function TextFileEditor({
 	const byLine =
 		changeType !== "deleted" && !(changeType === "untracked" && untrackedWhole);
 	// Picks and selections name lines of the change git reports, so acting on
-	// them waits until both the comparison and git's diff have arrived, and
-	// then until git's diff describes the buffer as shown. A clean buffer that
-	// git's diff does not describe was overtaken by a change on disk, and
-	// staging its lines would act on whichever lines now sit there.
+	// them waits until both the comparison and git's diff have arrived, a
+	// refetch of them included, and then until git's diff describes the buffer
+	// as shown. A clean buffer that git's diff does not describe was overtaken
+	// by a change on disk, and staging its lines would act on whichever lines
+	// now sit there.
 	const changeContextLoading =
-		comparisonContent === undefined || changeDiff === null || contextStale;
+		comparisonContent === undefined ||
+		changeDiff === null ||
+		changeDiffLoading ||
+		contextStale;
 	// Whether git's diff describes the buffer, as the editor last worked it
 	// out, with the change context it worked it out from. It is worked out as
 	// the decorations are redrawn, after the render that hands over a new
@@ -1743,7 +1750,7 @@ export function TextFileEditor({
 					const next = computeChanges(transaction.state.doc);
 					if (next.changes.matchesGitDiff) return next;
 					// While git's diff does not describe the buffer, as during unsaved
-					// edits or while the context is refetched after a stage, the
+					// edits or while the context is refetched after a save, the
 					// strips stay where they were, disabled. Adding or removing them
 					// would move the text below them, including the line being typed.
 					return {
