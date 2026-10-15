@@ -3766,6 +3766,20 @@ describe("refreshed change context", () => {
 		// A strip, and one deleted line inside its 2px of padding each way.
 		const STRIP_AND_DELETION = 48 + 24 + 4;
 
+		// CodeMirror measures its layout in an animation frame, and the test
+		// DOM lays nothing out, so a measure would make every line and widget
+		// 0px tall from then on, and only those drawn afresh would take their
+		// estimated heights. With no frames, every height is CodeMirror's
+		// estimate.
+		let requestAnimationFrame: typeof window.requestAnimationFrame;
+		beforeEach(() => {
+			requestAnimationFrame = window.requestAnimationFrame;
+			window.requestAnimationFrame = () => 0;
+		});
+		afterEach(() => {
+			window.requestAnimationFrame = requestAnimationFrame;
+		});
+
 		// Opens the file with the cursor on its last line, which the test lays
 		// out at the given height on screen, in a scroller from 0 to 500px.
 		async function open(
@@ -3841,9 +3855,7 @@ describe("refreshed change context", () => {
 			}) as typeof view.dispatch;
 
 			// Scrolls as CodeMirror does once it has measured the redrawn
-			// decorations, through the editor's scroll handlers. It runs before
-			// the test DOM's empty layout can be measured, so every height is
-			// CodeMirror's estimate.
+			// decorations, through the editor's scroll handlers.
 			const { EditorSelection } = await import("@codemirror/state");
 			const applyScroll = () => {
 				const [{ range, target }] = scrolls;
