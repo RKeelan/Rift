@@ -28,7 +28,7 @@ Follow Android's UI guidelines by default, and depart from them only where a dec
 
 Decided departures:
 
-- Line-picking targets are only a line tall (24px), because a target per line could be 48px tall only if every line were. To make up for it, a changed line's number picks it as well as its 36px-wide gutter cell.
+- Line-picking targets are only a line tall (24px), because a target per line could be 48px tall only if every line were. To make up for it, a changed line's number picks it as well as its 36px-wide gutter cell. The number also covers for the cell under a selection: Chrome on Android takes touches for a selection's start handle over a box wider than the handle it draws, so a selection that starts near the beginning of a line covers the cell of the line below, but not its number. A deleted line has no number, so its cell can be covered. Padding the text clear of the handle would cost about 27px of width, so the layout leaves it.
 
 ## Speed requirements
 
