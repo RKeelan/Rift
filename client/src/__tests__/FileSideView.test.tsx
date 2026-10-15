@@ -229,6 +229,141 @@ function serveHeld() {
 	return { bases, diffs };
 }
 
+// The props of a FileSideView for the working tree, beside its context.
+const sideProps = {
+	active: true,
+	canWrite: true,
+	readOnlyLabel: "Read-only",
+	contentToken: 0,
+	onBack: () => {},
+	otherSide: { available: false, show: () => {} },
+	fileAction: (label: string) => ({ label, onClick: () => {} }),
+	onSaved: () => {},
+	onStaged: () => {},
+	onUntrackedStaged: () => {},
+	onUnstaged: () => {},
+	onReload: () => {},
+	onDirtyChange: () => {},
+};
+
+describe("the change context as a side first loads", () => {
+	const none = {
+		comparisonContent: undefined,
+		diff: null,
+		diffExact: true,
+		diffLoading: true,
+	};
+
+	for (const first of ["comparison", "diff"] as const) {
+		test(`hands over none of it until both parts land, when the ${first} lands first`, async () => {
+			const { bases, diffs } = serveHeld();
+			const { result } = renderContext(options());
+			expect(result.current).toEqual(none);
+			await waitFor(() => {
+				expect(bases.length).toBe(1);
+				expect(diffs.length).toBe(1);
+			});
+
+			const answers = {
+				comparison: () =>
+					bases[0].answer(new Response(BOTH_UNSTAGED.comparison)),
+				diff: () => diffs[0].answer(diffResponse(BOTH_UNSTAGED.diff)),
+			};
+			await act(async () => {
+				answers[first]();
+			});
+			expect(result.current).toEqual(none);
+
+			await act(async () => {
+				answers[first === "comparison" ? "diff" : "comparison"]();
+			});
+			await waitFor(() => {
+				expect(result.current).toEqual({
+					comparisonContent: BOTH_UNSTAGED.comparison,
+					diff: BOTH_UNSTAGED.diff,
+					diffExact: true,
+					diffLoading: false,
+				});
+			});
+		});
+	}
+
+	test("hands over an untracked file's empty comparison only with its diff", async () => {
+		const { diffs } = serveHeld();
+		const { result } = renderContext(options({ status: "untracked" }));
+		expect(result.current).toEqual(none);
+		await waitFor(() => {
+			expect(diffs.length).toBe(1);
+		});
+
+		const diff = "@@ -0,0 +1,1 @@\n+a\n";
+		await act(async () => {
+			diffs[0].answer(diffResponse(diff));
+		});
+		await waitFor(() => {
+			expect(result.current.diffLoading).toBe(false);
+		});
+		expect(result.current.comparisonContent).toBe("");
+		expect(result.current.diff).toBe(diff);
+	});
+
+	for (const first of ["comparison", "diff"] as const) {
+		test(`shows the file once both parts land, with its changes drawn and at its first change, when the ${first} lands first`, async () => {
+			const { bases, diffs } = serveHeld();
+			const { container } = render(
+				<FileSideView {...sideProps} {...options()} />,
+			);
+			await waitFor(() => {
+				expect(container.querySelector(".cm-content")).not.toBeNull();
+				expect(bases.length).toBe(1);
+				expect(diffs.length).toBe(1);
+			});
+			const surface = container.querySelector(".text-file-editor-surface");
+			const waiting = () =>
+				surface?.classList.contains("text-file-editor-surface--waiting");
+			const drawn = () => ({
+				chunks: container.querySelectorAll(".cm-deletedChunk").length,
+				strips: container.querySelectorAll(".cm-changeStrip").length,
+			});
+			const { EditorView } = await import("@codemirror/view");
+			const view = EditorView.findFromDOM(
+				container.querySelector(".cm-editor") as HTMLElement,
+			);
+			if (!view) throw new Error("editor view not found");
+			const cursorLine = () =>
+				view.state.doc.lineAt(view.state.selection.main.head).number;
+			expect(waiting()).toBe(true);
+			expect(
+				container.querySelector(".text-file-editor-message"),
+			).not.toBeNull();
+
+			const answers = {
+				comparison: () =>
+					bases[0].answer(new Response(BOTH_UNSTAGED.comparison)),
+				diff: () => diffs[0].answer(diffResponse(BOTH_UNSTAGED.diff)),
+			};
+			await act(async () => {
+				answers[first]();
+			});
+			expect(waiting()).toBe(true);
+			expect(drawn()).toEqual({ chunks: 0, strips: 0 });
+			expect(cursorLine()).toBe(1);
+
+			await act(async () => {
+				answers[first === "comparison" ? "diff" : "comparison"]();
+			});
+			await waitFor(() => {
+				expect(waiting()).toBe(false);
+			});
+			// Shown with every change drawn, its strip included, and at the
+			// first change.
+			expect(container.querySelector(".text-file-editor-message")).toBeNull();
+			expect(drawn()).toEqual({ chunks: 2, strips: 2 });
+			expect(cursorLine()).toBe(2);
+		});
+	}
+});
+
 describe("the change context through a stage's refetch", () => {
 	// Opens the side with both changes unstaged.
 	async function openContext() {

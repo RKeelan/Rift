@@ -8,6 +8,7 @@ import {
 	type SyntheticEvent,
 	useCallback,
 	useEffect,
+	useLayoutEffect,
 	useRef,
 	useState,
 	useSyncExternalStore,
@@ -891,6 +892,9 @@ export const WRITES_DISABLED_LABEL = "Read-only: writes are disabled";
 // Shown in place of the edit status until the server says whether it allows
 // changes, while the editor stays read-only.
 export const WRITES_UNKNOWN_LABEL = "Checking write access...";
+// How long a loaded file's text waits for its change context before it shows
+// without it.
+export const CONTEXT_WAIT_MS = 1000;
 
 // The file a draft is kept for.
 type DraftTarget = { repo: string; path: string };
@@ -915,9 +919,11 @@ export interface TextFileEditorProps {
 	// True while the page fetches git's diff and the comparison it is read
 	// against. While it refetches them, as after a stage, the page goes on
 	// handing over the ones it had before, so the changes stay drawn as they
-	// were until the new ones have both arrived. A null diff while nothing
-	// loads is all the page has to give: the side has no diff to read, or the
-	// fetch failed, which the page reports itself.
+	// were until the new ones have both arrived. As the file first loads it
+	// hands over neither, and the editor shows the file once both have
+	// arrived. A null diff while nothing loads is all the page has to give:
+	// the side has no diff to read, or the fetch failed, which the page
+	// reports itself.
 	changeDiffLoading?: boolean;
 	// False when git's diff of an untracked file does not describe the file
 	// exactly, as for a file that is not UTF-8, so its lines cannot be staged
@@ -1012,10 +1018,9 @@ export function TextFileEditor({
 	const changeCountRef = useRef(0);
 	const lastNavLineRef = useRef(0);
 	const [changeCount, setChangeCount] = useState(0);
-	// Whether the editor view is built.
-	const [editorReady, setEditorReady] = useState(false);
 	// Whether this view has been moved to the file's first change yet.
 	const openedAtChangeRef = useRef(false);
+	const openAtFirstChangeRef = useRef<(() => void) | null>(null);
 	const [content, setContent] = useState<string | null>(null);
 	const [error, setError] = useState<string | null>(null);
 	const [loading, setLoading] = useState(true);
@@ -1137,14 +1142,47 @@ export function TextFileEditor({
 	// evidence of a change on disk.
 	const [contextStale, setContextStale] = useState(false);
 
+	// Whether the file's text is on screen. Once the file loads, the text
+	// waits for the page to hand over a complete change context: drawn before
+	// its changes, it would move under the reader as their deleted lines and
+	// strips went in above it, or as the view went to the first change. The
+	// editor is built meanwhile, so the text shows, with its changes drawn and
+	// at its first change, in the frame the context arrives.
+	const [textShown, setTextShown] = useState(!changeDiffLoading);
+	if (!changeDiffLoading && !textShown) setTextShown(true);
+	const changeDiffLoadingRef = useRef(changeDiffLoading);
+
+	// A context that has not arrived a second after the text loaded, as when
+	// a request hangs, gives way to the text alone. Its changes are drawn, and
+	// the view moves to the first of them, when it lands.
 	useEffect(() => {
+		if (content === null || textShown) return;
+		function showText() {
+			setTextShown(true);
+		}
+		const timer = setTimeout(showText, CONTEXT_WAIT_MS);
+		return () => clearTimeout(timer);
+	}, [content, textShown]);
+
+	// The context is drawn, and the view moved to the first change, before
+	// the browser paints the render that hands it over, so no frame shows the
+	// text without them.
+	useLayoutEffect(() => {
 		changeContextRef.current = {
 			comparisonContent,
 			changeDiff: decoratedDiff,
 			changeType,
 		};
 		refreshDecorationsRef.current?.();
+		openAtFirstChangeRef.current?.();
 	}, [comparisonContent, decoratedDiff, changeType]);
+
+	// Runs after the hand-over above, so a load that ends with a new context
+	// opens at the changes it draws, not at those drawn before it.
+	useLayoutEffect(() => {
+		changeDiffLoadingRef.current = changeDiffLoading;
+		openAtFirstChangeRef.current?.();
+	}, [changeDiffLoading]);
 
 	// The refetched context has been handed over once git's diff is not
 	// loading, whatever came of it: a diff, an inexact one that draws nothing,
@@ -1293,6 +1331,7 @@ export function TextFileEditor({
 		gitDiffCheckRef.current = { context: null, matches: false };
 		setGitDiffCheck(gitDiffCheckRef.current);
 		setUntrackedWhole(false);
+		setTextShown(false);
 		offerDraft(null);
 		setDraftNotKept(false);
 		loadCountRef.current += 1;
@@ -1394,7 +1433,6 @@ export function TextFileEditor({
 
 		let destroyed = false;
 		let stopFollowingResize = () => {};
-		setEditorReady(false);
 		openedAtChangeRef.current = false;
 
 		(async () => {
@@ -2192,7 +2230,28 @@ export function TextFileEditor({
 				undo: () => undo(view),
 				redo: () => redo(view),
 			};
-			setEditorReady(true);
+			// A file opens at its first change rather than at its top, once the
+			// whole change context has placed the changes and the strips above
+			// them, so that none goes in above the change after the view has
+			// moved to it. A reader who has already moved the cursor or scrolled
+			// is left where they are.
+			openAtFirstChangeRef.current = () => {
+				if (openedAtChangeRef.current || changeDiffLoadingRef.current) return;
+				const first = changeRegionsRef.current[0];
+				if (first === undefined) return;
+				openedAtChangeRef.current = true;
+				if (
+					view.state.selection.main.head !== 0 ||
+					view.scrollDOM.scrollTop > 0
+				) {
+					return;
+				}
+				lastNavLineRef.current = first;
+				scrollToLineRef.current?.(first);
+			};
+			// A context that arrived while the editor was being built opens it
+			// at its first change before it is first drawn.
+			openAtFirstChangeRef.current();
 
 			const loader = getLanguageLoader(filePath);
 			if (loader) {
@@ -2223,8 +2282,8 @@ export function TextFileEditor({
 		return () => {
 			destroyed = true;
 			stopFollowingResize();
-			setEditorReady(false);
 			refreshDecorationsRef.current = null;
+			openAtFirstChangeRef.current = null;
 			applyLineWrapRef.current = null;
 			applyLinePickingRef.current = null;
 			applyStripsEnabledRef.current = null;
@@ -2278,23 +2337,6 @@ export function TextFileEditor({
 		const view = viewRef.current;
 		if (view && pressKeepsEditorFocus(view)) event.preventDefault();
 	}, []);
-
-	// A file opens at its first change rather than at its top, once the view is
-	// built and the change context has placed the changes. A reader who has
-	// already moved the cursor or scrolled is left where they are.
-	useEffect(() => {
-		const view = viewRef.current;
-		if (!editorReady || changeCount === 0 || !view) return;
-		if (openedAtChangeRef.current) return;
-		openedAtChangeRef.current = true;
-		if (view.state.selection.main.head !== 0 || view.scrollDOM.scrollTop > 0) {
-			return;
-		}
-		const first = changeRegionsRef.current[0];
-		if (first === undefined) return;
-		lastNavLineRef.current = first;
-		scrollToLineRef.current?.(first);
-	}, [editorReady, changeCount]);
 
 	const goToChange = useCallback((direction: 1 | -1) => {
 		const regions = changeRegionsRef.current;
@@ -2762,10 +2804,13 @@ export function TextFileEditor({
 	// does not apply is greyed out, and marked rather than made disabled, so a
 	// tap on it reaches its press handler and leaves the keyboard as it was.
 	const fileName = filePath.slice(filePath.lastIndexOf("/") + 1);
+	const waitingForContext = content !== null && !textShown;
 
 	return (
 		<div className="text-file-editor">
-			{loading && <div className="text-file-editor-message">Loading...</div>}
+			{(loading || waitingForContext) && (
+				<div className="text-file-editor-message">Loading...</div>
+			)}
 			{error && <div className="text-file-editor-error">{error}</div>}
 			{draftNotKept && (
 				<div className="text-file-editor-notice">
@@ -2808,7 +2853,7 @@ export function TextFileEditor({
 					ref={editorRef}
 					className={`text-file-editor-surface${
 						lineWrap ? " text-file-editor-surface--wrap" : ""
-					}`}
+					}${waitingForContext ? " text-file-editor-surface--waiting" : ""}`}
 				/>
 			)}
 			<div className="text-file-editor-bar">

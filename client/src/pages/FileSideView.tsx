@@ -232,11 +232,13 @@ export function useChangeContext({
 
 	// The comparison and git's diff land one after the other, and the editor
 	// redraws the changes from whatever it is handed: with no comparison it
-	// draws no deleted lines at all, and with the new comparison alone a
-	// staged change's deleted lines go before its strip. So while a refetch
-	// is out, as after a stage, the side goes on handing over the context it
-	// last had in full, and hands over the new one once both parts have
-	// landed, for the editor to redraw in one step.
+	// draws no deleted lines at all, with the comparison alone it draws them
+	// without the strips that only git's diff places, and with the new
+	// comparison alone a staged change's deleted lines go before its strip.
+	// So the side hands over a context only once both parts have landed, for
+	// the editor to draw in one step. While a refetch is out, as after a
+	// stage, it goes on handing over the context it last had in full, and as
+	// the side first loads it hands over none.
 	const side = JSON.stringify([repoName, path, staged]);
 	const [held, setHeld] = useState<{
 		side: string;
@@ -254,16 +256,23 @@ export function useChangeContext({
 	) {
 		setHeld({ side, comparisonContent, diff, diffExact });
 	}
-	if (loading && held !== null && held.side === side) {
-		return {
-			comparisonContent: held.comparisonContent,
-			diff: held.diff,
-			diffExact: held.diffExact,
-			diffLoading: true,
-		};
+	if (loading) {
+		return held !== null && held.side === side
+			? {
+					comparisonContent: held.comparisonContent,
+					diff: held.diff,
+					diffExact: held.diffExact,
+					diffLoading: true,
+				}
+			: {
+					comparisonContent: undefined,
+					diff: null,
+					diffExact: true,
+					diffLoading: true,
+				};
 	}
 
-	return { comparisonContent, diff, diffExact, diffLoading: loading };
+	return { comparisonContent, diff, diffExact, diffLoading: false };
 }
 
 export interface FileSideViewProps extends ChangeContextOptions {

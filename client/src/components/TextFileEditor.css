@@ -246,6 +246,12 @@ button.text-file-editor-name[aria-disabled="true"] {
 	background: var(--color-bg);
 }
 
+/* Laid out but unseen, so the editor is built and measured while the change
+   context loads. */
+.text-file-editor-surface--waiting {
+	visibility: hidden;
+}
+
 .text-file-editor-surface .cm-editor {
 	height: 100%;
 	background: var(--color-bg);
