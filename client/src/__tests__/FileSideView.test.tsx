@@ -6,7 +6,12 @@ import {
 	renderHook,
 	waitFor,
 } from "@testing-library/react";
-import { FileSideView, useChangeContext } from "../pages/FileSideView.tsx";
+import type { FileContext } from "../components/TextFileEditor.tsx";
+import {
+	type AnsweredContext,
+	FileSideView,
+	useChangeContext,
+} from "../pages/FileSideView.tsx";
 
 type Options = Parameters<typeof useChangeContext>[0];
 
@@ -100,7 +105,7 @@ describe("git's diff for one side of a file", () => {
 		expect(result.current.diff).toBe("");
 	});
 
-	test("hands over no diff for a side with none to read, once its comparison lands", async () => {
+	test("hands over an empty diff for the index of a file with nothing staged, without asking git", async () => {
 		const diffs = serve();
 		// Nothing of the file is staged.
 		const { result } = renderContext(options({ staged: true, status: null }));
@@ -109,6 +114,17 @@ describe("git's diff for one side of a file", () => {
 			expect(result.current.diffLoading).toBe(false);
 		});
 		expect(result.current.comparisonContent).toBe("a\nb\n");
+		expect(result.current.diff).toBe("");
+		expect(diffs.length).toBe(0);
+	});
+
+	test("hands over no diff for a deleted file, which decorates from its content", async () => {
+		const diffs = serve();
+		const { result } = renderContext(options({ status: "deleted" }));
+
+		await waitFor(() => {
+			expect(result.current.diffLoading).toBe(false);
+		});
 		expect(result.current.diff).toBeNull();
 		expect(diffs.length).toBe(0);
 	});
@@ -536,5 +552,271 @@ describe("the change context through a stage's refetch", () => {
 		expect(now.chunks[0] === chunks[1] && now.strips[0] === strips[1]).toBe(
 			true,
 		);
+	});
+});
+
+describe("the change context a stage or unstage answers with", () => {
+	// The second line's change staged, and the fourth line's not.
+	const STAGED_DIFF = "@@ -1,5 +1,5 @@\n a\n-b\n+B\n c\n d\n e\n";
+	const CONTEXT: FileContext = {
+		unstagedDiff: { diff: ONE_STAGED.diff, truncated: false },
+		stagedDiff: { diff: STAGED_DIFF, truncated: false },
+		index: { content: ONE_STAGED.comparison },
+		head: { content: BOTH_UNSTAGED.comparison },
+	};
+
+	function answered(overrides: Partial<AnsweredContext> = {}): AnsweredContext {
+		return {
+			repoName: "test-repo",
+			path: "notes.txt",
+			refreshToken: 1,
+			diffRefreshToken: 0,
+			headToken: 0,
+			context: CONTEXT,
+			...overrides,
+		};
+	}
+
+	// Gathers every request, and answers none of them.
+	function hold() {
+		const urls: string[] = [];
+		globalThis.fetch = ((input: string) => {
+			urls.push(input);
+			return new Promise<Response>(() => {});
+		}) as unknown as typeof fetch;
+		return urls;
+	}
+
+	test("hands the working tree its context in the render that makes the refresh, without asking", async () => {
+		const { bases, diffs } = serveHeld();
+		const { result, rerender } = renderContext(options());
+		await waitFor(() => {
+			expect(bases.length).toBe(1);
+			expect(diffs.length).toBe(1);
+		});
+		await act(async () => {
+			bases[0].answer(new Response(BOTH_UNSTAGED.comparison));
+			diffs[0].answer(diffResponse(BOTH_UNSTAGED.diff));
+		});
+		await waitFor(() => {
+			expect(result.current.diffLoading).toBe(false);
+		});
+
+		rerender(options({ refreshToken: 1, answeredContext: answered() }));
+
+		expect(result.current).toEqual({
+			comparisonContent: ONE_STAGED.comparison,
+			diff: ONE_STAGED.diff,
+			diffExact: true,
+			diffLoading: false,
+		});
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		expect(bases.length).toBe(1);
+		expect(diffs.length).toBe(1);
+	});
+
+	test("hands a staged side that opens with it its context, without asking", () => {
+		const urls = hold();
+		const { result } = renderContext(
+			options({ staged: true, refreshToken: 1, answeredContext: answered() }),
+		);
+
+		expect(result.current).toEqual({
+			comparisonContent: BOTH_UNSTAGED.comparison,
+			diff: STAGED_DIFF,
+			diffExact: true,
+			diffLoading: false,
+		});
+		expect(urls).toEqual([]);
+	});
+
+	test("asks git again for the working tree's diff once a save outdates it", async () => {
+		const urls = hold();
+		const { result, rerender } = renderContext(
+			options({ refreshToken: 1, answeredContext: answered() }),
+		);
+		expect(result.current.diffLoading).toBe(false);
+
+		rerender(
+			options({
+				refreshToken: 1,
+				diffRefreshToken: 1,
+				answeredContext: answered(),
+			}),
+		);
+
+		expect(result.current.diff).toBe(ONE_STAGED.diff);
+		expect(result.current.diffLoading).toBe(true);
+		await waitFor(() => {
+			expect(urls.length).toBe(1);
+		});
+		expect(urls[0]).toContain("/api/git/diff");
+	});
+
+	test("takes nothing from an answer for another file, or another refresh", async () => {
+		for (const other of [
+			answered({ path: "other.txt" }),
+			answered({ refreshToken: 2 }),
+		]) {
+			const urls = hold();
+			const { result } = renderContext(
+				options({ refreshToken: 1, answeredContext: other }),
+			);
+			expect(result.current.diffLoading).toBe(true);
+			await waitFor(() => {
+				expect(urls.length).toBe(2);
+			});
+			cleanup();
+		}
+	});
+
+	test("takes a refusal in the answer as the request's answer, and reports it", () => {
+		const urls = hold();
+		const errors: string[] = [];
+		const refused = (status: number, code: string, message: string) => ({
+			status,
+			error: { code, message },
+		});
+		const { result } = renderContext(
+			options({
+				staged: true,
+				refreshToken: 1,
+				showError: (message) => errors.push(message),
+				answeredContext: answered({
+					context: {
+						...CONTEXT,
+						head: refused(404, "NOT_FOUND", "Base file not found"),
+						stagedDiff: refused(500, "GIT_ERROR", "git diff failed"),
+					},
+				}),
+			}),
+		);
+
+		// A file HEAD has no copy of compares against nothing.
+		expect(result.current).toEqual({
+			comparisonContent: "",
+			diff: null,
+			diffExact: true,
+			diffLoading: false,
+		});
+		expect(errors).toEqual(["git diff failed"]);
+		expect(urls).toEqual([]);
+	});
+
+	test("hands the staged side of a new file unstaged in full nothing to mark", () => {
+		hold();
+		const notFound = {
+			status: 404,
+			error: { code: "NOT_FOUND", message: "Base file not found" },
+		};
+		// Neither HEAD nor the index has a copy of the file, which is untracked
+		// again, so the staged side has no change in the status.
+		const { result } = renderContext(
+			options({
+				staged: true,
+				status: null,
+				refreshToken: 1,
+				answeredContext: answered({
+					context: {
+						unstagedDiff: { diff: "", truncated: false, exact: true },
+						stagedDiff: { diff: "", truncated: false },
+						index: notFound,
+						head: notFound,
+					},
+				}),
+			}),
+		);
+
+		// Its empty text compares against nothing, with an empty diff, so the
+		// editor draws no change and no strip.
+		expect(result.current).toEqual({
+			comparisonContent: "",
+			diff: "",
+			diffExact: true,
+			diffLoading: false,
+		});
+	});
+
+	test("drops a copy's leading byte order mark, as reading it as text does", () => {
+		hold();
+		const { result } = renderContext(
+			options({
+				refreshToken: 1,
+				answeredContext: answered({
+					context: {
+						...CONTEXT,
+						index: { content: `\uFEFF${ONE_STAGED.comparison}` },
+					},
+				}),
+			}),
+		);
+
+		expect(result.current.comparisonContent).toBe(ONE_STAGED.comparison);
+	});
+
+	test("redraws a stage's changes in one step from the answer, with no request", async () => {
+		const { bases, diffs } = serveHeld();
+		const { container, rerender } = render(
+			<FileSideView {...sideProps} {...options()} />,
+		);
+		await waitFor(() => {
+			expect(bases.length).toBe(1);
+			expect(diffs.length).toBe(1);
+		});
+		await act(async () => {
+			bases[0].answer(new Response(BOTH_UNSTAGED.comparison));
+			diffs[0].answer(diffResponse(BOTH_UNSTAGED.diff));
+		});
+		const strips = () =>
+			[...container.querySelectorAll(".cm-changeStrip button")].map(
+				(button) =>
+					`${button.getAttribute("aria-label")}${button.getAttribute("aria-disabled") === "true" ? " (greyed out)" : ""}`,
+			);
+		await waitFor(() => {
+			expect(strips()).toEqual([
+				"Stage the change at line 2",
+				"Stage the change at line 4",
+			]);
+		});
+
+		act(() => {
+			rerender(
+				<FileSideView
+					{...sideProps}
+					{...options({ refreshToken: 1, answeredContext: answered() })}
+				/>,
+			);
+		});
+
+		expect(strips()).toEqual(["Stage the change at line 4"]);
+		expect(container.querySelectorAll(".cm-deletedChunk").length).toBe(1);
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		expect(bases.length).toBe(1);
+		expect(diffs.length).toBe(1);
+	});
+
+	test("opens the staged side on the index's text the answer gives, without reading it", async () => {
+		const urls = hold();
+		const { container } = render(
+			<FileSideView
+				{...sideProps}
+				{...options({
+					staged: true,
+					status: "modified",
+					refreshToken: 1,
+					answeredContext: answered(),
+				})}
+			/>,
+		);
+
+		await waitFor(() => {
+			expect(container.querySelector(".cm-changeStrip")).not.toBeNull();
+		});
+		const { EditorView } = await import("@codemirror/view");
+		const view = EditorView.findFromDOM(
+			container.querySelector(".cm-editor") as HTMLElement,
+		);
+		expect(view?.state.doc.toString()).toBe(ONE_STAGED.comparison);
+		expect(urls).toEqual([]);
 	});
 });

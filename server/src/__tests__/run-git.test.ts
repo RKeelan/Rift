@@ -85,6 +85,36 @@ describe("runGit", () => {
 		expect(read.stdout.equals(content)).toBe(true);
 	});
 
+	test("stops a command that prints more than the caller wants, and says it did", async () => {
+		const content = randomBytes(8 * 1024 * 1024);
+		const hash = (
+			await gitText(repoDir, ["hash-object", "-w", "--stdin"], {
+				input: content,
+			})
+		).trim();
+		const limit = 1024 * 1024;
+
+		const read = await runGit(repoDir, ["cat-file", "blob", hash], {
+			maxOutput: limit,
+		});
+
+		// It holds the start of the blob, past the limit by a pipe's worth at
+		// most, and is no failure.
+		expect(read.cut).toBe(true);
+		expect(read.stdout.length).toBeGreaterThan(limit);
+		expect(read.stdout.length).toBeLessThan(limit + 256 * 1024);
+		expect(read.stdout.equals(content.subarray(0, read.stdout.length))).toBe(
+			true,
+		);
+
+		// Output within the limit is read whole.
+		const whole = await runGit(repoDir, ["cat-file", "blob", hash], {
+			maxOutput: content.length,
+		});
+		expect(whole.cut).toBe(false);
+		expect(whole.stdout.equals(content)).toBe(true);
+	});
+
 	test("finishes once git exits, though a job it started holds its output", async () => {
 		// A job a hook leaves running inherits git's stderr and keeps it open.
 		const hook = path.join(repoDir, ".git", "hooks", "post-commit");

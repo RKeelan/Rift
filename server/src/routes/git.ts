@@ -489,6 +489,183 @@ export function newFileDiffIsExact(diff: string): boolean {
 // lines cannot be staged from it.
 class InexactDiffError extends Error {}
 
+/** A request an endpoint refuses: the status it answers with, and why. */
+interface Refusal {
+	status: number;
+	error: { code: string; message: string };
+}
+
+/**
+ * git's diff of one side of a file, as /api/git/diff answers with it, or the
+ * endpoint's refusal.
+ */
+type DiffAnswer =
+	| { diff: string; truncated: boolean; exact?: boolean }
+	| Refusal;
+
+/**
+ * The index's or HEAD's copy of a file, the text /api/git/base-content
+ * answers with, or the endpoint's refusal.
+ */
+type CopyAnswer = { content: string } | Refusal;
+
+/**
+ * A diff as /api/git/diff answers with it: cut to MAX_DIFF_SIZE, and saying
+ * so. An untracked file's lines stage from its diff only when the diff, as
+ * sent, describes the file exactly, which `exact` says.
+ */
+function diffAnswer(diff: string, untracked: boolean): DiffAnswer {
+	const truncated = diff.length > MAX_DIFF_SIZE;
+	return {
+		diff: truncated ? diff.slice(0, MAX_DIFF_SIZE) : diff,
+		truncated,
+		...(untracked ? { exact: !truncated && newFileDiffIsExact(diff) } : {}),
+	};
+}
+
+/**
+ * An untracked file's diff against nothing, as /api/git/diff answers with it,
+ * refused when there is no file to diff, as when it has gone or the path
+ * names a directory.
+ */
+async function readUntrackedDiff(
+	toplevel: string,
+	relativePath: string,
+): Promise<DiffAnswer> {
+	try {
+		return diffAnswer(await untrackedDiff(toplevel, relativePath), true);
+	} catch {
+		return {
+			status: 404,
+			error: { code: "NOT_FOUND", message: "File not found" },
+		};
+	}
+}
+
+/**
+ * The index's copy of a file, or with `staged` HEAD's, as
+ * /api/git/base-content answers with it. A copy the editor would not show,
+ * one too large or binary, is refused, as /api/files/content refuses the
+ * file itself, rather than sent whole. git is stopped once a copy passes the
+ * size limit, so a large one is refused without being read. A copy git has
+ * none of, as of a file added but not committed, or one gone from the
+ * index, is refused too.
+ */
+async function readCopy(
+	toplevel: string,
+	gitPath: string,
+	staged: boolean,
+): Promise<CopyAnswer> {
+	let content: Buffer;
+	try {
+		const revision = staged ? `HEAD:${gitPath}` : `:${gitPath}`;
+		content = (
+			await runGit(toplevel, ["show", revision], { maxOutput: MAX_BASE_SIZE })
+		).stdout;
+	} catch {
+		return {
+			status: 404,
+			error: { code: "NOT_FOUND", message: "Base file not found" },
+		};
+	}
+	if (content.length > MAX_BASE_SIZE) {
+		return {
+			status: 413,
+			error: {
+				code: "FILE_TOO_LARGE",
+				message: `File exceeds maximum size of ${MAX_BASE_SIZE / (1024 * 1024)} MB`,
+			},
+		};
+	}
+	if (content.subarray(0, BINARY_CHECK_SIZE).includes(0)) {
+		return {
+			status: 415,
+			error: { code: "BINARY_FILE", message: "Binary files are not supported" },
+		};
+	}
+	return { content: content.toString("utf-8") };
+}
+
+/**
+ * A file's change context, each part as the endpoint that reads it answers:
+ * the working tree's diff against the index (against nothing while the file
+ * is untracked), the index's diff against HEAD, and the index's and HEAD's
+ * copies of the file. These are what both sides of an open file are drawn
+ * from: the working tree is compared against the index, and the index, which
+ * the staged side shows, against HEAD. No stage or unstage changes HEAD, so
+ * its copy is read only when asked for.
+ */
+interface FileContext {
+	unstagedDiff: DiffAnswer;
+	stagedDiff: DiffAnswer;
+	index: CopyAnswer;
+	head?: CopyAnswer;
+}
+
+/**
+ * Reads the `context` field of a stage or unstage request: whether it asks
+ * for the file's context, and HEAD's copy with it. Returns null when the
+ * field is malformed, so the caller can reject it.
+ */
+function validateContextRequest(
+	value: unknown,
+): { context: boolean; head: boolean } | null {
+	if (value === undefined) return { context: false, head: false };
+	if (typeof value !== "object" || value === null || Array.isArray(value)) {
+		return null;
+	}
+	const { head } = value as { head?: unknown };
+	if (head !== undefined && typeof head !== "boolean") return null;
+	return { context: true, head: head === true };
+}
+
+/**
+ * A file's change context, its parts read at once, with the repository's
+ * changes read alongside. A diff that fails is refused as a stage that fails
+ * is, with git's message. Whether the file is untracked, which decides the
+ * working tree's diff, comes from the status, so an untracked file's diff is
+ * read once that has.
+ */
+async function readChangeContext(
+	toplevel: string,
+	relativePath: string,
+	withHead: boolean,
+): Promise<{ files: StatusEntry[]; context: FileContext }> {
+	const gitPath = toGitPath(relativePath);
+	const readDiff = (args: string[]): Promise<DiffAnswer> =>
+		gitText(toplevel, args).then(
+			(diff) => diffAnswer(diff, false),
+			(err: unknown) => ({
+				status: 500,
+				error: {
+					code: "GIT_ERROR",
+					message: err instanceof Error ? err.message : "Git command failed",
+				},
+			}),
+		);
+	const [status, trackedDiff, stagedDiff, index, head] = await Promise.all([
+		gitStatus(toplevel),
+		readDiff(["diff", "--full-index", "--", relativePath]),
+		readDiff(["diff", "--cached", "--full-index", "--", relativePath]),
+		readCopy(toplevel, gitPath, false),
+		withHead ? readCopy(toplevel, gitPath, true) : undefined,
+	]);
+	const untracked = status.some(
+		(file) => file.path === gitPath && file.workingTree === "?",
+	);
+	return {
+		files: buildStatusEntries(status),
+		context: {
+			unstagedDiff: untracked
+				? await readUntrackedDiff(toplevel, relativePath)
+				: trackedDiff,
+			stagedDiff,
+			index,
+			...(head === undefined ? {} : { head }),
+		},
+	};
+}
+
 // Stages the selected lines of a change by rebuilding a partial patch from the
 // diff the caller read and applying it to the index. A no-op when the
 // selection covers no change, so the caller can still return the current
@@ -626,6 +803,17 @@ async function handleStageAction(
 		});
 		return;
 	}
+	// A caller that draws the file from the answer asks for its context.
+	const contextRequest = validateContextRequest(req.body?.context);
+	if (contextRequest === null) {
+		res.status(400).json({
+			error: {
+				code: "INVALID_CONTEXT",
+				message: "context must be an object, with head a boolean if given",
+			},
+		});
+		return;
+	}
 
 	// git status reports repo-root-relative paths, so validate and run against
 	// the repo root even when the server was started from a subdirectory.
@@ -749,7 +937,11 @@ async function handleStageAction(
 		return;
 	}
 
-	res.json({ files: buildStatusEntries(await gitStatus(toplevel)) });
+	res.json(
+		contextRequest.context
+			? await readChangeContext(toplevel, relativePath, contextRequest.head)
+			: { files: buildStatusEntries(await gitStatus(toplevel)) },
+	);
 }
 
 export function gitRoutes(roots: RepoRoot[]): Router {
@@ -771,20 +963,39 @@ export function gitRoutes(roots: RepoRoot[]): Router {
 	});
 
 	// POST /api/git/stage?repo=<name>
-	//   body: { path, ranges?, expectedBlobs?, expectedMtimeMs?, untracked? }
+	//   body: { path, ranges?, expectedBlobs?, expectedMtimeMs?, untracked?,
+	//           context? }
 	// Responds 409 DIFF_CHANGED when the diff's index line no longer names
 	// expectedBlobs, and FILE_MODIFIED when a whole-file stage finds the file's
 	// mtime is no longer expectedMtimeMs. With `untracked`, the diff is the
 	// file's diff against nothing, so ranges stage its lines as a new file, and
 	// the stage answers 422 DIFF_INEXACT when that diff does not describe the
 	// file exactly.
+	//
+	// A stage or unstage answers with the repo's changes as it leaves them,
+	// `files` as /status gives them. One whose body has `context: {}` answers
+	// with the file's change context too, so the client can draw both sides
+	// of the file without asking again, and with `context: { head: true }`
+	// HEAD's copy of the file as well, which no stage or unstage changes:
+	//   context.unstagedDiff  what /diff answers, with untracked=true when
+	//                         `files` lists the file as untracked
+	//   context.stagedDiff    what /diff?staged=true answers
+	//   context.index         what /base-content answers: the index's copy
+	//   context.head          what /base-content?staged=true answers: HEAD's
+	// Each diff is the endpoint's JSON body, and each copy is { content }, its
+	// text. A part the endpoint would refuse, such as the copy of a file that
+	// has none in HEAD or one over 1 MB, is { status, error }: the status and
+	// the error the endpoint answers with. A diff whose git command fails is
+	// { status: 500, error } with code GIT_ERROR and git's message. Responds
+	// 400 INVALID_CONTEXT when `context` is not such an object.
 	router.post("/stage", async (req, res) => {
 		await handleStageAction(roots, req, res, "stage");
 	});
 
-	// POST /api/git/unstage?repo=<name>  body: { path, ranges?, expectedBlobs? }
+	// POST /api/git/unstage?repo=<name>
+	//   body: { path, ranges?, expectedBlobs?, context? }
 	// Responds 409 DIFF_CHANGED when the staged diff's index line no longer
-	// names expectedBlobs.
+	// names expectedBlobs, and otherwise as a stage does.
 	router.post("/unstage", async (req, res) => {
 		await handleStageAction(roots, req, res, "unstage");
 	});
@@ -1050,42 +1261,23 @@ export function gitRoutes(roots: RepoRoot[]): Router {
 			return;
 		}
 
-		try {
-			const relativePath = toGitPath(path.relative(toplevel, resolved));
-			// Unstaged edits are compared against the index, matching what
-			// `git diff` reports; staged edits are compared against HEAD. A
-			// file added but not yet committed has no HEAD version at all.
-			const staged = req.query.staged === "true";
-			const revision = staged ? `HEAD:${relativePath}` : `:${relativePath}`;
-			const content = (await runGit(toplevel, ["show", revision])).stdout;
-			// The editor shows no file that is too large or binary, so a copy
-			// of one is refused as /api/files/content refuses the file
-			// itself, rather than sent whole.
-			if (content.length > MAX_BASE_SIZE) {
-				res.status(413).json({
-					error: {
-						code: "FILE_TOO_LARGE",
-						message: `File exceeds maximum size of ${MAX_BASE_SIZE / (1024 * 1024)} MB`,
-					},
-				});
+		// Unstaged edits are compared against the index, matching what `git
+		// diff` reports; staged edits are compared against HEAD. A file added
+		// but not yet committed has no HEAD version at all.
+		const copy = await readCopy(
+			toplevel,
+			toGitPath(path.relative(toplevel, resolved)),
+			req.query.staged === "true",
+		);
+		if ("error" in copy) {
+			// git finds no copy in a repository it refuses, either.
+			if (copy.status === 404 && (await answeredRefusedRepo(repo, res))) {
 				return;
 			}
-			if (content.subarray(0, BINARY_CHECK_SIZE).includes(0)) {
-				res.status(415).json({
-					error: {
-						code: "BINARY_FILE",
-						message: "Binary files are not supported",
-					},
-				});
-				return;
-			}
-			res.type("text/plain").send(content.toString("utf-8"));
-		} catch {
-			if (await answeredRefusedRepo(repo, res)) return;
-			res.status(404).json({
-				error: { code: "NOT_FOUND", message: "Base file not found" },
-			});
+			res.status(copy.status).json({ error: copy.error });
+			return;
 		}
+		res.type("text/plain").send(copy.content);
 	});
 
 	// GET /api/git/diff?repo=<name>&path=<file>&staged=<bool>&untracked=<bool>
@@ -1128,45 +1320,29 @@ export function gitRoutes(roots: RepoRoot[]): Router {
 		// Run the diff from the repo root so path interpretation is
 		// consistent with git status output (both repo-root-relative).
 		const relativePath = path.relative(toplevel, resolved);
+		if (!staged && req.query.untracked === "true") {
+			const answer = await readUntrackedDiff(toplevel, relativePath);
+			if ("error" in answer) {
+				if (await answeredRefusedRepo(repo, res)) return;
+				res.status(answer.status).json({ error: answer.error });
+				return;
+			}
+			res.json(answer);
+			return;
+		}
 		// Full blob ids on the index line let a caller name this diff when it
 		// stages or unstages lines read from it.
 		const diffArgs = staged
 			? ["diff", "--cached", "--full-index", "--", relativePath]
 			: ["diff", "--full-index", "--", relativePath];
-		const untracked = !staged && req.query.untracked === "true";
 		let diff: string;
-		if (untracked) {
-			try {
-				diff = await untrackedDiff(toplevel, relativePath);
-			} catch {
-				if (await answeredRefusedRepo(repo, res)) return;
-				// There is no file to diff, as when it has gone or the path names a
-				// directory.
-				res.status(404).json({
-					error: { code: "NOT_FOUND", message: "File not found" },
-				});
-				return;
-			}
-		} else {
-			try {
-				diff = await gitText(toplevel, diffArgs);
-			} catch (err) {
-				if (await answeredRefusedRepo(repo, res)) return;
-				throw err;
-			}
+		try {
+			diff = await gitText(toplevel, diffArgs);
+		} catch (err) {
+			if (await answeredRefusedRepo(repo, res)) return;
+			throw err;
 		}
-		const truncated = diff.length > MAX_DIFF_SIZE;
-		// An untracked file's lines stage from its diff only when the diff, as
-		// sent, describes the file exactly, which `exact` says.
-		const exact = untracked
-			? { exact: !truncated && newFileDiffIsExact(diff) }
-			: {};
-
-		res.json({
-			diff: truncated ? diff.slice(0, MAX_DIFF_SIZE) : diff,
-			truncated,
-			...exact,
-		});
+		res.json(diffAnswer(diff, false));
 	});
 
 	return router;

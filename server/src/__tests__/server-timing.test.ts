@@ -138,6 +138,23 @@ describe("Server-Timing for a request that runs git", () => {
 		expect(timings(unstage.headers["server-timing"]).processes).toBe(2);
 	});
 
+	test("a stage that asks for the file's context counts the reads it takes", async () => {
+		const response = await supertest(app)
+			.post("/api/git/stage?repo=root/repo")
+			.send({ path: "a.txt", ranges: [[2, 2]], context: {} });
+		expect(response.status).toBe(200);
+		// The diff and the patch, then the status, the file's two diffs and
+		// the index's copy.
+		expect(timings(response.headers["server-timing"]).processes).toBe(6);
+
+		const unstage = await supertest(app)
+			.post("/api/git/unstage?repo=root/repo")
+			.send({ path: "a.txt", ranges: [[2, 2]], context: { head: true } });
+		expect(unstage.status).toBe(200);
+		// HEAD's copy as well.
+		expect(timings(unstage.headers["server-timing"]).processes).toBe(7);
+	});
+
 	test("requests at the same time count only their own processes", async () => {
 		const [status, diff, health] = await Promise.all([
 			supertest(app).get("/api/git/status?repo=root/repo"),

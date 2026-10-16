@@ -2087,7 +2087,7 @@ describe("switching between a file's unstaged and staged changes", () => {
 		return strip;
 	}
 
-	test("reloads the staged side when the working tree stages lines", async () => {
+	test("reloads the staged side when the working tree stages lines and the answer gives no context", async () => {
 		const urls = mockFileRequests(BOTH);
 		renderFilesPage(["/files?path=app.ts&staged=false"]);
 		const strip = await enabledStrip("Stage the change at line 1");
@@ -2203,7 +2203,21 @@ describe("switching between a file's unstaged and staged changes", () => {
 						{ path: "new.txt", status: "added", staged: true },
 						{ path: "new.txt", status: "modified", staged: false },
 					];
-					return json({ files });
+					return json({
+						files,
+						context: {
+							unstagedDiff: {
+								diff: "@@ -1 +1,3 @@\n+one\n two\n+three\n",
+								truncated: false,
+							},
+							stagedDiff: { diff: newFile("two"), truncated: false },
+							index: { content: index },
+							head: {
+								status: 404,
+								error: { code: "NOT_FOUND", message: "Base file not found" },
+							},
+						},
+					});
 				}
 				if (url.includes("/api/git/status")) return json({ files });
 				if (url.includes("/api/git/diff")) {
@@ -2267,34 +2281,33 @@ describe("switching between a file's unstaged and staged changes", () => {
 			expect(side(container)).toBe("Unstaged");
 			expect(shownTargets()).toEqual(["1", "3"]);
 		});
+		// The stage builds the staged side, so it asks for HEAD's copy too.
 		expect(stageBodies).toEqual([
 			{
 				path: "new.txt",
 				ranges: [[2, 2]],
 				expectedBlobs: blobs,
 				untracked: true,
+				context: { head: true },
 			},
 		]);
 		expect(screen.getByTestId("location-search").textContent).toBe(
 			"?path=new.txt&staged=false",
 		);
-		// The stage's answer gives the file's new status, so the side asks
-		// straight away for what a tracked change needs, and nothing else: not
-		// the status again, nor the untracked diff it had.
-		const afterStage = urls.slice(
-			urls.findIndex((url) => url.includes("/api/git/stage")) + 1,
-		);
-		expect(afterStage.some((url) => url.includes("/api/git/status"))).toBe(
-			false,
-		);
-		expect(afterStage.some((url) => url.includes("untracked=true"))).toBe(
-			false,
-		);
 
+		// The staged side, which the stage brought, opens from the stage's
+		// answer too.
 		switchSide(container);
 		await waitFor(() => {
 			expect(shownTargets()).toEqual(["1"]);
 		});
+		// The stage's answer gives the file's new status and both sides'
+		// context, so neither side asks for anything: not the status again, nor
+		// the diff against the index that the working tree needs now, nor the
+		// staged side's text or HEAD's copy.
+		expect(
+			urls.slice(urls.findIndex((url) => url.includes("/api/git/stage")) + 1),
+		).toEqual([]);
 
 		// The list shows the file in both sections.
 		fireEvent.click(backButton(container));
@@ -2419,6 +2432,416 @@ describe("switching between a file's unstaged and staged changes", () => {
 
 		expect(view?.state.doc.toString()).toBe("edited current\n");
 		expect(screen.getByText("Unsaved changes")).toBeDefined();
+	});
+});
+
+describe("staging and unstaging from the editor", () => {
+	// A file whose first and third lines are changed in the working tree.
+	const HEAD = "one\ntwo\nthree\n";
+	const WORKING = "ONE\ntwo\nTHREE\n";
+
+	interface RepoState {
+		files: StatusFile[];
+		index: string;
+		unstagedDiff: string;
+		stagedDiff: string;
+	}
+
+	// Nothing staged.
+	const NONE_STAGED: RepoState = {
+		files: [{ path: "app.ts", status: "modified", staged: false }],
+		index: HEAD,
+		unstagedDiff: "@@ -1,3 +1,3 @@\n-one\n+ONE\n two\n-three\n+THREE\n",
+		stagedDiff: "",
+	};
+	// The first line's change staged.
+	const FIRST_STAGED: RepoState = {
+		files: [
+			{ path: "app.ts", status: "modified", staged: true },
+			{ path: "app.ts", status: "modified", staged: false },
+		],
+		index: "ONE\ntwo\nthree\n",
+		unstagedDiff: "@@ -1,3 +1,3 @@\n ONE\n two\n-three\n+THREE\n",
+		stagedDiff: "@@ -1,3 +1,3 @@\n-one\n+ONE\n two\n three\n",
+	};
+	// Both changes staged.
+	const BOTH_STAGED: RepoState = {
+		files: [{ path: "app.ts", status: "modified", staged: true }],
+		index: WORKING,
+		unstagedDiff: "",
+		stagedDiff: "@@ -1,3 +1,3 @@\n-one\n+ONE\n two\n-three\n+THREE\n",
+	};
+
+	// Serves the repo in each state in turn, moving to the next on each stage
+	// or unstage, which answers with that state's changes and, when asked,
+	// the file's context in it, as the server does. Returns every request, by
+	// method and URL, and each stage's and unstage's body.
+	function serveRepo(states: RepoState[]) {
+		let at = 0;
+		const requests: string[] = [];
+		const bodies: unknown[] = [];
+		globalThis.fetch = mock(
+			(input: string | URL | Request, init?: RequestInit) => {
+				const url = typeof input === "string" ? input : input.toString();
+				requests.push(`${init?.method ?? "GET"} ${url}`);
+				if (init?.method === "POST") at += 1;
+				const state = states[at];
+				if (init?.method === "POST") {
+					const body = JSON.parse(String(init.body));
+					bodies.push(body);
+					const context = body.context && {
+						unstagedDiff: { diff: state.unstagedDiff, truncated: false },
+						stagedDiff: { diff: state.stagedDiff, truncated: false },
+						index: { content: state.index },
+						...(body.context.head ? { head: { content: HEAD } } : {}),
+					};
+					return Promise.resolve(json({ files: state.files, context }));
+				}
+				if (url.includes("/api/git/status")) {
+					return Promise.resolve(json({ files: state.files }));
+				}
+				if (url.includes("/api/git/diff")) {
+					return Promise.resolve(
+						json({
+							diff: url.includes("staged=true")
+								? state.stagedDiff
+								: state.unstagedDiff,
+							truncated: false,
+						}),
+					);
+				}
+				if (url.includes("/api/git/base-content")) {
+					return Promise.resolve(
+						new Response(url.includes("staged=true") ? HEAD : state.index),
+					);
+				}
+				return Promise.resolve(
+					new Response(WORKING, { headers: { "x-file-mtime-ms": "1" } }),
+				);
+			},
+		) as typeof fetch;
+		return Object.assign(requests, { bodies });
+	}
+
+	// The view of the file's side named, shown or not.
+	function sideView(container: HTMLElement, name: "Staged" | "Unstaged") {
+		const found = [...container.querySelectorAll(".changes-editor-view")].find(
+			(view) =>
+				view.querySelector(".text-file-editor-name-side")?.firstChild
+					?.textContent === name,
+		);
+		if (!found) throw new Error(`no ${name} side`);
+		return found as HTMLElement;
+	}
+
+	// A side's strips, each by its button's label, greyed out or not.
+	function strips(view: HTMLElement) {
+		return [...view.querySelectorAll(".cm-changeStrip button")].map(
+			(button) =>
+				`${button.getAttribute("aria-label")}${greyed(button) ? " (greyed out)" : ""}`,
+		);
+	}
+
+	async function editorOf(view: HTMLElement) {
+		const { EditorView } = await import("@codemirror/view");
+		const editor = EditorView.findFromDOM(
+			view.querySelector(".cm-editor") as HTMLElement,
+		);
+		if (!editor) throw new Error("no editor");
+		return editor;
+	}
+
+	test("stages a change from its strip with one request, and draws both sides from the answer", async () => {
+		const requests = serveRepo([NONE_STAGED, FIRST_STAGED, BOTH_STAGED]);
+		const { container } = renderFilesPage(["/files?path=app.ts&staged=false"]);
+		await waitFor(() => {
+			expect(strips(sideView(container, "Unstaged"))).toEqual([
+				"Stage the change at line 1",
+				"Stage the change at line 3",
+			]);
+		});
+		expect(side(container)).toBe("Unstaged (greyed out)");
+		const before = requests.length;
+
+		fireEvent.click(
+			screen.getByRole("button", { name: "Stage the change at line 1" }),
+		);
+
+		await waitFor(() => {
+			expect(strips(sideView(container, "Unstaged"))).toEqual([
+				"Stage the change at line 3",
+			]);
+		});
+		// The staged side, which the stage brought, is built from the answer
+		// too, behind the working tree.
+		expect(side(container)).toBe("Unstaged");
+		const staged = sideView(container, "Staged");
+		await waitFor(() => {
+			expect(strips(staged)).toEqual(["Unstage the change at line 1"]);
+		});
+		expect((await editorOf(staged)).state.doc.toString()).toBe(
+			FIRST_STAGED.index,
+		);
+		expect(requests.slice(before)).toEqual([
+			"POST /api/git/stage?repo=test-repo",
+		]);
+
+		// The staged side is built now, and keeps HEAD's copy, which no stage
+		// changes, so the next stage asks for the context without it.
+		await waitFor(() => {
+			expect(strips(sideView(container, "Unstaged"))).toEqual([
+				"Stage the change at line 3",
+			]);
+		});
+		fireEvent.click(
+			screen.getByRole("button", { name: "Stage the change at line 3" }),
+		);
+		await waitFor(() => {
+			expect(strips(staged)).toEqual([
+				"Unstage the change at line 1",
+				"Unstage the change at line 3",
+			]);
+		});
+		expect(requests.slice(before)).toEqual([
+			"POST /api/git/stage?repo=test-repo",
+			"POST /api/git/stage?repo=test-repo",
+		]);
+		expect(requests.bodies).toEqual([
+			{ path: "app.ts", ranges: [[1, 1]], context: { head: true } },
+			{ path: "app.ts", ranges: [[3, 3]], context: { head: false } },
+		]);
+	});
+
+	test("updates the staged side's text in place when the working tree stages a change", async () => {
+		const requests = serveRepo([FIRST_STAGED, BOTH_STAGED]);
+		const { container } = renderFilesPage(["/files?path=app.ts&staged=false"]);
+		const staged = await waitFor(() => sideView(container, "Staged"));
+		await waitFor(() => {
+			expect(strips(staged)).toEqual(["Unstage the change at line 1"]);
+		});
+		const editor = await editorOf(staged);
+		const cursorLine = () =>
+			editor.state.doc.lineAt(editor.state.selection.main.head).number;
+		await waitFor(() => {
+			expect(strips(sideView(container, "Unstaged"))).toEqual([
+				"Stage the change at line 3",
+			]);
+		});
+		// The staged side, behind the working tree, opened at its change.
+		expect(cursorLine()).toBe(1);
+		const before = requests.length;
+
+		fireEvent.click(
+			screen.getByRole("button", { name: "Stage the change at line 3" }),
+		);
+
+		await waitFor(() => {
+			expect(strips(staged)).toEqual([
+				"Unstage the change at line 1",
+				"Unstage the change at line 3",
+			]);
+		});
+		// Compared as booleans, since printing editor views on a mismatch
+		// would take the test runner practically forever.
+		expect((await editorOf(staged)) === editor).toBe(true);
+		expect(editor.state.doc.toString()).toBe(BOTH_STAGED.index);
+		expect(requests.slice(before)).toEqual([
+			"POST /api/git/stage?repo=test-repo",
+		]);
+		// It moved to the change just staged, so switching to it shows it.
+		expect(cursorLine()).toBe(3);
+		switchSide(container);
+		// Nothing is left unstaged.
+		expect(side(container)).toBe("Staged (greyed out)");
+		expect(cursorLine()).toBe(3);
+	});
+
+	test("unstages a change with one request, and leaves no strip once the last has gone", async () => {
+		const requests = serveRepo([FIRST_STAGED, NONE_STAGED]);
+		const { container } = renderFilesPage(["/files?path=app.ts&staged=true"]);
+		const staged = await waitFor(() => sideView(container, "Staged"));
+		await waitFor(() => {
+			expect(strips(staged)).toEqual(["Unstage the change at line 1"]);
+		});
+		const editor = await editorOf(staged);
+		const before = requests.length;
+
+		fireEvent.click(
+			screen.getByRole("button", { name: "Unstage the change at line 1" }),
+		);
+
+		await waitFor(() => {
+			expect(editor.state.doc.toString()).toBe(HEAD);
+		});
+		// Nothing is staged now, so the side shows the index as HEAD has it,
+		// with nothing to unstage and no strip, greyed out or not.
+		expect(strips(staged)).toEqual([]);
+		expect(staged.querySelector(".cm-deletedChunk") === null).toBe(true);
+		expect(staged.querySelector(".text-file-editor-notice") === null).toBe(
+			true,
+		);
+		expect(side(container)).toBe("Staged");
+		await waitFor(() => {
+			expect(strips(sideView(container, "Unstaged"))).toEqual([
+				"Stage the change at line 1",
+				"Stage the change at line 3",
+			]);
+		});
+		expect(requests.slice(before)).toEqual([
+			"POST /api/git/unstage?repo=test-repo",
+		]);
+	});
+
+	test("asks for no context when it leaves the file or the list stays", async () => {
+		const requests = serveRepo([
+			NONE_STAGED,
+			BOTH_STAGED,
+			NONE_STAGED,
+			BOTH_STAGED,
+		]);
+		const { container } = renderFilesPage(["/files"]);
+
+		// The list's button, and the bar's action on the whole file, which
+		// returns to the list.
+		fireEvent.click(await screen.findByLabelText("Stage app.ts"));
+		await waitFor(() => {
+			expect(requests.bodies.length).toBe(1);
+		});
+		fireEvent.click(await screen.findByLabelText("Unstage app.ts"));
+		await waitFor(() => {
+			expect(requests.bodies.length).toBe(2);
+		});
+		fireEvent.click(
+			(await screen.findByLabelText("Stage app.ts"))
+				.closest(".changes-file-row")
+				?.querySelector(".changes-file-entry") as Element,
+		);
+		await findEditableEditor(container);
+		fireEvent.click(
+			within(editorBar(container)).getByRole("button", { name: "Stage file" }),
+		);
+		await waitFor(() => {
+			expect(listShown(container)).toBe(true);
+		});
+
+		expect(requests.bodies).toEqual([
+			{ path: "app.ts" },
+			{ path: "app.ts" },
+			{ path: "app.ts" },
+		]);
+	});
+
+	test("unstages the whole file under unsaved edits from the answer, without drawing the staged side's new text", async () => {
+		const requests = serveRepo([FIRST_STAGED, NONE_STAGED]);
+		const { container } = renderFilesPage(["/files?path=app.ts&staged=false"]);
+		const staged = await waitFor(() => sideView(container, "Staged"));
+		await waitFor(() => {
+			expect(strips(staged)).toEqual(["Unstage the change at line 1"]);
+		});
+		const working = await editorOf(sideView(container, "Unstaged"));
+		act(() => {
+			working.dispatch({ changes: { from: 0, insert: "edited " } });
+		});
+		await screen.findByText("Unsaved changes");
+		switchSide(container);
+		expect(side(container)).toBe("Staged");
+		// Each text the staged side's editor takes from here on.
+		const stagedEditor = await editorOf(staged);
+		const taken: string[] = [];
+		const dispatch = stagedEditor.dispatch.bind(stagedEditor);
+		stagedEditor.dispatch = ((
+			...specs: Parameters<typeof stagedEditor.dispatch>
+		) => {
+			const before = stagedEditor.state.doc;
+			dispatch(...specs);
+			if (stagedEditor.state.doc !== before) {
+				taken.push(stagedEditor.state.doc.toString());
+			}
+		}) as typeof stagedEditor.dispatch;
+		const before = requests.length;
+		// Each time the staged side shows its Unstage file on offer again.
+		let offeredAgain = 0;
+		const observer = new MutationObserver(() => {
+			const shown = container.querySelector(
+				".changes-editor-view:not(.changes-editor-view--hidden)",
+			);
+			const button =
+				shown &&
+				within(shown as HTMLElement).queryByRole("button", {
+					name: "Unstage file",
+				});
+			if (button && !greyed(button)) offeredAgain += 1;
+		});
+
+		fireEvent.click(
+			within(editorBar(container)).getByRole("button", {
+				name: "Unstage file",
+			}),
+		);
+		observer.observe(container, {
+			subtree: true,
+			childList: true,
+			attributes: true,
+		});
+
+		await waitFor(() => {
+			expect(side(container)).toBe("Unstaged (greyed out)");
+		});
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		observer.disconnect();
+		// The action ends with the switch, not before it.
+		expect(offeredAgain).toBe(0);
+		// The staged side closed as the working tree came on screen, never
+		// having drawn the index's new text, and the working tree drew its
+		// changes against the index from the answer, keeping the edits.
+		expect(taken).toEqual([]);
+		expect(container.querySelectorAll(".changes-editor-view").length).toBe(1);
+		expect(working.state.doc.toString()).toBe(`edited ${WORKING}`);
+		expect(requests.slice(before)).toEqual([
+			"POST /api/git/unstage?repo=test-repo",
+		]);
+		expect(requests.bodies).toEqual([
+			{ path: "app.ts", context: { head: false } },
+		]);
+	});
+
+	test("reads a file's context afresh when it opens again after a stage", async () => {
+		const requests = serveRepo([NONE_STAGED, FIRST_STAGED]);
+		const { container } = renderFilesPage([
+			"/files",
+			"/files?path=app.ts&staged=false",
+		]);
+		fireEvent.click(
+			await screen.findByRole("button", { name: "Stage the change at line 1" }),
+		);
+		await waitFor(() => {
+			expect(strips(sideView(container, "Unstaged"))).toEqual([
+				"Stage the change at line 3",
+			]);
+		});
+		fireEvent.click(backButton(container));
+		await waitFor(() => {
+			expect(listShown(container)).toBe(true);
+		});
+		const before = requests.length;
+
+		// The file opens again from its unstaged row.
+		const row = screen
+			.getByLabelText("Stage app.ts")
+			.closest(".changes-file-row");
+		fireEvent.click(row?.querySelector(".changes-file-entry") as Element);
+
+		// Changes from outside Rift may have reached the index meanwhile, so
+		// the stage's answer is not taken again: each side reads its
+		// comparison and diff, and the staged side its text.
+		await waitFor(() => {
+			expect(
+				requests
+					.slice(before)
+					.filter((request) => /\/api\/git\/(diff|base-content)/.test(request))
+					.length,
+			).toBe(5);
+		});
 	});
 });
 

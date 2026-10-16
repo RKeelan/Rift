@@ -10,7 +10,7 @@ import {
 	waitFor,
 	within,
 } from "@testing-library/react";
-import { type ReactNode, useLayoutEffect } from "react";
+import { type ReactNode, useLayoutEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
 	CONTEXT_WAIT_MS,
@@ -1143,6 +1143,7 @@ describe("staging", () => {
 		});
 		expect(JSON.parse(requests[0].body as string)).toEqual({
 			path: "notes.txt",
+			context: { head: false },
 			ranges: [[2, 2]],
 		});
 	});
@@ -1160,8 +1161,25 @@ describe("staging", () => {
 		});
 		expect(JSON.parse(requests[0].body as string)).toEqual({
 			path: "notes.txt",
+			context: { head: false },
 			ranges: [[2, 2]],
 			expectedBlobs: B_MODIFIED_BLOBS,
+		});
+	});
+
+	test("asks for HEAD's copy with the context when its page builds the staged side from the answer", async () => {
+		const { view, requests } = await renderForStaging({ askForHead: true });
+		selectLines(view, 2);
+
+		fireEvent.click(await enabledButton("Stage selection"));
+
+		await waitFor(() => {
+			expect(requests.length).toBe(1);
+		});
+		expect(JSON.parse(requests[0].body as string)).toEqual({
+			path: "notes.txt",
+			ranges: [[2, 2]],
+			context: { head: true },
 		});
 	});
 
@@ -1195,6 +1213,8 @@ describe("staging", () => {
 		expect(staged).toBe(0);
 	});
 
+	// The page leaves the file once it is staged whole, so it asks for no
+	// context.
 	test("stages an untracked file whole, without ranges", async () => {
 		const { requests } = await renderForStaging({
 			changeType: "untracked",
@@ -1592,6 +1612,7 @@ describe("unstaging", () => {
 		});
 		expect(JSON.parse(requests[0].body as string)).toEqual({
 			path: "notes.txt",
+			context: { head: false },
 			ranges: [[2, 2]],
 		});
 	});
@@ -1669,6 +1690,7 @@ describe("unstaging", () => {
 		});
 		expect(JSON.parse(requests[0].body as string)).toEqual({
 			path: "notes.txt",
+			context: { head: false },
 			ranges: [[2, 2]],
 			expectedBlobs: B_MODIFIED_BLOBS,
 		});
@@ -1706,38 +1728,61 @@ describe("unstaging", () => {
 		expect(view.state.doc.toString()).toBe("a\nB\nc\n");
 	});
 
-	test("names the refetched staged diff after unstaging in place", async () => {
-		const header = (blobs: string) =>
-			`diff --git a/notes.txt b/notes.txt\nindex ${blobs} 100644\n--- a/notes.txt\n+++ b/notes.txt\n`;
-		const before = `${"1".repeat(40)}..${"2".repeat(40)}`;
-		const after = `${"1".repeat(40)}..${"3".repeat(40)}`;
-		let index = "a\nB\nc\nD\n";
-		const requests: unknown[] = [];
-		globalThis.fetch = (async (_input: string, init?: RequestInit) => {
+	// A staged view as its page holds it: each unstage hands it the next of
+	// `contexts`, the index's text and the staged diff that the answer gives,
+	// in one render, as the page does with an unstage's answer. The last
+	// stays once they run out.
+	function PagedStagedView({
+		contexts,
+		...props
+	}: Partial<Parameters<typeof TextFileEditor>[0]> & {
+		contexts: {
+			text?: string;
+			comparison: string;
+			diff: string;
+			changeType?: "added" | "modified" | null;
+		}[];
+	}) {
+		const [at, setAt] = useState(0);
+		const {
+			text,
+			comparison,
+			diff,
+			changeType = "modified",
+		} = contexts[Math.min(at, contexts.length - 1)];
+		return (
+			<TextFileEditor
+				filePath="notes.txt"
+				repo="test-repo"
+				staged
+				{...props}
+				text={text}
+				comparisonContent={comparison}
+				changeDiff={diff}
+				changeType={changeType}
+				onUnstaged={() => setAt((value) => value + 1)}
+			/>
+		);
+	}
+
+	// Answers an unstage with the repo's changes, and any other request with
+	// the index's text before it, and gathers the requests made.
+	function serveIndex(index: string) {
+		const requests: { url: string; body?: unknown }[] = [];
+		globalThis.fetch = (async (input: string, init?: RequestInit) => {
 			if (init?.method === "POST") {
-				requests.push(JSON.parse(init.body as string));
-				index = "a\nb\nc\nD\n";
+				requests.push({ url: input, body: JSON.parse(init.body as string) });
 				return new Response(JSON.stringify({ files: [] }), {
 					headers: { "Content-Type": "application/json" },
 				});
 			}
+			requests.push({ url: input });
 			return new Response(index);
 		}) as unknown as typeof fetch;
+		return requests;
+	}
 
-		const props = {
-			filePath: "notes.txt",
-			repo: "test-repo",
-			comparisonContent: "a\nb\nc\nd\n",
-			changeType: "modified" as const,
-			staged: true,
-			onUnstaged: () => {},
-		};
-		const { container, rerender } = render(
-			<TextFileEditor
-				{...props}
-				changeDiff={`${header(before)}@@ -1,4 +1,4 @@\n a\n-b\n+B\n c\n-d\n+D\n`}
-			/>,
-		);
+	async function viewOf(container: HTMLElement) {
 		await waitFor(() => {
 			expect(container.querySelector(".cm-content")).not.toBeNull();
 		});
@@ -1746,41 +1791,76 @@ describe("unstaging", () => {
 			container.querySelector(".cm-editor") as HTMLElement,
 		);
 		if (!view) throw new Error("editor view not found");
+		return view;
+	}
+
+	// The second and fourth lines' changes staged, and once the second's is
+	// unstaged.
+	const UNSTAGE_SECOND = [
+		{
+			comparison: "a\nb\nc\nd\n",
+			diff: "@@ -1,4 +1,4 @@\n a\n-b\n+B\n c\n-d\n+D\n",
+		},
+		{
+			text: "a\nb\nc\nD\n",
+			comparison: "a\nb\nc\nd\n",
+			diff: "@@ -1,4 +1,4 @@\n a\n b\n c\n-d\n+D\n",
+		},
+	];
+
+	test("unstages by line again at once, naming the staged diff handed over with the index's text", async () => {
+		const header = (blobs: string) =>
+			`diff --git a/notes.txt b/notes.txt\nindex ${blobs} 100644\n--- a/notes.txt\n+++ b/notes.txt\n`;
+		const before = `${"1".repeat(40)}..${"2".repeat(40)}`;
+		const after = `${"1".repeat(40)}..${"3".repeat(40)}`;
+		const requests = serveIndex("a\nB\nc\nD\n");
+		const { container } = render(
+			<PagedStagedView
+				contexts={[
+					{
+						...UNSTAGE_SECOND[0],
+						diff: header(before) + UNSTAGE_SECOND[0].diff,
+					},
+					{
+						...UNSTAGE_SECOND[1],
+						diff: header(after) + UNSTAGE_SECOND[1].diff,
+					},
+				]}
+			/>,
+		);
+		const view = await viewOf(container);
 
 		selectLines(view, 2);
 		fireEvent.click(await enabledButton("Unstage selection"));
 		await waitFor(() => {
 			expect(view.state.doc.toString()).toBe("a\nb\nc\nD\n");
 		});
-		expect(requests[0]).toEqual({
-			path: "notes.txt",
-			ranges: [[2, 2]],
-			expectedBlobs: before,
-		});
 
-		// The buffer now holds the new staged content, which the old diff no
-		// longer describes, so nothing is unstaged by line until the page hands
-		// over the diff it refetches.
+		// The text and the diff that describes it arrive together, so the next
+		// lines unstage straight away, named by the new diff, and nothing is
+		// read again.
 		selectLines(view, 4);
-		expect(
-			greyed(await screen.findByRole("button", { name: "Unstage selection" })),
-		).toBe(true);
-
-		rerender(
-			<TextFileEditor
-				{...props}
-				changeDiff={`${header(after)}@@ -1,4 +1,4 @@\n a\n b\n c\n-d\n+D\n`}
-			/>,
-		);
-		fireEvent.click(await enabledButton("Unstage selection"));
+		const unstage = screen.getByRole("button", { name: "Unstage selection" });
+		expect(greyed(unstage)).toBe(false);
+		fireEvent.click(unstage);
 		await waitFor(() => {
-			expect(requests.length).toBe(2);
+			expect(requests.length).toBe(3);
 		});
-		expect(requests[1]).toEqual({
-			path: "notes.txt",
-			ranges: [[4, 4]],
-			expectedBlobs: after,
-		});
+		expect(requests.map(({ url, body }) => body ?? url)).toEqual([
+			expect.stringContaining("/api/git/base-content"),
+			{
+				path: "notes.txt",
+				ranges: [[2, 2]],
+				expectedBlobs: before,
+				context: { head: false },
+			},
+			{
+				path: "notes.txt",
+				ranges: [[4, 4]],
+				expectedBlobs: after,
+				context: { head: false },
+			},
+		]);
 	});
 
 	test("unstages a staged new file by line, or whole through the page's action", async () => {
@@ -1819,45 +1899,25 @@ describe("unstaging", () => {
 		});
 		expect(JSON.parse(requests[0].body as string)).toEqual({
 			path: "notes.txt",
+			context: { head: false },
 			ranges: [[2, 2]],
 			expectedBlobs: NEW_FILE_BLOBS,
 		});
 	});
 
-	test("empties the staged view of a new file once all of it is unstaged", async () => {
-		let inIndex = true;
-		globalThis.fetch = (async (_input: string, init?: RequestInit) => {
-			if (init?.method === "POST") {
-				inIndex = false;
-				return new Response(JSON.stringify({ files: [] }), {
-					headers: { "Content-Type": "application/json" },
-				});
-			}
-			// The index holds nothing of a file it no longer tracks.
-			return inIndex
-				? new Response(NEW_FILE.file)
-				: new Response("Not found", { status: 404 });
-		}) as unknown as typeof fetch;
-
+	test("empties the staged view of a new file once all of it is unstaged, and leaves it no strip", async () => {
+		serveIndex(NEW_FILE.file);
+		// The index holds nothing of a file it no longer tracks, and HEAD has
+		// none of it either.
 		const { container } = render(
-			<TextFileEditor
-				filePath="notes.txt"
-				repo="test-repo"
-				comparisonContent=""
-				changeDiff={NEW_FILE.diff}
-				changeType="added"
-				staged
-				onUnstaged={() => {}}
+			<PagedStagedView
+				contexts={[
+					{ comparison: "", diff: NEW_FILE.diff, changeType: "added" },
+					{ text: "", comparison: "", diff: "", changeType: null },
+				]}
 			/>,
 		);
-		await waitFor(() => {
-			expect(container.querySelector(".cm-content")).not.toBeNull();
-		});
-		const { EditorView } = await import("@codemirror/view");
-		const view = EditorView.findFromDOM(
-			container.querySelector(".cm-editor") as HTMLElement,
-		);
-		if (!view) throw new Error("editor view not found");
+		const view = await viewOf(container);
 
 		fireEvent.click(await enabledButton("Unstage the change at line 1"));
 
@@ -1867,43 +1927,49 @@ describe("unstaging", () => {
 		expect(container.querySelector(".text-file-editor-error") === null).toBe(
 			true,
 		);
+		expect(container.querySelector(".cm-changeStrip") === null).toBe(true);
+	});
+
+	test("leaves no strip once its last staged change is unstaged", async () => {
+		serveIndex("a\nB\nc\n");
+		const { container } = render(
+			<PagedStagedView
+				contexts={[
+					{ comparison: "a\nb\nc\n", diff: B_MODIFIED_DIFF },
+					// Nothing is staged now, so the index is HEAD's copy, and its
+					// diff against HEAD is empty.
+					{
+						text: "a\nb\nc\n",
+						comparison: "a\nb\nc\n",
+						diff: "",
+						changeType: null,
+					},
+				]}
+			/>,
+		);
+		const view = await viewOf(container);
+
+		fireEvent.click(await enabledButton("Unstage the change at line 2"));
+
+		await waitFor(() => {
+			expect(view.state.doc.toString()).toBe("a\nb\nc\n");
+		});
+		expect(container.querySelector(".cm-changeStrip") === null).toBe(true);
+		expect(container.querySelector(".cm-deletedChunk") === null).toBe(true);
+		expect(container.querySelector(".text-file-editor-notice") === null).toBe(
+			true,
+		);
 	});
 
 	test("keeps the editor when an unstage changes the staged content", async () => {
-		let index = "a\nB\nc\nD\n";
-		globalThis.fetch = (async (_input: string, init?: RequestInit) => {
-			if (init?.method === "POST") {
-				index = "a\nb\nc\nD\n";
-				return new Response(JSON.stringify({ files: [] }), {
-					headers: { "Content-Type": "application/json" },
-				});
-			}
-			return new Response(index);
-		}) as unknown as typeof fetch;
-
-		const { container } = render(
-			<TextFileEditor
-				filePath="notes.txt"
-				repo="test-repo"
-				comparisonContent={"a\nb\nc\nd\n"}
-				changeDiff={"@@ -1,4 +1,4 @@\n a\n-b\n+B\n c\n-d\n+D\n"}
-				changeType="modified"
-				staged
-				onUnstaged={() => {}}
-			/>,
-		);
-		await waitFor(() => {
-			expect(container.querySelector(".cm-content")).not.toBeNull();
-		});
-		const { EditorView } = await import("@codemirror/view");
-		const view = EditorView.findFromDOM(
-			container.querySelector(".cm-editor") as HTMLElement,
-		);
-		if (!view) throw new Error("editor view not found");
+		const requests = serveIndex("a\nB\nc\nD\n");
+		const { container } = render(<PagedStagedView contexts={UNSTAGE_SECOND} />);
+		const view = await viewOf(container);
 
 		selectLines(view, 2);
 		fireEvent.click(await enabledButton("Unstage selection"));
 
+		const { EditorView } = await import("@codemirror/view");
 		const currentView = () =>
 			EditorView.findFromDOM(
 				container.querySelector(".cm-editor") as HTMLElement,
@@ -1915,38 +1981,19 @@ describe("unstaging", () => {
 		// buffer must change in place. Compared as a boolean, since printing two
 		// editor views on a mismatch takes the test runner practically forever.
 		expect(currentView() === view).toBe(true);
+		// Its changes are those the handed diff describes, drawn at once.
+		expect(
+			[...container.querySelectorAll(".cm-changeStrip button")].map((button) =>
+				button.getAttribute("aria-label"),
+			),
+		).toEqual(["Unstage the change at line 4"]);
+		expect(requests.filter(({ body }) => body === undefined).length).toBe(1);
 	});
 
 	test("leaves a cursor at the end of the selection once its lines are unstaged", async () => {
-		let index = "a\nB\nc\nD\n";
-		globalThis.fetch = (async (_input: string, init?: RequestInit) => {
-			if (init?.method === "POST") {
-				index = "a\nb\nc\nD\n";
-				return new Response(JSON.stringify({ files: [] }), {
-					headers: { "Content-Type": "application/json" },
-				});
-			}
-			return new Response(index);
-		}) as unknown as typeof fetch;
-		const { container } = render(
-			<TextFileEditor
-				filePath="notes.txt"
-				repo="test-repo"
-				comparisonContent={"a\nb\nc\nd\n"}
-				changeDiff={"@@ -1,4 +1,4 @@\n a\n-b\n+B\n c\n-d\n+D\n"}
-				changeType="modified"
-				staged
-				onUnstaged={() => {}}
-			/>,
-		);
-		await waitFor(() => {
-			expect(container.querySelector(".cm-content")).not.toBeNull();
-		});
-		const { EditorView } = await import("@codemirror/view");
-		const view = EditorView.findFromDOM(
-			container.querySelector(".cm-editor") as HTMLElement,
-		);
-		if (!view) throw new Error("editor view not found");
+		serveIndex("a\nB\nc\nD\n");
+		const { container } = render(<PagedStagedView contexts={UNSTAGE_SECOND} />);
+		const view = await viewOf(container);
 
 		selectLines(view, 2, 3);
 		fireEvent.click(await enabledButton("Unstage selection"));
@@ -1956,6 +2003,171 @@ describe("unstaging", () => {
 		});
 		expect(view.state.selection.main.empty).toBe(true);
 		expect(view.state.selection.main.head).toBe(view.state.doc.line(3).to);
+	});
+});
+
+describe("handed text", () => {
+	const originalFetch = globalThis.fetch;
+
+	afterEach(() => {
+		cleanup();
+		globalThis.fetch = originalFetch;
+	});
+
+	const props = {
+		filePath: "notes.txt",
+		repo: "test-repo",
+		comparisonContent: "a\nb\nc\n",
+		changeType: "modified" as const,
+		staged: true,
+		onUnstaged: () => {},
+	};
+
+	async function viewOf(container: HTMLElement) {
+		const { EditorView } = await import("@codemirror/view");
+		const view = EditorView.findFromDOM(
+			container.querySelector(".cm-editor") as HTMLElement,
+		);
+		if (!view) throw new Error("editor view not found");
+		return view;
+	}
+
+	test("shows without the file being read", async () => {
+		const urls: string[] = [];
+		globalThis.fetch = (async (input: string) => {
+			urls.push(input);
+			return new Response("never read");
+		}) as unknown as typeof fetch;
+
+		const { container } = render(
+			<TextFileEditor
+				{...props}
+				text={"a\nB\nc\n"}
+				changeDiff={B_MODIFIED_DIFF}
+			/>,
+		);
+
+		await waitFor(() => {
+			expect(container.querySelector(".cm-changeStrip")).not.toBeNull();
+		});
+		expect((await viewOf(container)).state.doc.toString()).toBe("a\nB\nc\n");
+		expect(urls).toEqual([]);
+	});
+
+	for (const hidden of [true, false]) {
+		test(`${hidden ? "moves a hidden view to the change it brings" : "leaves a view on screen where it is"}`, async () => {
+			globalThis.fetch = (async () =>
+				new Response("never read")) as unknown as typeof fetch;
+			const head = Array.from({ length: 50 }, (_, at) => `l${at + 1}`);
+			const text = (...changed: number[]) =>
+				`${head.map((line, at) => (changed.includes(at + 1) ? line.toUpperCase() : line)).join("\n")}\n`;
+			const hunk = (line: number) =>
+				`@@ -${line - 1},3 +${line - 1},3 @@\n l${line - 1}\n-l${line}\n+L${line}\n l${line + 1}\n`;
+			const editor = (changed: number[]) => (
+				<TextFileEditor
+					{...props}
+					hidden={hidden}
+					comparisonContent={`${head.join("\n")}\n`}
+					text={text(...changed)}
+					changeDiff={changed.map(hunk).join("")}
+				/>
+			);
+			const { container, rerender } = render(editor([2]));
+			await waitFor(() => {
+				expect(container.querySelector(".cm-changeStrip")).not.toBeNull();
+			});
+			const view = await viewOf(container);
+			const cursorLine = () =>
+				view.state.doc.lineAt(view.state.selection.main.head).number;
+			// It opens at its first change.
+			expect(cursorLine()).toBe(2);
+
+			// The fortieth line's change is staged from the working tree.
+			act(() => {
+				rerender(editor([2, 40]));
+			});
+
+			expect(view.state.doc.line(40).text).toBe("L40");
+			expect(cursorLine()).toBe(hidden ? 40 : 2);
+		});
+	}
+
+	test("handed over while the file is read is taken as the newer", async () => {
+		let answer: (() => void) | null = null;
+		globalThis.fetch = (() =>
+			new Promise<Response>((resolve) => {
+				answer = () => resolve(new Response("a\nB\nc\n"));
+			})) as unknown as typeof fetch;
+		const { container, rerender } = render(
+			<TextFileEditor {...props} changeDiff={B_MODIFIED_DIFF} />,
+		);
+		await waitFor(() => {
+			expect(answer).not.toBeNull();
+		});
+
+		// The change is unstaged from elsewhere while the read is out.
+		rerender(<TextFileEditor {...props} text={"a\nb\nc\n"} changeDiff="" />);
+		await act(async () => {
+			answer?.();
+		});
+
+		await waitFor(() => {
+			expect(container.querySelector(".cm-content")).not.toBeNull();
+		});
+		expect((await viewOf(container)).state.doc.toString()).toBe("a\nb\nc\n");
+	});
+
+	test("takes the buffer's place along with the context handed with it", async () => {
+		globalThis.fetch = (async () =>
+			new Response("never read")) as unknown as typeof fetch;
+		const { container, rerender } = render(
+			<TextFileEditor
+				{...props}
+				comparisonContent={"a\nb\nc\nd\n"}
+				text={"a\nB\nc\nD\n"}
+				changeDiff={"@@ -1,4 +1,4 @@\n a\n-b\n+B\n c\n-d\n+D\n"}
+			/>,
+		);
+		await waitFor(() => {
+			expect(container.querySelectorAll(".cm-changeStrip").length).toBe(2);
+		});
+		const view = await viewOf(container);
+		// Each new pair of text and number of strips the editor draws from here
+		// on.
+		const shown = () =>
+			`${JSON.stringify(view.state.doc.toString())} ${
+				container.querySelectorAll(".cm-changeStrip").length
+			}`;
+		const drawn: string[] = [];
+		let last = shown();
+		const { EditorView } = await import("@codemirror/view");
+		const dispatch = view.dispatch.bind(view);
+		view.dispatch = ((...specs: Parameters<typeof view.dispatch>) => {
+			dispatch(...specs);
+			if (shown() !== last) drawn.push(shown());
+			last = shown();
+		}) as typeof view.dispatch;
+
+		// The fourth line's change is staged from the working tree.
+		act(() => {
+			rerender(
+				<TextFileEditor
+					{...props}
+					comparisonContent={"a\nb\nc\nd\n"}
+					text={"a\nb\nc\nD\n"}
+					changeDiff={"@@ -1,4 +1,4 @@\n a\n b\n c\n-d\n+D\n"}
+				/>,
+			);
+		});
+
+		// One redraw, of the new text and the change it holds, in the same
+		// editor.
+		expect(drawn).toEqual([`${JSON.stringify("a\nb\nc\nD\n")} 1`]);
+		expect(
+			EditorView.findFromDOM(
+				container.querySelector(".cm-editor") as HTMLElement,
+			) === view,
+		).toBe(true);
 	});
 });
 
@@ -2219,6 +2431,7 @@ describe("line picking", () => {
 		});
 		expect(requests[0]).toEqual({
 			path: "notes.txt",
+			context: { head: false },
 			ranges: [
 				[2, 2],
 				[4, 4],
@@ -2237,7 +2450,11 @@ describe("line picking", () => {
 			expect(view.state.selection.main.empty).toBe(true);
 		});
 		expect(view.state.selection.main.head).toBe(view.state.doc.line(2).to);
-		expect(requests[0]).toEqual({ path: "notes.txt", ranges: [[4, 4]] });
+		expect(requests[0]).toEqual({
+			path: "notes.txt",
+			ranges: [[4, 4]],
+			context: { head: false },
+		});
 		// The selected change, which the picks left out, is not offered next.
 		expect(
 			screen.queryByRole("button", { name: "Stage selection" }),
@@ -2290,6 +2507,7 @@ describe("line picking", () => {
 		});
 		expect(requests[0]).toEqual({
 			path: "notes.txt",
+			context: { head: false },
 			ranges: [[4, 4]],
 			expectedBlobs: blobs,
 		});
@@ -2319,7 +2537,11 @@ describe("line picking", () => {
 		await waitFor(() => {
 			expect(requests.length).toBe(1);
 		});
-		expect(requests[0]).toEqual({ path: "notes.txt", ranges: [[2, 2]] });
+		expect(requests[0]).toEqual({
+			path: "notes.txt",
+			ranges: [[2, 2]],
+			context: { head: false },
+		});
 	});
 
 	// Lines 2 to 4 are each modified, so git lists their three deleted lines
@@ -2387,7 +2609,11 @@ describe("line picking", () => {
 		await waitFor(() => {
 			expect(requests.length).toBe(1);
 		});
-		expect(requests[0]).toEqual({ path: "notes.txt", ranges: [[4, 4]] });
+		expect(requests[0]).toEqual({
+			path: "notes.txt",
+			ranges: [[4, 4]],
+			context: { head: false },
+		});
 	});
 
 	test("a modified run's deleted line picks the line in its place", async () => {
@@ -2471,7 +2697,11 @@ describe("line picking", () => {
 		await waitFor(() => {
 			expect(requests.length).toBe(1);
 		});
-		expect(requests[0]).toEqual({ path: "notes.txt", ranges: [[2, 2]] });
+		expect(requests[0]).toEqual({
+			path: "notes.txt",
+			ranges: [[2, 2]],
+			context: { head: false },
+		});
 	});
 
 	test("refuses to stage lines when git's diff no longer describes the buffer", async () => {
@@ -2578,6 +2808,7 @@ describe("line picking", () => {
 		// server reads in place of its diff against the index.
 		expect(requests[0]).toEqual({
 			path: "notes.txt",
+			context: { head: false },
 			ranges: [
 				[1, 1],
 				[3, 3],
@@ -2896,7 +3127,11 @@ describe("line picking", () => {
 		await waitFor(() => {
 			expect(requests.length).toBe(1);
 		});
-		expect(requests[0]).toEqual({ path: "notes.txt", ranges: [[4, 4]] });
+		expect(requests[0]).toEqual({
+			path: "notes.txt",
+			ranges: [[4, 4]],
+			context: { head: false },
+		});
 	});
 
 	test("leaves a cursor at the end of the selection once the picked lines are unstaged", async () => {
@@ -2914,7 +3149,11 @@ describe("line picking", () => {
 			expect(view.state.selection.main.empty).toBe(true);
 		});
 		expect(view.state.selection.main.head).toBe(view.state.doc.line(2).to);
-		expect(requests[0]).toEqual({ path: "notes.txt", ranges: [[4, 4]] });
+		expect(requests[0]).toEqual({
+			path: "notes.txt",
+			ranges: [[4, 4]],
+			context: { head: false },
+		});
 		expect(
 			screen.queryByRole("button", { name: "Unstage selection" }),
 		).toBeNull();
@@ -3067,6 +3306,7 @@ describe("change strips", () => {
 		expect(requests[0].url).toContain("/api/git/stage");
 		expect(requests[0].body).toEqual({
 			path: "notes.txt",
+			context: { head: false },
 			ranges: [[5, 6]],
 			expectedBlobs: blobs,
 		});
@@ -3080,7 +3320,11 @@ describe("change strips", () => {
 		await waitFor(() => {
 			expect(requests.length).toBe(1);
 		});
-		expect(requests[0].body).toEqual({ path: "notes.txt", ranges: [[9, 9]] });
+		expect(requests[0].body).toEqual({
+			path: "notes.txt",
+			ranges: [[9, 9]],
+			context: { head: false },
+		});
 	});
 
 	test("stages a deletion and the addition below its unchanged anchor together", async () => {
@@ -3102,7 +3346,11 @@ describe("change strips", () => {
 		await waitFor(() => {
 			expect(requests.length).toBe(1);
 		});
-		expect(requests[0].body).toEqual({ path: "notes.txt", ranges: [[2, 3]] });
+		expect(requests[0].body).toEqual({
+			path: "notes.txt",
+			ranges: [[2, 3]],
+			context: { head: false },
+		});
 	});
 
 	test("drops the picks within the change it stages, and keeps the rest", async () => {
@@ -3116,7 +3364,11 @@ describe("change strips", () => {
 		await waitFor(() => {
 			expect(requests.length).toBe(1);
 		});
-		expect(requests[0].body).toEqual({ path: "notes.txt", ranges: [[2, 2]] });
+		expect(requests[0].body).toEqual({
+			path: "notes.txt",
+			ranges: [[2, 2]],
+			context: { head: false },
+		});
 		expect(await enabledButton("Stage 1 line")).toBeDefined();
 	});
 
@@ -3166,7 +3418,11 @@ describe("change strips", () => {
 		await waitFor(() => {
 			expect(requests.length).toBe(1);
 		});
-		expect(requests[0].body).toEqual({ path: "notes.txt", ranges: [[6, 6]] });
+		expect(requests[0].body).toEqual({
+			path: "notes.txt",
+			ranges: [[6, 6]],
+			context: { head: false },
+		});
 	});
 
 	test("stages after the language support loads", async () => {
@@ -3184,7 +3440,11 @@ describe("change strips", () => {
 		await waitFor(() => {
 			expect(requests.length).toBe(1);
 		});
-		expect(requests[0].body).toEqual({ path: "notes.md", ranges: [[5, 6]] });
+		expect(requests[0].body).toEqual({
+			path: "notes.md",
+			ranges: [[5, 6]],
+			context: { head: false },
+		});
 	});
 
 	// The first strip, its label and its Stage button.
@@ -3335,6 +3595,7 @@ describe("change strips", () => {
 		});
 		expect(requests[0].body).toEqual({
 			path: "notes.txt",
+			context: { head: false },
 			ranges: [[1, 3]],
 			expectedBlobs: NEW_FILE_BLOBS,
 			untracked: true,
@@ -3374,7 +3635,11 @@ describe("change strips", () => {
 			expect(requests.length).toBe(1);
 		});
 		expect(requests[0].url).toContain("/api/git/unstage");
-		expect(requests[0].body).toEqual({ path: "notes.txt", ranges: [[5, 6]] });
+		expect(requests[0].body).toEqual({
+			path: "notes.txt",
+			ranges: [[5, 6]],
+			context: { head: false },
+		});
 	});
 });
 
@@ -4330,27 +4595,38 @@ describe("refreshed change context", () => {
 			window.requestAnimationFrame = requestAnimationFrame;
 		});
 
-		// Opens the file with the cursor on its last line, which the test lays
-		// out at the given height on screen, in a scroller from 0 to 500px.
+		// Opens the file with the cursor on its fifth line, which the test lays
+		// out at the given height on screen, in a scroller from 0 to 500px. A
+		// context with text opens the staged view of a file, on that text.
 		async function open(
-			context: { comparison: string; diff: string | null },
+			context: { comparison: string; diff: string | null; text?: string },
 			cursorTop: number,
 		) {
 			globalThis.fetch = (async () =>
 				new Response(FILE, {
 					headers: { "x-file-mtime-ms": "1" },
 				})) as typeof fetch;
-			const props = {
-				filePath: "notes.txt",
-				repo: "test-repo",
-				changeType: "modified" as const,
-				onStaged: () => {},
-			};
+			const props =
+				context.text === undefined
+					? {
+							filePath: "notes.txt",
+							repo: "test-repo",
+							changeType: "modified" as const,
+							onStaged: () => {},
+						}
+					: {
+							filePath: "notes.txt",
+							repo: "test-repo",
+							changeType: "modified" as const,
+							staged: true,
+							onUnstaged: () => {},
+						};
 			const { container, rerender } = render(
 				<TextFileEditor
 					{...props}
 					comparisonContent={context.comparison}
 					changeDiff={context.diff}
+					text={context.text}
 				/>,
 			);
 			await waitFor(() => {
@@ -4422,17 +4698,23 @@ describe("refreshed change context", () => {
 				}
 				throw new Error("no handler took the scroll");
 			};
-			const handOver = (context: { comparison: string; diff: string }) => {
+			const handOver = (context: {
+				comparison: string;
+				diff: string;
+				text?: string;
+			}) => {
 				rerender(
 					<TextFileEditor
 						{...props}
 						comparisonContent={context.comparison}
 						changeDiff={context.diff}
+						text={context.text}
 					/>,
 				);
 			};
 			return {
 				container,
+				view,
 				cursor,
 				scrolls,
 				applyScroll,
@@ -4461,6 +4743,33 @@ describe("refreshed change context", () => {
 
 			editor.applyScroll();
 			expect(editor.scrollTop()).toBe(100 - STRIP_AND_DELETION);
+		});
+
+		test("stays put when the staged text loses a line above it, with its strip", async () => {
+			// The index adds a second line, staged, and the cursor is on "d".
+			const HEAD = "a\nb\nc\nd\ne\n";
+			const editor = await open(
+				{
+					text: "a\nX\nb\nc\nd\ne\n",
+					comparison: HEAD,
+					diff: "@@ -1,5 +1,6 @@\n a\n+X\n b\n c\n d\n e\n",
+				},
+				300,
+			);
+
+			// Unstaging the added line takes it out of the index's text.
+			act(() => {
+				editor.handOver({ text: HEAD, comparison: HEAD, diff: "" });
+			});
+
+			// The scroll names the cursor's line in the text as it is now, and
+			// moves the view by the line and the strip that went above it.
+			expect(editor.view.state.doc.toString()).toBe(HEAD);
+			expect(editor.scrolls.map(({ range }) => range.head)).toEqual([
+				editor.view.state.doc.line(4).from,
+			]);
+			editor.applyScroll();
+			expect(editor.scrollTop()).toBe(100 - 48 - editor.view.defaultLineHeight);
 		});
 
 		test("is left to CodeMirror when it is off screen", async () => {

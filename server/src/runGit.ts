@@ -25,6 +25,11 @@ export interface GitResult {
 	exitCode: number;
 	stdout: Buffer;
 	stderr: string;
+	/**
+	 * Whether git printed more than the caller's `maxOutput` and was stopped,
+	 * so that stdout holds only the start of what it would have printed.
+	 */
+	cut: boolean;
 }
 
 export interface GitOptions {
@@ -35,6 +40,12 @@ export interface GitOptions {
 	 * code means something other than failure.
 	 */
 	accept?: (result: GitResult) => boolean;
+	/**
+	 * The most stdout the caller wants, in bytes. A command that prints more is
+	 * stopped as soon as it has, rather than read to its end, and its result
+	 * is cut: stdout holds what it had printed by then, more than this.
+	 */
+	maxOutput?: number;
 }
 
 /**
@@ -149,7 +160,9 @@ export async function findGit(
  * still take its lock.
  *
  * stdout comes back as bytes, for a caller that needs a file's exact
- * content. One that wants text decodes it as UTF-8 (see gitText).
+ * content. One that wants text decodes it as UTF-8 (see gitText). A command
+ * stopped at `options.maxOutput` is no failure, since the caller stopped it:
+ * its result is cut instead.
  */
 export async function runGit(
 	cwd: string,
@@ -164,6 +177,7 @@ export async function runGit(
 			cwd,
 			env,
 			input: options.input,
+			maxOutput: options.maxOutput,
 		});
 	} finally {
 		const time = gitTimes.getStore();
@@ -172,7 +186,7 @@ export async function runGit(
 			time.processes += 1;
 		}
 	}
-	if (result.exitCode !== 0 && !options.accept?.(result)) {
+	if (!result.cut && result.exitCode !== 0 && !options.accept?.(result)) {
 		throw new GitError(args, result);
 	}
 	return result;
@@ -180,14 +194,17 @@ export async function runGit(
 
 /**
  * Runs a git command as runGit does and returns its stdout decoded as UTF-8,
- * which keeps a leading byte order mark.
+ * which keeps a leading byte order mark. It takes no `maxOutput`, since the
+ * text says nothing of being cut: a caller that limits the output runs
+ * runGit, and reads `cut`.
  */
 export async function gitText(
 	cwd: string,
 	args: readonly string[],
-	options: GitOptions = {},
+	options: Omit<GitOptions, "maxOutput"> = {},
 ): Promise<string> {
-	return (await runGit(cwd, args, options)).stdout.toString("utf8");
+	const { input, accept } = options;
+	return (await runGit(cwd, args, { input, accept })).stdout.toString("utf8");
 }
 
 // How long a command's output pipes may stay open after it exits.
@@ -204,14 +221,24 @@ const PIPE_GRACE_MS = 50;
  * inherit the pipes and hold them open long after git has exited. What it
  * prints is not git's, so a process whose pipes are still open PIPE_GRACE_MS
  * after it exits finishes with what it had printed, and its pipes are closed.
+ *
+ * A process that prints more than `maxOutput` on stdout is killed once it
+ * has, and what it printed after is dropped. git writes to a pipe that holds
+ * little, and waits while it is full, so no more than about a chunk past the
+ * limit is kept, however much the command would have printed.
  */
 function spawnProcess(
 	binary: string,
 	args: string[],
-	options: { cwd?: string; env?: NodeJS.ProcessEnv; input?: string | Buffer },
+	options: {
+		cwd?: string;
+		env?: NodeJS.ProcessEnv;
+		input?: string | Buffer;
+		maxOutput?: number;
+	},
 ): Promise<GitResult> {
 	return new Promise((resolve, reject) => {
-		const { input } = options;
+		const { input, maxOutput } = options;
 		const child = spawn(binary, args, {
 			cwd: options.cwd,
 			env: options.env,
@@ -219,7 +246,17 @@ function spawnProcess(
 		});
 		const stdout: Buffer[] = [];
 		const stderr: Buffer[] = [];
-		child.stdout?.on("data", (chunk: Buffer) => stdout.push(chunk));
+		let printed = 0;
+		let cut = false;
+		child.stdout?.on("data", (chunk: Buffer) => {
+			if (cut) return;
+			stdout.push(chunk);
+			printed += chunk.length;
+			if (maxOutput !== undefined && printed > maxOutput) {
+				cut = true;
+				child.kill();
+			}
+		});
 		child.stderr?.on("data", (chunk: Buffer) => stderr.push(chunk));
 		child.on("error", reject);
 
@@ -237,6 +274,7 @@ function spawnProcess(
 				exitCode: exitCode ?? -1,
 				stdout: Buffer.concat(stdout),
 				stderr: Buffer.concat(stderr).toString("utf8"),
+				cut,
 			});
 		};
 		child.on("exit", (code) => {

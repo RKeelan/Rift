@@ -2,7 +2,10 @@ import { useEffect, useState } from "react";
 import { apiUrl } from "../apiUrl.ts";
 import {
 	type ChangedFile,
+	type DiffAnswer,
 	type FileAction,
+	type FileContext,
+	type Refusal,
 	TextFileEditor,
 } from "../components/TextFileEditor.tsx";
 
@@ -13,11 +16,18 @@ export type FileStatus =
 	| "renamed"
 	| "untracked";
 
-interface DiffResponse {
-	diff: string;
-	truncated: boolean;
-	// Given for an untracked file's diff: whether it describes the file exactly.
-	exact?: boolean;
+/**
+ * The file's context a stage or unstage answered with, and the tokens it
+ * holds for: the refresh of the index it came with, and the save and HEAD
+ * refreshes current when the action was sent.
+ */
+export interface AnsweredContext {
+	repoName: string;
+	path: string;
+	refreshToken: number;
+	diffRefreshToken: number;
+	headToken: number;
+	context: FileContext;
 }
 
 interface ChangeContextOptions {
@@ -26,7 +36,7 @@ interface ChangeContextOptions {
 	staged: boolean;
 	status: FileStatus | null;
 	// Bumped after a stage or unstage, which changes the index, so the
-	// comparison and git's diff are both refetched.
+	// comparison and git's diff are both read afresh.
 	refreshToken: number;
 	// Bumped after a save, which changes the working tree but not the index, so
 	// only the working tree's diff is refetched.
@@ -34,14 +44,74 @@ interface ChangeContextOptions {
 	// Bumped when HEAD may have changed, which only the staged side compares
 	// against.
 	headToken: number;
+	// The context the last stage or unstage answered with, which gives the
+	// side its comparison and diff in place of fetching them, for the file
+	// and the tokens it holds for.
+	answeredContext?: AnsweredContext | null;
 	showError: (message: string) => void;
+}
+
+/**
+ * The context a stage or unstage answered with, if it is for this file and
+ * this refresh of the index, which the action made.
+ */
+function answerFor(
+	answered: AnsweredContext | null | undefined,
+	repoName: string,
+	path: string,
+	refreshToken: number,
+): AnsweredContext | null {
+	return answered?.repoName === repoName &&
+		answered.path === path &&
+		answered.refreshToken === refreshToken
+		? answered
+		: null;
+}
+
+// Reading a copy of the file as text, as a request for it does, drops a
+// leading byte order mark, which the copy an answer gives in JSON keeps.
+function asText(content: string): string {
+	return content.startsWith("\uFEFF") ? content.slice(1) : content;
+}
+
+/**
+ * What a side takes when the server refuses its copy of the file to compare
+ * against: null when git has no copy of it, and otherwise undefined. A copy
+ * too large or binary to show belongs to a file the editor refuses too, and
+ * says so itself, so only another refusal is reported.
+ */
+function refusedCopy(status: number): {
+	base: null | undefined;
+	report: boolean;
+} {
+	if (status === 404) return { base: null, report: false };
+	return { base: undefined, report: status !== 413 && status !== 415 };
+}
+
+function copyOf(
+	answer: { content: string } | Refusal,
+): string | null | undefined {
+	return "content" in answer
+		? asText(answer.content)
+		: refusedCopy(answer.status).base;
+}
+
+/**
+ * The index's text a stage or unstage answered with, empty when the index
+ * holds nothing of the file, or undefined when its copy is too large or
+ * binary to show or could not be read, which reading it again reports.
+ */
+export function indexText(context: FileContext): string | undefined {
+	const text = copyOf(context.index);
+	return text === null ? "" : text;
 }
 
 /**
  * What one side of a file's changes is compared against, and git's diff of
  * it: the index and the unstaged diff for the working tree, HEAD and the
  * staged diff for the index. The two are fetched together, and the diff
- * counts as loading until both have landed.
+ * counts as loading until both have landed. After a stage or unstage, both
+ * come from the action's answer instead, and land at once.
  */
 export function useChangeContext({
 	repoName,
@@ -51,6 +121,7 @@ export function useChangeContext({
 	refreshToken,
 	diffRefreshToken,
 	headToken,
+	answeredContext,
 	showError,
 }: ChangeContextOptions) {
 	// The last answer to a request for the copy of the file that this side
@@ -86,8 +157,36 @@ export function useChangeContext({
 		? JSON.stringify([repoName, path, staged, comparisonKey])
 		: null;
 
+	// The answer to the stage or unstage that made this refresh of the index.
+	// It gives the parts of the context the side would ask for under the
+	// tokens it was answered for, which the side takes in their place. The
+	// staged side's comparison, HEAD, holds while nothing reloads the file,
+	// and an answer gives it only to a staged side it builds.
+	const given = answerFor(answeredContext, repoName, path, refreshToken);
+	const givenCopy =
+		given === null || baseRequest === null
+			? null
+			: !staged
+				? given.context.index
+				: given.headToken === headToken
+					? (given.context.head ?? null)
+					: null;
+	const fetchedCopy =
+		baseAnswer !== null && baseAnswer.request === baseRequest
+			? baseAnswer
+			: null;
+	const baseAnswered = givenCopy !== null || fetchedCopy !== null;
+
+	// A copy an answer gives is kept as its request's answer, so the side
+	// still has it when a later answer leaves it out, as one does HEAD's.
 	useEffect(() => {
-		if (baseRequest === null) return;
+		if (baseRequest !== null && givenCopy !== null) {
+			setBaseAnswer({ request: baseRequest, base: copyOf(givenCopy) });
+		}
+	}, [baseRequest, givenCopy]);
+
+	useEffect(() => {
+		if (baseRequest === null || baseAnswered) return;
 
 		const controller = new AbortController();
 		const answer = (base: string | null | undefined) =>
@@ -105,17 +204,12 @@ export function useChangeContext({
 					signal: controller.signal,
 				});
 				if (!res.ok) {
-					if (res.status === 404) {
-						answer(null);
-						return;
-					}
-					// A copy too large or binary to show belongs to a file the
-					// editor refuses too, and says so itself.
-					if (res.status !== 413 && res.status !== 415) {
+					const refused = refusedCopy(res.status);
+					if (refused.report) {
 						const body = await res.json().catch(() => null);
 						showError(body?.error?.message ?? `Request failed (${res.status})`);
 					}
-					answer(undefined);
+					answer(refused.base);
 					return;
 				}
 
@@ -132,11 +226,28 @@ export function useChangeContext({
 		return () => {
 			controller.abort();
 		};
-	}, [baseRequest, repoName, path, staged, showError, comparisonKey]);
+	}, [
+		baseRequest,
+		baseAnswered,
+		repoName,
+		path,
+		staged,
+		showError,
+		comparisonKey,
+	]);
 
-	const baseAnswered =
-		baseAnswer !== null && baseAnswer.request === baseRequest;
-	const base = baseAnswered ? baseAnswer.base : undefined;
+	// A refusal the answer gives is reported as the request's would be.
+	const copyFailure =
+		givenCopy !== null &&
+		"error" in givenCopy &&
+		refusedCopy(givenCopy.status).report
+			? givenCopy.error
+			: null;
+	useEffect(() => {
+		if (copyFailure !== null) showError(copyFailure.message);
+	}, [copyFailure, showError]);
+
+	const base = givenCopy !== null ? copyOf(givenCopy) : fetchedCopy?.base;
 
 	let comparisonContent: string | undefined;
 	if (status === "untracked") {
@@ -147,8 +258,9 @@ export function useChangeContext({
 		// A file with no committed or staged version has no base to compare
 		// against; treat it like an untracked file rather than failing the
 		// edit. A file the status doesn't list either, such as one inside
-		// .git, has no changes to mark.
-		comparisonContent = status === null ? undefined : "";
+		// .git, has no changes to mark, except on the staged side: with nothing
+		// of it staged, the index holds no more of it than HEAD does.
+		comparisonContent = status === null && !staged ? undefined : "";
 	} else {
 		comparisonContent = base;
 	}
@@ -176,9 +288,21 @@ export function useChangeContext({
 		diffKind === null
 			? null
 			: JSON.stringify([repoName, path, staged, diffKind, diffKey]);
+	// The working tree's diff the answer gives is against nothing just when
+	// the answer lists the file as untracked, as the status it gave the side
+	// does. A save since the action was sent outdates it.
+	const givenDiff =
+		given === null || diffRequest === null
+			? null
+			: staged
+				? given.context.stagedDiff
+				: given.diffRefreshToken === diffRefreshToken
+					? given.context.unstagedDiff
+					: null;
+	const diffGiven = givenDiff !== null;
 
 	useEffect(() => {
-		if (diffRequest === null) return;
+		if (diffRequest === null || diffGiven) return;
 
 		const controller = new AbortController();
 
@@ -201,7 +325,7 @@ export function useChangeContext({
 					return;
 				}
 
-				const data: DiffResponse = await res.json();
+				const data: DiffAnswer = await res.json();
 				setDiffAnswer({
 					request: diffRequest,
 					diff: data.diff,
@@ -219,16 +343,43 @@ export function useChangeContext({
 		return () => {
 			controller.abort();
 		};
-	}, [repoName, path, staged, diffKind, showError, diffKey, diffRequest]);
+	}, [
+		repoName,
+		path,
+		staged,
+		diffKind,
+		showError,
+		diffKey,
+		diffRequest,
+		diffGiven,
+	]);
+
+	const diffFailure =
+		givenDiff !== null && "error" in givenDiff ? givenDiff.error : null;
+	useEffect(() => {
+		if (diffFailure !== null) showError(diffFailure.message);
+	}, [diffFailure, showError]);
 
 	// The diff loads until its request is answered. A side with no diff to
 	// read, and a request that failed, hand over no diff without loading.
-	const answered = diffAnswer !== null && diffAnswer.request === diffRequest;
-	const diff = answered ? diffAnswer.diff : null;
-	const diffExact = answered ? diffAnswer.exact : true;
+	// Nothing changes the index but what the status reports, so a staged side
+	// it lists no change for has an empty diff, without asking git.
+	const fromRequest =
+		diffAnswer !== null && diffAnswer.request === diffRequest
+			? diffAnswer
+			: null;
+	const diffResult =
+		givenDiff !== null
+			? "error" in givenDiff
+				? { diff: null, exact: true }
+				: { diff: givenDiff.diff, exact: givenDiff.exact !== false }
+			: fromRequest;
+	const nothingStaged = staged && status === null;
+	const diff = nothingStaged ? "" : (diffResult?.diff ?? null);
+	const diffExact = diffResult?.exact ?? true;
 	const loading =
 		(baseRequest !== null && !baseAnswered) ||
-		(diffRequest !== null && !answered);
+		(diffRequest !== null && diffResult === null);
 
 	// The comparison and git's diff land one after the other, and the editor
 	// redraws the changes from whatever it is handed: with no comparison it
@@ -236,9 +387,9 @@ export function useChangeContext({
 	// without the strips that only git's diff places, and with the new
 	// comparison alone a staged change's deleted lines go before its strip.
 	// So the side hands over a context only once both parts have landed, for
-	// the editor to draw in one step. While a refetch is out, as after a
-	// stage, it goes on handing over the context it last had in full, and as
-	// the side first loads it hands over none.
+	// the editor to draw in one step. While a refetch is out, as after a save
+	// or a reload, it goes on handing over the context it last had in full,
+	// and as the side first loads it hands over none.
 	const side = JSON.stringify([repoName, path, staged]);
 	const [held, setHeld] = useState<{
 		side: string;
@@ -282,9 +433,13 @@ export interface FileSideViewProps extends ChangeContextOptions {
 	active: boolean;
 	canWrite: boolean;
 	readOnlyLabel: string;
-	// Bumped when the index changes from the other side, as when the working
-	// tree stages lines, so the staged side reloads its content.
+	// Bumped when the staged side has to read the index's text again, as when
+	// the working tree reloads, or a stage or unstage answers without it.
 	contentToken: number;
+	// Whether a stage or unstage from this side asks for HEAD's copy of the
+	// file, which the staged side needs from the answer only when the answer
+	// builds it.
+	askForHead: boolean;
 	// Leaves the file, from the bar's Back.
 	onBack: () => void;
 	// The file's other side, which a tap on the file's name switches to.
@@ -292,11 +447,12 @@ export interface FileSideViewProps extends ChangeContextOptions {
 	// The page's action on the whole file, for this side.
 	fileAction: (label: string) => FileAction;
 	onSaved: () => void;
-	// Each is called with the repo's changes as the action leaves them.
-	onStaged: (files: ChangedFile[]) => void;
+	// Each is called with the repo's changes as the action leaves them, and
+	// the file's context, when the answer gives it.
+	onStaged: (files: ChangedFile[], context?: FileContext) => void;
 	// Called when the editor stages an untracked file whole.
 	onUntrackedStaged: (files: ChangedFile[]) => void;
-	onUnstaged: (files: ChangedFile[]) => void;
+	onUnstaged: (files: ChangedFile[], context?: FileContext) => void;
 	onReload: () => void;
 	onDirtyChange: (dirty: boolean) => void;
 }
@@ -310,6 +466,7 @@ export function FileSideView({
 	canWrite,
 	readOnlyLabel,
 	contentToken,
+	askForHead,
 	onBack,
 	otherSide,
 	fileAction,
@@ -324,6 +481,16 @@ export function FileSideView({
 	const { repoName, path, staged, status } = context;
 	const { comparisonContent, diff, diffExact, diffLoading } =
 		useChangeContext(context);
+	// The staged side shows the index's text, which a stage or unstage
+	// answers with, so the side takes it in place of reading it again.
+	const answered = answerFor(
+		context.answeredContext,
+		repoName,
+		path,
+		context.refreshToken,
+	);
+	const text =
+		staged && answered !== null ? indexText(answered.context) : undefined;
 
 	return (
 		<div
@@ -356,6 +523,9 @@ export function FileSideView({
 					readOnlyLabel={readOnlyLabel}
 					staged
 					reloadKey={contentToken}
+					text={text}
+					hidden={!active}
+					askForHead={askForHead}
 					onUnstaged={onUnstaged}
 					onReload={onReload}
 					fileAction={fileAction("Unstage file")}
@@ -374,6 +544,7 @@ export function FileSideView({
 					repo={repoName}
 					readOnly={!canWrite}
 					readOnlyLabel={readOnlyLabel}
+					askForHead={askForHead}
 					onSaved={onSaved}
 					onStaged={onStaged}
 					onFileStaged={onUntrackedStaged}

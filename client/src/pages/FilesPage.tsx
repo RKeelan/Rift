@@ -1,6 +1,7 @@
 import { Minus, Plus, RefreshCw } from "lucide-react";
 import {
 	type ReactNode,
+	startTransition,
 	useCallback,
 	useEffect,
 	useMemo,
@@ -16,13 +17,19 @@ import { apiUrl } from "../apiUrl.ts";
 import { useErrorBanner } from "../components/ErrorBanner.tsx";
 import {
 	type FileAction,
+	type FileContext,
 	WRITES_DISABLED_LABEL,
 	WRITES_UNKNOWN_LABEL,
 } from "../components/TextFileEditor.tsx";
 import { useSession } from "../contexts/SessionContext.tsx";
 import { clearDraft } from "../drafts.ts";
 import { readString, writeString } from "../storage.ts";
-import { type FileStatus, FileSideView } from "./FileSideView.tsx";
+import {
+	type AnsweredContext,
+	type FileStatus,
+	FileSideView,
+	indexText,
+} from "./FileSideView.tsx";
 import { FileViewer, TreeEntry, useFileTree } from "./FileTree.tsx";
 import "./FilesPage.css";
 
@@ -38,6 +45,12 @@ interface StatusResponse {
 
 interface CommitResponse extends StatusResponse {
 	commit: string;
+}
+
+// A stage or unstage answers with the file's context too, unless the server
+// gives none.
+interface StageResponse extends StatusResponse {
+	context?: FileContext;
 }
 
 // How long the new commit's hash stands in for the refresh time.
@@ -120,11 +133,18 @@ export function FilesPage({
 	const [notGitRepo, setNotGitRepo] = useState(false);
 	const [actionPending, setActionPending] = useState(false);
 	const [lastRefreshed, setLastRefreshed] = useState<Date | null>(null);
-	// Bumped after a stage so each side refetches its comparison and diff,
-	// shrinking the editor's change decorations to whatever remains unstaged.
-	const [refreshToken, setRefreshToken] = useState(0);
-	// Bumped when the working tree stages lines or reloads, either of which can
-	// change the index the staged side shows.
+	// Bumped after a stage or unstage, which changes the index, so each side
+	// takes its comparison and diff afresh, and the editor's change
+	// decorations shrink or grow to what is now on its side. One from the
+	// editor answers with the file's new context, kept with the token, which
+	// the sides take in place of fetching it.
+	const [indexChange, setIndexChange] = useState<{
+		token: number;
+		answer: AnsweredContext | null;
+	}>({ token: 0, answer: null });
+	const refreshToken = indexChange.token;
+	// Bumped when the staged side has to read the index's text again: when
+	// the working tree reloads, or when a stage or unstage answers without it.
 	const [stagedContentToken, setStagedContentToken] = useState(0);
 	// Bumped on a reload, which can find a new commit, so the staged side
 	// refetches HEAD, which nothing in Rift changes while a file is open.
@@ -344,8 +364,17 @@ export function FilesPage({
 		void refreshDirectories([...new Set(moved.map(loadedFolderOf))]);
 	}, [files, loading, treeLoading, loadedFolderOf, refreshDirectories]);
 
+	// Stages or unstages a whole file, asking for the file's context only
+	// when told what to ask for, since a page that leaves the file has no use
+	// for it. Returns the answer, or null when the action failed, which it
+	// reports. The action stays pending until the caller shows the answer,
+	// so the actions are offered again in the render that shows it.
 	const applyStageAction = useCallback(
-		async (filePath: string, action: "stage" | "unstage"): Promise<boolean> => {
+		async (
+			filePath: string,
+			action: "stage" | "unstage",
+			context?: { head: boolean },
+		): Promise<StageResponse | null> => {
 			setActionPending(true);
 			try {
 				const res = await fetch(
@@ -355,33 +384,43 @@ export function FilesPage({
 					{
 						method: "POST",
 						headers: { "Content-Type": "application/json" },
-						body: JSON.stringify({ path: filePath }),
+						body: JSON.stringify({ path: filePath, context }),
 					},
 				);
 				if (!res.ok) {
 					const body = await res.json().catch(() => null);
 					showError(body?.error?.message ?? `Request failed (${res.status})`);
-					return false;
+					setActionPending(false);
+					return null;
 				}
-				const data: StatusResponse = await res.json();
-				setFiles(data.files);
-				setLastRefreshed(new Date());
-				return true;
+				return (await res.json()) as StageResponse;
 			} catch (err) {
 				showError(err instanceof Error ? err.message : "Network error");
-				return false;
-			} finally {
 				setActionPending(false);
+				return null;
 			}
 		},
 		[repoName, showError],
 	);
 
+	// Shows the repo's changes a whole-file action answers with, which ends
+	// the action.
+	const showFiles = useCallback((changed: StatusEntry[]) => {
+		setFiles(changed);
+		setLastRefreshed(new Date());
+		setActionPending(false);
+	}, []);
+
 	const handleToggleStage = useCallback(
 		(entry: StatusEntry) => {
-			void applyStageAction(entry.path, entry.staged ? "unstage" : "stage");
+			void applyStageAction(
+				entry.path,
+				entry.staged ? "unstage" : "stage",
+			).then((answer) => {
+				if (answer !== null) showFiles(answer.files);
+			});
 		},
-		[applyStageAction],
+		[applyStageAction, showFiles],
 	);
 
 	// The box takes the stored draft each time it appears, so a message that
@@ -452,10 +491,7 @@ export function FilesPage({
 	}, [fetchStatus]);
 
 	// A stage or unstage from the editor answers with the repo's changes, which
-	// take the place of any status still on its way, read before them. They are
-	// set with the tokens that refetch each side's context, so a side whose
-	// status the action changed, as an untracked file's does when some of its
-	// lines are staged, goes straight to the requests its new status needs.
+	// take the place of any status still on its way, read before them.
 	const applyChangedFiles = useCallback((changed: StatusEntry[]) => {
 		abortRef.current?.abort();
 		setFiles(changed);
@@ -464,22 +500,59 @@ export function FilesPage({
 		setRefreshing(false);
 	}, []);
 
-	const handleEditorStaged = useCallback(
-		(changed: StatusEntry[]) => {
-			applyChangedFiles(changed);
-			setRefreshToken((value) => value + 1);
-			setStagedContentToken((value) => value + 1);
+	// A stage or unstage changes the index, so each side of the file takes
+	// its comparison and diff afresh, and the staged side its text: from the
+	// file's context the action answered with, or else from the server. Set
+	// with the repo's changes, the context reaches each side in the render
+	// that gives it its new status, so it takes the parts that status needs.
+	// The context holds for the save and HEAD tokens the action was sent
+	// under, since the editor calls back the handler it held then, so a save
+	// made while the action was out has git's diff read afresh.
+	const takeIndexChange = useCallback(
+		(path: string, context: FileContext | undefined) => {
+			setIndexChange(({ token }) => ({
+				token: token + 1,
+				answer:
+					context === undefined
+						? null
+						: {
+								repoName: repoName as string,
+								path,
+								refreshToken: token + 1,
+								diffRefreshToken,
+								headToken,
+								context,
+							},
+			}));
+			if (context === undefined || indexText(context) === undefined) {
+				setStagedContentToken((value) => value + 1);
+			}
 		},
-		[applyChangedFiles],
+		[diffRefreshToken, headToken, repoName],
 	);
 
-	const handleEditorUnstaged = useCallback(
-		(changed: StatusEntry[]) => {
+	const handleEditorIndexChange = useCallback(
+		(changed: StatusEntry[], context?: FileContext) => {
 			applyChangedFiles(changed);
-			setRefreshToken((value) => value + 1);
+			if (selectedPath !== null) takeIndexChange(selectedPath, context);
 		},
-		[applyChangedFiles],
+		[applyChangedFiles, selectedPath, takeIndexChange],
 	);
+
+	// The context holds only while its file stays open. With the file closed,
+	// changes from outside Rift can reach the index, so a side opened again
+	// reads its context afresh, as one does when an answer comes after the
+	// file was left.
+	const answeredContext = indexChange.answer;
+	useEffect(() => {
+		if (
+			answeredContext !== null &&
+			(answeredContext.repoName !== repoName ||
+				answeredContext.path !== selectedPath)
+		) {
+			setIndexChange(({ token }) => ({ token, answer: null }));
+		}
+	}, [answeredContext, repoName, selectedPath]);
 
 	// Reloading rereads the file, and git's diff and the comparison have to be
 	// reread with it for the editor's line numbers to match git's again. The
@@ -488,7 +561,7 @@ export function FilesPage({
 	// the working tree also reloads the staged side, which reloads itself.
 	const handleEditorReload = useCallback(
 		(staged: boolean) => {
-			setRefreshToken((value) => value + 1);
+			setIndexChange(({ token }) => ({ token: token + 1, answer: null }));
 			setHeadToken((value) => value + 1);
 			if (!staged) setStagedContentToken((value) => value + 1);
 			fetchStatus(true);
@@ -545,23 +618,43 @@ export function FilesPage({
 			// selection may no longer exist afterwards; return to the list
 			// showing the new state. Unstaging while the working tree holds
 			// unsaved edits shows the working tree instead, so the edits stay
-			// on screen.
-			const ok = await applyStageAction(
+			// on screen, drawn from the file's context the answer gives.
+			const toWorkingTree = staged && editorDirty;
+			const answer = await applyStageAction(
 				selectedPath,
 				staged ? "unstage" : "stage",
+				toWorkingTree ? { head: false } : undefined,
 			);
-			if (!ok) return;
-			if (staged && editorDirty) {
-				setRefreshToken((value) => value + 1);
-				setSearchParams(
-					{ path: selectedPath, staged: "false" },
-					{ replace: true },
-				);
+			if (answer === null) return;
+			if (toWorkingTree) {
+				// The router shows the switch in a transition, so the rest goes in
+				// the same one: the staged side closes in the frame that would
+				// otherwise first draw it with the index's new text, and the
+				// action ends with it, not before, which would offer it again.
+				startTransition(() => {
+					applyChangedFiles(answer.files);
+					setActionPending(false);
+					takeIndexChange(selectedPath, answer.context);
+					setSearchParams(
+						{ path: selectedPath, staged: "false" },
+						{ replace: true },
+					);
+				});
 			} else {
+				showFiles(answer.files);
 				leaveDetail();
 			}
 		},
-		[applyStageAction, editorDirty, leaveDetail, selectedPath, setSearchParams],
+		[
+			applyChangedFiles,
+			applyStageAction,
+			editorDirty,
+			leaveDetail,
+			selectedPath,
+			setSearchParams,
+			showFiles,
+			takeIndexChange,
+		],
 	);
 
 	// Detail view: every change type, and an unchanged file, opens in the
@@ -598,6 +691,8 @@ export function FilesPage({
 		const sides = [false, true].filter(
 			(staged) => staged === selected.staged || sideIsLive(staged),
 		);
+		// A stage that builds the staged side asks for HEAD's copy for it.
+		const askForHead = !sides.includes(true);
 		const switchTo = (staged: boolean) => {
 			if (staged === selected.staged) return;
 			setSearchParams(
@@ -643,7 +738,9 @@ export function FilesPage({
 							refreshToken={refreshToken}
 							diffRefreshToken={diffRefreshToken}
 							headToken={headToken}
+							answeredContext={answeredContext}
 							contentToken={stagedContentToken}
+							askForHead={askForHead}
 							showError={showError}
 							canWrite={canWrite}
 							readOnlyLabel={editorReadOnlyLabel}
@@ -654,9 +751,9 @@ export function FilesPage({
 							}}
 							fileAction={fileActionFor(staged)}
 							onSaved={handleEditorSaved}
-							onStaged={handleEditorStaged}
+							onStaged={handleEditorIndexChange}
 							onUntrackedStaged={handleUntrackedStaged}
-							onUnstaged={handleEditorUnstaged}
+							onUnstaged={handleEditorIndexChange}
 							onReload={() => handleEditorReload(staged)}
 							onDirtyChange={setEditorDirty}
 						/>
