@@ -1,8 +1,15 @@
-/* The list and an open file share the view, the file over the list. */
+/* The list and an open file share the view, the file over the list. It fills
+   the session's view whether shown or not, so showing it again lays nothing
+   out afresh. */
 .files-view {
-	position: relative;
-	flex: 1;
-	min-height: 0;
+	position: absolute;
+	inset: 0;
+}
+
+/* Behind another tab the view goes under that tab's page, which takes its
+   touches; the list skips rendering, as it does behind an open file. */
+.files-view--hidden {
+	z-index: -1;
 }
 
 /* The list is styled after the dashboard: its header, uppercase section

@@ -41,28 +41,42 @@ function findNode(nodes: TreeNode[], dirPath: string): TreeNode | null {
 }
 
 // Applies `update` to the node at `dirPath`, wherever it sits in the tree.
+// Only the folders holding it are copied, and an update that returns the
+// node it was given leaves the tree as it was, so the entries drawn from
+// every node left alone need not render again.
 function updateNode(
 	nodes: TreeNode[],
 	dirPath: string,
 	update: (node: TreeNode) => TreeNode,
 ): TreeNode[] {
-	return nodes.map((node) => {
-		if (node.path === dirPath) return update(node);
-		if (node.children) {
-			return { ...node, children: updateNode(node.children, dirPath, update) };
+	let changed = false;
+	const updated = nodes.map((node) => {
+		let next = node;
+		if (node.path === dirPath) {
+			next = update(node);
+		} else if (node.children && dirPath.startsWith(`${node.path}/`)) {
+			const children = updateNode(node.children, dirPath, update);
+			if (children !== node.children) next = { ...node, children };
 		}
-		return node;
+		if (next !== node) changed = true;
+		return next;
 	});
+	return changed ? updated : nodes;
 }
 
 // A folder's entries read again, keeping each folder that is still there as
-// it was, open or closed, with whatever had been read of it.
+// it was, open or closed, with whatever had been read of it. Entries that
+// read as they did are given back as they were.
 function mergeListing(previous: TreeNode[], fresh: TreeNode[]): TreeNode[] {
 	const kept = new Map(previous.map((node) => [node.path, node]));
-	return fresh.map((node) => {
+	const merged = fresh.map((node) => {
 		const old = kept.get(node.path);
 		return old?.type === node.type ? old : node;
 	});
+	const same =
+		merged.length === previous.length &&
+		merged.every((node, index) => node === previous[index]);
+	return same ? previous : merged;
 }
 
 /**
@@ -169,31 +183,29 @@ export function useFileTree(repoName: string) {
 		return dir;
 	}, []);
 
-	// Reads folders again in the background. One that cannot be read keeps
-	// the entries it has.
+	// Reads folders again in the background, and takes what they hold in one
+	// update once every one has answered. A folder that reads as it did keeps
+	// its nodes, so nothing drawn from them renders again, and one that cannot
+	// be read keeps the entries it has.
 	const refreshDirectories = useCallback(
 		async (dirPaths: string[]) => {
-			await Promise.all(
-				dirPaths.map(async (dirPath) => {
-					const listing = await fetchDirectory(dirPath, true);
-					if (!listing) return;
-					if (dirPath === ".") {
-						setNodes((prev) => mergeListing(prev, listing.nodes));
-						setTruncated(listing.truncated);
-						return;
-					}
-					setNodes((prev) =>
-						updateNode(prev, dirPath, (node) =>
-							node.children
-								? {
-										...node,
-										children: mergeListing(node.children, listing.nodes),
-									}
-								: node,
-						),
-					);
-				}),
+			const listings = await Promise.all(
+				dirPaths.map((dirPath) => fetchDirectory(dirPath, true)),
 			);
+			setNodes((prev) =>
+				dirPaths.reduce((nodes, dirPath, index) => {
+					const listing = listings[index];
+					if (!listing) return nodes;
+					if (dirPath === ".") return mergeListing(nodes, listing.nodes);
+					return updateNode(nodes, dirPath, (node) => {
+						if (!node.children) return node;
+						const children = mergeListing(node.children, listing.nodes);
+						return children === node.children ? node : { ...node, children };
+					});
+				}, prev),
+			);
+			const root = listings[dirPaths.indexOf(".")];
+			if (root) setTruncated(root.truncated);
 		},
 		[fetchDirectory],
 	);

@@ -1,5 +1,11 @@
-import { useEffect } from "react";
-import { Navigate, Route, Routes, useLocation } from "react-router-dom";
+import { useEffect, useState } from "react";
+import {
+	Navigate,
+	Route,
+	Routes,
+	useLocation,
+	useMatch,
+} from "react-router-dom";
 import { useSession } from "../contexts/SessionContext.tsx";
 import { useGitRepo } from "../hooks/useGitRepo.ts";
 import { TabBar } from "./TabBar.tsx";
@@ -29,10 +35,21 @@ function SessionRoutes({ repoName }: { repoName: string }) {
 	const { isGitRepo, repoMissing, writesAllowed, recheckGitRepo } =
 		useGitRepo(repoName);
 	// A file open from the Files tab takes the whole screen, with its own bar
-	// in place of the tabs.
-	const { pathname, search } = useLocation();
-	const fileOpen =
-		pathname === "/files" && new URLSearchParams(search).has("path");
+	// in place of the tabs. The tab's path matches as its route does, with a
+	// trailing slash or in any case.
+	const { search } = useLocation();
+	const filesShown = useMatch("/files") !== null;
+	const fileOpen = filesShown && new URLSearchParams(search).has("path");
+
+	// The Files tab is built on its first visit, and stays built behind the
+	// other tabs from then on, as an open file keeps the list built behind
+	// it, so coming back to it shows its list at once, as it was left, and
+	// reads it again behind it. It is built afresh for each repo, so one
+	// repo's list never shows for another.
+	const [filesBuiltFor, setFilesBuiltFor] = useState(
+		filesShown ? repoName : null,
+	);
+	if (filesShown && filesBuiltFor !== repoName) setFilesBuiltFor(repoName);
 
 	// A stored repo the server no longer resolves — renamed, deleted, or from an
 	// older name format — would otherwise leave every tab failing to load.
@@ -44,17 +61,26 @@ function SessionRoutes({ repoName }: { repoName: string }) {
 
 	const showGitTabs = isGitRepo !== false;
 
+	// Each tap of a tab checks the repo again, in the background, so a repo
+	// removed or renamed since it opened takes the session back to the
+	// dashboard.
 	return (
 		<div className="app">
-			<Routes>
-				<Route
-					path="/files"
-					element={<FilesPage writesAllowed={writesAllowed} />}
-				/>
-				<Route path="/changes" element={<ChangesRedirect />} />
-				{showGitTabs && <Route path="/history" element={<HistoryPage />} />}
-				<Route path="*" element={<Navigate to="/files" replace />} />
-			</Routes>
+			<div className="session-view">
+				{filesBuiltFor === repoName && (
+					<FilesPage
+						key={repoName}
+						hidden={!filesShown}
+						writesAllowed={writesAllowed}
+					/>
+				)}
+				<Routes>
+					<Route path="/files" element={null} />
+					<Route path="/changes" element={<ChangesRedirect />} />
+					{showGitTabs && <Route path="/history" element={<HistoryPage />} />}
+					<Route path="*" element={<Navigate to="/files" replace />} />
+				</Routes>
+			</div>
 			{!fileOpen && (
 				<TabBar
 					isGitRepo={isGitRepo}
