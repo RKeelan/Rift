@@ -49,7 +49,11 @@ export default defineConfig({
 						},
 					},
 					{
-						urlPattern: /\/api\/.*/,
+						// Keep-awake pings (see keepAwake.ts) must reach the network
+						// every time and leave no cache entry behind.
+						urlPattern: ({ url }: { url: URL }) =>
+							/\/api\//.test(url.pathname) &&
+							!url.searchParams.has("keepawake"),
 						handler: "NetworkFirst",
 						options: {
 							cacheName: "api-calls",
