@@ -159,9 +159,39 @@ export function getConfig(): AppConfig {
 	};
 }
 
+// Adds `Server-Timing: app;dur=<ms>` to every /api response, giving the time
+// from the request's arrival to the moment its headers are written. It runs
+// before the gates so a refused request carries it too, and the browser's
+// DevTools and the speed script read it to split a request's time into the
+// server's and everything else.
+function serverTiming(
+	req: express.Request,
+	res: express.Response,
+	next: express.NextFunction,
+) {
+	if (!req.path.startsWith("/api/")) {
+		next();
+		return;
+	}
+	const start = performance.now();
+	const writeHead = res.writeHead as (...args: unknown[]) => express.Response;
+	res.writeHead = ((...args: unknown[]) => {
+		if (!res.headersSent && !res.hasHeader("Server-Timing")) {
+			res.setHeader(
+				"Server-Timing",
+				`app;dur=${(performance.now() - start).toFixed(1)}`,
+			);
+		}
+		return writeHead.apply(res, args);
+	}) as typeof res.writeHead;
+	next();
+}
+
 export function createApp(config: AppConfig): express.Express {
 	const app = express();
 	const router = express.Router();
+
+	app.use(serverTiming);
 
 	// Both gates cover the whole app, static files included, and run before any
 	// body is parsed.
