@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import supertest from "supertest";
 import { type AppConfig, createApp } from "../app.js";
+import { SAVE_CONTEXT_TIMEOUT_MS } from "../routes/files.js";
 
 let reposRoot: string;
 let repoDir: string;
@@ -560,5 +561,328 @@ describe("PUT /api/files/content", () => {
 				true,
 			);
 		});
+	});
+});
+
+describe("PUT /api/files/content (the file's new context)", () => {
+	let gitReposRoot: string;
+	let gitDir: string;
+	let gitApp: ReturnType<typeof createApp>;
+	const gitRepoRef = "root/git-repo";
+
+	beforeAll(async () => {
+		gitReposRoot = await fs.mkdtemp(path.join(os.tmpdir(), "rift-save-git-"));
+		gitDir = path.join(gitReposRoot, "git-repo");
+		await fs.mkdir(gitDir);
+
+		const { execSync } = await import("node:child_process");
+		execSync("git init", { cwd: gitDir });
+		execSync("git config user.email 'you@example.com'", { cwd: gitDir });
+		execSync("git config user.name 'You'", { cwd: gitDir });
+		execSync("git config core.autocrlf false", { cwd: gitDir });
+		await fs.writeFile(path.join(gitDir, ".gitignore"), "ignored.txt\n");
+		await fs.writeFile(path.join(gitDir, "tracked.txt"), "one\ntwo\nthree\n");
+		await fs.writeFile(path.join(gitDir, "other.txt"), "other\n");
+		execSync("git add .gitignore tracked.txt other.txt", { cwd: gitDir });
+		execSync('git commit -m "init"', { cwd: gitDir });
+		// A change elsewhere in the repo, which the answer lists too.
+		await fs.writeFile(path.join(gitDir, "other.txt"), "OTHER\n");
+
+		gitApp = createApp(
+			makeConfig({ roots: [{ label: "root", path: gitReposRoot }] }),
+		);
+	});
+
+	afterAll(async () => {
+		await fs.rm(gitReposRoot, { recursive: true, force: true });
+	});
+
+	// Saves a file of the git repo as the editor does, asking for its context
+	// unless the request says otherwise.
+	async function save(
+		name: string,
+		content: string,
+		request: { context?: unknown } = { context: {} },
+	) {
+		const stat = await fs.stat(path.join(gitDir, name));
+		return supertest(gitApp)
+			.put(`/api/files/content?repo=${gitRepoRef}&path=${name}`)
+			.send({ content, expectedMtimeMs: stat.mtimeMs, ...request });
+	}
+
+	// What the status and diff endpoints answer now, which a save's answer
+	// stands for.
+	async function endpoints(name: string, untracked: boolean) {
+		const status = await supertest(gitApp).get(
+			`/api/git/status?repo=${gitRepoRef}`,
+		);
+		const diff = await supertest(gitApp).get(
+			`/api/git/diff?repo=${gitRepoRef}&path=${name}&staged=false${untracked ? "&untracked=true" : ""}`,
+		);
+		return { files: status.body.files, context: { unstagedDiff: diff.body } };
+	}
+
+	// The lines a diff adds and deletes.
+	function changed(answer: { diff: string }): string[] {
+		const lines = answer.diff.split("\n");
+		return lines
+			.slice(lines.findIndex((line) => line.startsWith("@@")))
+			.filter((line) => /^[-+]/.test(line));
+	}
+
+	test("answers a save of a tracked file with the repo's changes and the file's new diff", async () => {
+		const res = await save("tracked.txt", "one\nTWO\nthree\n");
+
+		expect(res.status).toBe(200);
+		const stat = await fs.stat(path.join(gitDir, "tracked.txt"));
+		expect(res.body).toEqual({
+			mtimeMs: stat.mtimeMs,
+			...(await endpoints("tracked.txt", false)),
+		});
+		expect(res.body.files).toEqual([
+			{ path: "other.txt", status: "modified", staged: false },
+			{ path: "tracked.txt", status: "modified", staged: false },
+		]);
+		expect(changed(res.body.context.unstagedDiff)).toEqual(["-two", "+TWO"]);
+		expect("exact" in res.body.context.unstagedDiff).toBe(false);
+
+		// Saved back as committed, it has no diff, and leaves the changes.
+		const back = await save("tracked.txt", "one\ntwo\nthree\n");
+		expect(back.body.context).toEqual({
+			unstagedDiff: { diff: "", truncated: false },
+		});
+		expect(back.body.files).toEqual([
+			{ path: "other.txt", status: "modified", staged: false },
+		]);
+	});
+
+	test("answers a save of an untracked file with its diff against nothing", async () => {
+		// Whether or not the caller says it expects the file to be untracked.
+		for (const context of [{}, { untracked: true }]) {
+			await fs.writeFile(path.join(gitDir, "new.txt"), "one\n");
+
+			const res = await save("new.txt", "one\ntwo\n", { context });
+
+			expect(res.status).toBe(200);
+			expect(res.body).toEqual({
+				mtimeMs: res.body.mtimeMs,
+				...(await endpoints("new.txt", true)),
+			});
+			expect(res.body.files).toContainEqual({
+				path: "new.txt",
+				status: "untracked",
+				staged: false,
+			});
+			expect(changed(res.body.context.unstagedDiff)).toEqual(["+one", "+two"]);
+			expect(res.body.context.unstagedDiff.exact).toBe(true);
+
+			await fs.rm(path.join(gitDir, "new.txt"));
+		}
+	});
+
+	// How many git processes a request started, as its Server-Timing says.
+	function gitProcesses(res: { headers: Record<string, string> }): number {
+		const desc = /desc="(\d+) process/.exec(res.headers["server-timing"]);
+		return Number(desc?.[1] ?? 0);
+	}
+
+	test("reads the diff the caller expects alongside the status, and the other after it", async () => {
+		await fs.writeFile(path.join(gitDir, "new.txt"), "one\n");
+
+		const expected = await save("new.txt", "one\ntwo\n", {
+			context: { untracked: true },
+		});
+		const unexpected = await save("new.txt", "one\ntwo\nthree\n");
+
+		expect(gitProcesses(expected)).toBe(2);
+		expect(gitProcesses(unexpected)).toBe(3);
+		expect(unexpected.body.context).toEqual(
+			(await endpoints("new.txt", true)).context,
+		);
+		await fs.rm(path.join(gitDir, "new.txt"));
+
+		// A tracked file the caller takes for untracked.
+		const tracked = await save("tracked.txt", "one\nTWO\nthree\n", {
+			context: { untracked: true },
+		});
+
+		expect(gitProcesses(tracked)).toBe(3);
+		expect(tracked.body.context).toEqual(
+			(await endpoints("tracked.txt", false)).context,
+		);
+		await save("tracked.txt", "one\ntwo\nthree\n");
+	});
+
+	test("answers a save whose diff git cannot read with the changes and git's refusal", async () => {
+		const { execSync } = await import("node:child_process");
+		// An external diff command that fails fails `git diff`, but not the
+		// status.
+		execSync("git config diff.external false", { cwd: gitDir });
+
+		const res = await save("tracked.txt", "one\nTWO\nthree\n");
+		execSync("git config --unset diff.external", { cwd: gitDir });
+
+		expect(res.status).toBe(200);
+		expect(res.body.files).toEqual([
+			{ path: "other.txt", status: "modified", staged: false },
+			{ path: "tracked.txt", status: "modified", staged: false },
+		]);
+		expect(res.body.context.unstagedDiff.status).toBe(500);
+		expect(res.body.context.unstagedDiff.error.code).toBe("GIT_ERROR");
+		expect(typeof res.body.context.unstagedDiff.error.message).toBe("string");
+
+		await save("tracked.txt", "one\ntwo\nthree\n");
+	});
+
+	test("answers with the mtime alone when git cannot read the status in time", async () => {
+		const { execSync } = await import("node:child_process");
+		const slowPath = path.join(gitDir, "slow.txt");
+		await fs.writeFile(slowPath, "one\n");
+		execSync("git add slow.txt", { cwd: gitDir });
+		execSync('git commit -m "add slow.txt"', { cwd: gitDir });
+		// A clean filter that outlasts the save's wait, which the status runs
+		// on the file it finds changed.
+		const filterSeconds = SAVE_CONTEXT_TIMEOUT_MS / 1000 + 0.5;
+		execSync(`git config filter.slow.clean "sleep ${filterSeconds}; cat"`, {
+			cwd: gitDir,
+		});
+		const attributes = path.join(gitDir, ".git", "info", "attributes");
+		await fs.mkdir(path.dirname(attributes), { recursive: true });
+		await fs.writeFile(attributes, "slow.txt filter=slow\n");
+
+		const start = performance.now();
+		const res = await save("slow.txt", "two\n");
+		const elapsed = performance.now() - start;
+
+		expect(res.status).toBe(200);
+		expect(Object.keys(res.body)).toEqual(["mtimeMs"]);
+		expect(elapsed).toBeLessThan(filterSeconds * 1000);
+		expect(await fs.readFile(slowPath, "utf-8")).toBe("two\n");
+
+		// The reads it no longer waits for hold the file until they finish, on
+		// Windows, so the repo is put back once they have.
+		await fs.rm(attributes);
+		execSync("git config --unset filter.slow.clean", { cwd: gitDir });
+		for (let attempt = 0; ; attempt++) {
+			try {
+				execSync("git rm -qf slow.txt", { cwd: gitDir, stdio: "pipe" });
+				break;
+			} catch (err) {
+				if (attempt === 40) throw err;
+				await new Promise((resolve) => setTimeout(resolve, 250));
+			}
+		}
+		execSync('git commit -m "remove slow.txt"', { cwd: gitDir });
+	});
+
+	test("cuts a diff to 1 MB, as /api/git/diff does", async () => {
+		// Every line of a file of about 600 KB replaced, which deletes and adds
+		// 600 KB.
+		const lines = (text: string) => `${text.repeat(99)}\n`.repeat(6_000);
+		const { execSync } = await import("node:child_process");
+		await fs.writeFile(path.join(gitDir, "large.txt"), lines("a"));
+		execSync("git add large.txt", { cwd: gitDir });
+		execSync('git commit -m "add large.txt"', { cwd: gitDir });
+
+		const res = await save("large.txt", lines("b"));
+
+		expect(res.status).toBe(200);
+		expect(res.body.context).toEqual(
+			(await endpoints("large.txt", false)).context,
+		);
+		expect(res.body.context.unstagedDiff.truncated).toBe(true);
+		expect(res.body.context.unstagedDiff.diff.length).toBe(1024 * 1024);
+
+		execSync("git rm -qf large.txt", { cwd: gitDir });
+		execSync('git commit -m "remove large.txt"', { cwd: gitDir });
+	});
+
+	test("answers a save of a file git ignores with no change in it", async () => {
+		await fs.writeFile(path.join(gitDir, "ignored.txt"), "one\n");
+
+		const res = await save("ignored.txt", "two\n");
+
+		expect(res.status).toBe(200);
+		expect(await fs.readFile(path.join(gitDir, "ignored.txt"), "utf-8")).toBe(
+			"two\n",
+		);
+		expect(res.body).toEqual({
+			mtimeMs: res.body.mtimeMs,
+			...(await endpoints("ignored.txt", false)),
+		});
+		expect(res.body.files).toEqual([
+			{ path: "other.txt", status: "modified", staged: false },
+		]);
+		expect(res.body.context.unstagedDiff).toEqual({
+			diff: "",
+			truncated: false,
+		});
+
+		await fs.rm(path.join(gitDir, "ignored.txt"));
+	});
+
+	test("answers with the mtime alone unless asked for the context", async () => {
+		const res = await save("tracked.txt", "one\nTWO\nthree\n", {});
+
+		expect(res.status).toBe(200);
+		expect(Object.keys(res.body)).toEqual(["mtimeMs"]);
+
+		await save("tracked.txt", "one\ntwo\nthree\n", {});
+	});
+
+	test("answers with the mtime alone for a file outside any repository", async () => {
+		const stat = await fs.stat(path.join(repoDir, "editable.txt"));
+
+		const res = await supertest(app)
+			.put(`/api/files/content?repo=${repoRef}&path=editable.txt`)
+			.send({
+				content: "Saved outside a repository\n",
+				expectedMtimeMs: stat.mtimeMs,
+				context: {},
+			});
+
+		expect(res.status).toBe(200);
+		expect(Object.keys(res.body)).toEqual(["mtimeMs"]);
+		expect(await fs.readFile(path.join(repoDir, "editable.txt"), "utf-8")).toBe(
+			"Saved outside a repository\n",
+		);
+	});
+
+	test("writes nothing, and answers with no context, when the file changed after load", async () => {
+		const filePath = path.join(gitDir, "tracked.txt");
+		const loaded = await fs.stat(filePath);
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		await fs.writeFile(filePath, "changed elsewhere\n");
+
+		const res = await supertest(gitApp)
+			.put(`/api/files/content?repo=${gitRepoRef}&path=tracked.txt`)
+			.send({
+				content: "stale\n",
+				expectedMtimeMs: loaded.mtimeMs,
+				context: {},
+			});
+
+		expect(res.status).toBe(409);
+		expect(res.body).toEqual({
+			error: {
+				code: "FILE_MODIFIED",
+				message: "File changed on disk since it was loaded",
+			},
+		});
+		expect(await fs.readFile(filePath, "utf-8")).toBe("changed elsewhere\n");
+
+		await fs.writeFile(filePath, "one\ntwo\nthree\n");
+	});
+
+	test("returns INVALID_CONTEXT for a malformed context request, writing nothing", async () => {
+		for (const context of [true, [], null, "yes", { untracked: "yes" }]) {
+			const res = await save("tracked.txt", "not saved\n", { context });
+
+			expect(res.status).toBe(400);
+			expect(res.body.error.code).toBe("INVALID_CONTEXT");
+		}
+		expect(await fs.readFile(path.join(gitDir, "tracked.txt"), "utf-8")).toBe(
+			"one\ntwo\nthree\n",
+		);
 	});
 });

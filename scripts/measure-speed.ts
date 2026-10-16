@@ -322,6 +322,28 @@ async function measureServer(file: string) {
 		2,
 	);
 
+	// A save of the file as it is, as the editor sends one, asking for the
+	// file's new diff. The text and modification time it names are read
+	// untimed.
+	const saveTimes: number[] = [];
+	for (let i = 0; i < runs + 2; i++) {
+		const loaded = await request(api("/api/files/content", { path: file }));
+		const content = await loaded.text();
+		const expectedMtimeMs = Number(loaded.headers.get("x-file-mtime-ms"));
+		const saveMs = await timed(api("/api/files/content", { path: file }), {
+			method: "PUT",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ content, expectedMtimeMs, context: {} }),
+		});
+		if (i >= 2) saveTimes.push(saveMs);
+	}
+	// It writes the file, then reads the status and the file's diff at once.
+	report(
+		"PUT /api/files/content (save, with its diff)",
+		saveTimes,
+		"(2 git processes)",
+	);
+
 	// A stage and unstage of the file's first change, each by line, as the
 	// editor's strips send them with both sides of the file open, asking for
 	// the file's context without HEAD's copy. The diffs that name each are

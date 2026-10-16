@@ -18,6 +18,7 @@ import { useErrorBanner } from "../components/ErrorBanner.tsx";
 import {
 	type FileAction,
 	type FileContext,
+	type SavedContext,
 	WRITES_DISABLED_LABEL,
 	WRITES_UNKNOWN_LABEL,
 } from "../components/TextFileEditor.tsx";
@@ -29,6 +30,7 @@ import {
 	type FileStatus,
 	FileSideView,
 	indexText,
+	type SavedDiff,
 } from "./FileSideView.tsx";
 import { FileViewer, TreeEntry, useFileTree } from "./FileTree.tsx";
 import "./FilesPage.css";
@@ -143,6 +145,10 @@ export function FilesPage({
 		answer: AnsweredContext | null;
 	}>({ token: 0, answer: null });
 	const refreshToken = indexChange.token;
+	// The refresh of the index as of the last change taken, counted as each
+	// is taken rather than once it renders, so that a save's answer can tell
+	// whether a stage, unstage or reload came while the save was out.
+	const latestRefreshRef = useRef(0);
 	// Bumped when the staged side has to read the index's text again: when
 	// the working tree reloads, or when a stage or unstage answers without it.
 	const [stagedContentToken, setStagedContentToken] = useState(0);
@@ -150,8 +156,14 @@ export function FilesPage({
 	// refetches HEAD, which nothing in Rift changes while a file is open.
 	const [headToken, setHeadToken] = useState(0);
 	// Bumped after a save, which changes the working tree but not the index, so
-	// only git's diff needs refetching.
-	const [diffRefreshToken, setDiffRefreshToken] = useState(0);
+	// only git's diff of the working tree is taken afresh. A save from the
+	// editor answers with that diff, kept with the token, which the working
+	// tree takes in place of fetching it.
+	const [workingTreeChange, setWorkingTreeChange] = useState<{
+		token: number;
+		saved: SavedDiff | null;
+	}>({ token: 0, saved: null });
+	const diffRefreshToken = workingTreeChange.token;
 	// Whether the open editor holds unsaved edits, which leaving the file would
 	// lose and staging the whole file would leave out.
 	const [editorDirty, setEditorDirty] = useState(false);
@@ -485,13 +497,9 @@ export function FilesPage({
 		return () => clearTimeout(timer);
 	}, [lastCommit]);
 
-	const handleEditorSaved = useCallback(() => {
-		setDiffRefreshToken((value) => value + 1);
-		fetchStatus(true);
-	}, [fetchStatus]);
-
-	// A stage or unstage from the editor answers with the repo's changes, which
-	// take the place of any status still on its way, read before them.
+	// A stage, unstage or save from the editor answers with the repo's
+	// changes, which take the place of any status still on its way, read
+	// before them.
 	const applyChangedFiles = useCallback((changed: StatusEntry[]) => {
 		abortRef.current?.abort();
 		setFiles(changed);
@@ -499,6 +507,43 @@ export function FilesPage({
 		setLoading(false);
 		setRefreshing(false);
 	}, []);
+
+	// A save changes the working tree, so its side takes git's diff of it
+	// afresh, and the list the repo's changes: from the save's answer, or else
+	// from the server. The answer holds for the refresh of the index the save
+	// was sent under, since the editor calls back the handler it held then. A
+	// stage, unstage or reload taken while the save was out may have changed
+	// the index after the server read the answer, so then both are read
+	// afresh.
+	const handleEditorSaved = useCallback(
+		(changed?: StatusEntry[], context?: SavedContext) => {
+			if (
+				changed === undefined ||
+				context === undefined ||
+				selectedPath === null ||
+				refreshToken !== latestRefreshRef.current
+			) {
+				setWorkingTreeChange(({ token }) => ({
+					token: token + 1,
+					saved: null,
+				}));
+				fetchStatus(true);
+				return;
+			}
+			applyChangedFiles(changed);
+			setWorkingTreeChange(({ token }) => ({
+				token: token + 1,
+				saved: {
+					repoName: repoName as string,
+					path: selectedPath,
+					refreshToken,
+					diffRefreshToken: token + 1,
+					diff: context.unstagedDiff,
+				},
+			}));
+		},
+		[applyChangedFiles, fetchStatus, refreshToken, repoName, selectedPath],
+	);
 
 	// A stage or unstage changes the index, so each side of the file takes
 	// its comparison and diff afresh, and the staged side its text: from the
@@ -510,6 +555,7 @@ export function FilesPage({
 	// made while the action was out has git's diff read afresh.
 	const takeIndexChange = useCallback(
 		(path: string, context: FileContext | undefined) => {
+			latestRefreshRef.current += 1;
 			setIndexChange(({ token }) => ({
 				token: token + 1,
 				answer:
@@ -554,6 +600,18 @@ export function FilesPage({
 		}
 	}, [answeredContext, repoName, selectedPath]);
 
+	// So does a save's diff, for the same reason: the working tree can change
+	// outside Rift too.
+	const savedDiff = workingTreeChange.saved;
+	useEffect(() => {
+		if (
+			savedDiff !== null &&
+			(savedDiff.repoName !== repoName || savedDiff.path !== selectedPath)
+		) {
+			setWorkingTreeChange(({ token }) => ({ token, saved: null }));
+		}
+	}, [savedDiff, repoName, selectedPath]);
+
 	// Reloading rereads the file, and git's diff and the comparison have to be
 	// reread with it for the editor's line numbers to match git's again. The
 	// status is reread too, since the poll is off while a file is open, and
@@ -561,6 +619,7 @@ export function FilesPage({
 	// the working tree also reloads the staged side, which reloads itself.
 	const handleEditorReload = useCallback(
 		(staged: boolean) => {
+			latestRefreshRef.current += 1;
 			setIndexChange(({ token }) => ({ token: token + 1, answer: null }));
 			setHeadToken((value) => value + 1);
 			if (!staged) setStagedContentToken((value) => value + 1);
@@ -739,6 +798,7 @@ export function FilesPage({
 							diffRefreshToken={diffRefreshToken}
 							headToken={headToken}
 							answeredContext={answeredContext}
+							savedDiff={savedDiff}
 							contentToken={stagedContentToken}
 							askForHead={askForHead}
 							showError={showError}

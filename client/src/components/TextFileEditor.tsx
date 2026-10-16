@@ -969,6 +969,24 @@ interface StageAnswer {
 	context?: FileContext;
 }
 
+/**
+ * The part of a file's change context a save changes, the working tree's
+ * diff, which a save answers with when asked. The index and HEAD stay as
+ * they were.
+ */
+export type SavedContext = Pick<FileContext, "unstagedDiff">;
+
+/**
+ * What a save answers with: the file's new modification time and, when the
+ * save asked and the file is in a git repo, the repo's changes as the save
+ * leaves them and the working tree's new diff.
+ */
+interface SaveAnswer {
+	mtimeMs?: number;
+	files?: ChangedFile[];
+	context?: SavedContext;
+}
+
 export interface TextFileEditorProps {
 	filePath: string;
 	repo: string;
@@ -1019,7 +1037,12 @@ export interface TextFileEditorProps {
 	// the change context its answer carries, which the page needs only to
 	// build the file's staged side from the answer.
 	askForHead?: boolean;
-	onSaved?: () => void;
+	// Called once a save has written the file. A page that gives it draws the
+	// file's changes from the save's answer, so a save asks for them, and the
+	// page is called with the repo's changes and the working tree's new diff
+	// when the answer gives them, and with neither when the page has to read
+	// them afresh.
+	onSaved?: (files?: ChangedFile[], context?: SavedContext) => void;
 	// Called with the repo's changes once a stage or unstage has made them,
 	// and, for one by line, the file's change context as it leaves it, when
 	// the server gives it.
@@ -1220,9 +1243,9 @@ export function TextFileEditor({
 	});
 
 	// Set when the editor itself has just changed what git's diff should say, by
-	// saving, and cleared when the page hands it the refetched context. Until
-	// then the old diff is known to be out of date, not evidence of a change on
-	// disk.
+	// a save whose answer left the new diff out, and cleared when the page
+	// hands it the refetched context. Until then the old diff is known to be
+	// out of date, not evidence of a change on disk.
 	const [contextStale, setContextStale] = useState(false);
 
 	// Whether the file's text is on screen. Once the file loads, the text
@@ -2623,6 +2646,15 @@ export function TextFileEditor({
 								? nextContent
 								: nextContent.replaceAll("\n", separator),
 						expectedMtimeMs: mtimeMs,
+						// The page draws the file's changes from the answer. An
+						// untracked file's diff is against nothing, which the server
+						// then reads alongside the status.
+						...(onSaved
+							? {
+									context:
+										changeType === "untracked" ? { untracked: true } : {},
+								}
+							: {}),
 					}),
 				},
 			);
@@ -2632,21 +2664,29 @@ export function TextFileEditor({
 				throw new Error(getErrorMessage(body, response.status));
 			}
 
-			const body = (await response.json()) as { mtimeMs?: number };
+			const body = (await response.json()) as SaveAnswer;
 			if (loadCountRef.current !== load) {
 				// The buffer was loaded afresh, or the editor closed, while the save
 				// was in flight, so nothing below describes what is open now, and
 				// the save keeps no draft. The saved file's draft is dropped only if
 				// its latest text is just what was saved; any other draft holds
-				// edits made since, in this editor or another.
+				// edits made since, in this editor or another. Nor does the answer
+				// describe what is open, so the page reads the changes afresh.
 				if (target) {
 					clearDraftIfText(target.repo, target.path, nextContent);
 				}
 				onSaved?.();
 				return;
 			}
+			// The repo's changes and the working tree's new diff, when the
+			// answer gives them, which the page hands over in the render this
+			// answer makes. Otherwise it reads them afresh.
+			const changes =
+				body.files !== undefined && body.context !== undefined
+					? { files: body.files, context: body.context }
+					: null;
 			originalContentRef.current = nextContent;
-			setContextStale(true);
+			if (changes === null) setContextStale(true);
 			baseHashRef.current = hashText(nextContent);
 			// Edits made while the save was in flight are not on disk, so they
 			// stay unsaved, kept as a draft of the text just saved.
@@ -2662,13 +2702,26 @@ export function TextFileEditor({
 			if (typeof body.mtimeMs === "number" && Number.isFinite(body.mtimeMs)) {
 				setMtimeMs(body.mtimeMs);
 			}
-			onSaved?.();
+			if (changes === null) {
+				onSaved?.();
+			} else {
+				onSaved?.(changes.files, changes.context);
+			}
 		} catch (err) {
 			setError(err instanceof Error ? err.message : "Failed to save file");
 		} finally {
 			setSaving(false);
 		}
-	}, [filePath, keepDraft, mtimeMs, onSaved, readOnly, repo, staged]);
+	}, [
+		changeType,
+		filePath,
+		keepDraft,
+		mtimeMs,
+		onSaved,
+		readOnly,
+		repo,
+		staged,
+	]);
 
 	// Stages the given change whole, or else the picked or selected lines, or
 	// given "file", an untracked file whole.
