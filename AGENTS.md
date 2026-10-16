@@ -55,7 +55,7 @@ The server runs each git command as a process of its own, through simple-git, an
 - The `git` on Windows' PATH is Git for Windows' launcher in `cmd`, which starts the real `git.exe` in turn, so each command starts two processes. Started with `Bun.spawn`, the real `git.exe` took 15 ms and the launcher 27 ms.
 - simple-git starts processes with `node:child_process`, which under Bun took 12 to 14 ms longer each than `Bun.spawn`.
 
-Before running the command it was asked for, an endpoint checks that the directory is a repository, and one that names a file also finds the repository's top level. So `/api/git/diff` and `/api/git/base-content` start three processes, `/api/git/status` and `/api/git/log` two, staging or unstaging by line five, and committing six. `/api/files/content` starts none and answers in about a millisecond.
+An endpoint needs to know that the directory is a repository, and one that names a file also needs the repository's top level. `locateRepo` (`server/src/gitRepo.ts`) answers both with a stat of `<directory>/.git`, and takes the directory as the top level, since Rift lists only the immediate children of a root. A directory without its own `.git`, such as a subdirectory of a repository, is put to git, at two processes. A `.git` that git refuses passes the stat, so an endpoint whose git command fails asks git whether that is why, and if so answers `NOT_GIT_REPO`. So `/api/git/diff`, `/api/git/base-content`, `/api/git/status` and `/api/git/log` start one process, staging or unstaging by line three, and committing four. `/api/health?repo` still asks git, since the client takes its answer as the authority on whether a folder is a repository. `/api/files/content` starts none and answers in about a millisecond.
 
 ### Measuring speed
 

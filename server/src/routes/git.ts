@@ -11,6 +11,7 @@ import {
 	resolveRepoInRoots,
 	resolveSafePath,
 } from "../pathUtils.js";
+import { isRefusedRepo, type LocatedRepo, locateRepo } from "../gitRepo.js";
 import { repoGit } from "../repoGit.js";
 
 const MAX_DIFF_SIZE = 1024 * 1024; // 1 MB
@@ -82,11 +83,36 @@ function buildStatusEntries(status: StatusResult): StatusEntry[] {
 	return entries;
 }
 
+function sendNotGitRepo(res: Response): void {
+	res.status(400).json({
+		error: {
+			code: "NOT_GIT_REPO",
+			message: "The working directory is not a git repository",
+		},
+	});
+}
+
+// Answers NOT_GIT_REPO when a command failed because git refuses the
+// repository, which `locateRepo` cannot tell from its `.git` alone, and
+// returns whether it did. A command that failed for another reason is left to
+// the caller.
+async function answeredRefusedRepo(
+	repo: LocatedRepo,
+	res: Response,
+): Promise<boolean> {
+	if (!(await isRefusedRepo(repo.toplevel))) return false;
+	sendNotGitRepo(res);
+	return true;
+}
+
+// Finds the repository the request names, answering the request itself, and
+// returning null, when it cannot: the name is missing or forbidden, no such
+// directory exists, or it is not in a repository.
 async function resolveGitRepo(
 	roots: RepoRoot[],
 	req: Request,
 	res: Response,
-): Promise<ReturnType<typeof repoGit> | null> {
+): Promise<LocatedRepo | null> {
 	const repoName = req.query.repo as string;
 	if (!repoName) {
 		res.status(400).json({
@@ -108,7 +134,12 @@ async function resolveGitRepo(
 		res.status(status).json({ error: { code, message } });
 		return null;
 	}
-	return repoGit(result.path);
+	const repo = await locateRepo(result.path);
+	if (!repo) {
+		sendNotGitRepo(res);
+		return null;
+	}
+	return repo;
 }
 
 // A [start, end] pair of inclusive, 1-based line numbers naming lines in the
@@ -530,19 +561,8 @@ async function handleStageAction(
 	res: Response,
 	action: "stage" | "unstage",
 ): Promise<void> {
-	const git = await resolveGitRepo(roots, req, res);
-	if (!git) return;
-
-	const isRepo = await git.checkIsRepo();
-	if (!isRepo) {
-		res.status(400).json({
-			error: {
-				code: "NOT_GIT_REPO",
-				message: "The working directory is not a git repository",
-			},
-		});
-		return;
-	}
+	const repo = await resolveGitRepo(roots, req, res);
+	if (!repo) return;
 
 	const filePath = req.body?.path;
 	if (typeof filePath !== "string" || filePath.length === 0) {
@@ -623,7 +643,7 @@ async function handleStageAction(
 
 	// git status reports repo-root-relative paths, so validate and run against
 	// the repo root even when the server was started from a subdirectory.
-	const toplevel = (await git.revparse(["--show-toplevel"])).trim();
+	const { toplevel } = repo;
 	const resolved = await resolveSafePath(toplevel, filePath);
 	if (!resolved) {
 		res.status(403).json({
@@ -635,7 +655,7 @@ async function handleStageAction(
 		return;
 	}
 
-	const gitRoot = repoGit(toplevel);
+	const { git: gitRoot } = repo;
 	const relativePath = path.relative(toplevel, resolved);
 
 	if (
@@ -733,6 +753,7 @@ async function handleStageAction(
 			});
 			return;
 		}
+		if (await answeredRefusedRepo(repo, res)) return;
 		res.status(500).json({
 			error: {
 				code: "GIT_ERROR",
@@ -751,21 +772,16 @@ export function gitRoutes(roots: RepoRoot[]): Router {
 
 	// GET /api/git/status?repo=<name>
 	router.get("/status", async (req, res) => {
-		const git = await resolveGitRepo(roots, req, res);
-		if (!git) return;
+		const repo = await resolveGitRepo(roots, req, res);
+		if (!repo) return;
 
-		const isRepo = await git.checkIsRepo();
-		if (!isRepo) {
-			res.status(400).json({
-				error: {
-					code: "NOT_GIT_REPO",
-					message: "The working directory is not a git repository",
-				},
-			});
-			return;
+		let status: StatusResult;
+		try {
+			status = await repo.git.status();
+		} catch (err) {
+			if (await answeredRefusedRepo(repo, res)) return;
+			throw err;
 		}
-
-		const status = await git.status();
 		res.json({ files: buildStatusEntries(status) });
 	});
 
@@ -794,19 +810,8 @@ export function gitRoutes(roots: RepoRoot[]): Router {
 	// Responds 400 MISSING_MESSAGE for a blank message and NO_STAGED_CHANGES
 	// when nothing is staged, and with the new commit's hash on success.
 	router.post("/commit", async (req, res) => {
-		const git = await resolveGitRepo(roots, req, res);
-		if (!git) return;
-
-		const isRepo = await git.checkIsRepo();
-		if (!isRepo) {
-			res.status(400).json({
-				error: {
-					code: "NOT_GIT_REPO",
-					message: "The working directory is not a git repository",
-				},
-			});
-			return;
-		}
+		const repo = await resolveGitRepo(roots, req, res);
+		if (!repo) return;
 
 		const message: unknown = req.body?.message;
 		if (typeof message !== "string" || message.trim() === "") {
@@ -819,9 +824,14 @@ export function gitRoutes(roots: RepoRoot[]): Router {
 			return;
 		}
 
-		const toplevel = (await git.revparse(["--show-toplevel"])).trim();
-		const gitRoot = repoGit(toplevel);
-		const before = buildStatusEntries(await gitRoot.status());
+		const { git: gitRoot } = repo;
+		let before: StatusEntry[];
+		try {
+			before = buildStatusEntries(await gitRoot.status());
+		} catch (err) {
+			if (await answeredRefusedRepo(repo, res)) return;
+			throw err;
+		}
 		if (!before.some((entry) => entry.staged)) {
 			res.status(400).json({
 				error: {
@@ -862,25 +872,17 @@ export function gitRoutes(roots: RepoRoot[]): Router {
 
 	// GET /api/git/log?repo=<name>&limit=<n>&offset=<n>
 	router.get("/log", async (req, res) => {
-		const git = await resolveGitRepo(roots, req, res);
-		if (!git) return;
-
-		const isRepo = await git.checkIsRepo();
-		if (!isRepo) {
-			res.status(400).json({
-				error: {
-					code: "NOT_GIT_REPO",
-					message: "The working directory is not a git repository",
-				},
-			});
-			return;
-		}
+		const repo = await resolveGitRepo(roots, req, res);
+		if (!repo) return;
 
 		const limit = Math.min(Math.max(1, Number(req.query.limit) || 25), 100);
 		const offset = Math.max(0, Number(req.query.offset) || 0);
 
 		try {
-			const log = await git.log([`--skip=${offset}`, `--max-count=${limit}`]);
+			const log = await repo.git.log([
+				`--skip=${offset}`,
+				`--max-count=${limit}`,
+			]);
 
 			const commits = log.all.map((entry) => ({
 				hash: entry.hash,
@@ -891,6 +893,7 @@ export function gitRoutes(roots: RepoRoot[]): Router {
 
 			res.json({ commits });
 		} catch {
+			if (await answeredRefusedRepo(repo, res)) return;
 			// No commits yet (empty repo)
 			res.json({ commits: [] });
 		}
@@ -909,23 +912,12 @@ export function gitRoutes(roots: RepoRoot[]): Router {
 			return;
 		}
 
-		const git = await resolveGitRepo(roots, req, res);
-		if (!git) return;
-
-		const isRepo = await git.checkIsRepo();
-		if (!isRepo) {
-			res.status(400).json({
-				error: {
-					code: "NOT_GIT_REPO",
-					message: "The working directory is not a git repository",
-				},
-			});
-			return;
-		}
+		const repo = await resolveGitRepo(roots, req, res);
+		if (!repo) return;
 
 		try {
 			// Get commit metadata
-			const logResult = await git.log(["-1", hash]);
+			const logResult = await repo.git.log(["-1", hash]);
 			const commit = logResult.latest;
 			if (!commit) {
 				res.status(404).json({
@@ -935,7 +927,7 @@ export function gitRoutes(roots: RepoRoot[]): Router {
 			}
 
 			// Get changed files with stats
-			const raw = await git.raw([
+			const raw = await repo.git.raw([
 				"diff-tree",
 				"--root",
 				"--no-commit-id",
@@ -960,7 +952,7 @@ export function gitRoutes(roots: RepoRoot[]): Router {
 				});
 
 			// Get file statuses (A/M/D/R)
-			const statusRaw = await git.raw([
+			const statusRaw = await repo.git.raw([
 				"diff-tree",
 				"--root",
 				"--no-commit-id",
@@ -990,6 +982,7 @@ export function gitRoutes(roots: RepoRoot[]): Router {
 				files: filesWithStatus,
 			});
 		} catch {
+			if (await answeredRefusedRepo(repo, res)) return;
 			res.status(404).json({
 				error: { code: "NOT_FOUND", message: "Commit not found" },
 			});
@@ -1020,21 +1013,10 @@ export function gitRoutes(roots: RepoRoot[]): Router {
 			return;
 		}
 
-		const git = await resolveGitRepo(roots, req, res);
-		if (!git) return;
+		const repo = await resolveGitRepo(roots, req, res);
+		if (!repo) return;
 
-		const isRepo = await git.checkIsRepo();
-		if (!isRepo) {
-			res.status(400).json({
-				error: {
-					code: "NOT_GIT_REPO",
-					message: "The working directory is not a git repository",
-				},
-			});
-			return;
-		}
-
-		const toplevel = (await git.revparse(["--show-toplevel"])).trim();
+		const { toplevel } = repo;
 		const resolved = await resolveSafePath(toplevel, filePath);
 		if (!resolved) {
 			res.status(403).json({
@@ -1048,7 +1030,7 @@ export function gitRoutes(roots: RepoRoot[]): Router {
 
 		try {
 			const relativePath = path.relative(toplevel, resolved);
-			const gitRoot = repoGit(toplevel);
+			const { git: gitRoot } = repo;
 			// Use git show which handles root commits (no parent) naturally
 			const diff = await gitRoot.raw([
 				"show",
@@ -1069,6 +1051,7 @@ export function gitRoutes(roots: RepoRoot[]): Router {
 
 			res.json({ diff, truncated: false });
 		} catch {
+			if (await answeredRefusedRepo(repo, res)) return;
 			res.status(404).json({
 				error: { code: "NOT_FOUND", message: "Commit or file not found" },
 			});
@@ -1090,21 +1073,10 @@ export function gitRoutes(roots: RepoRoot[]): Router {
 			return;
 		}
 
-		const git = await resolveGitRepo(roots, req, res);
-		if (!git) return;
+		const repo = await resolveGitRepo(roots, req, res);
+		if (!repo) return;
 
-		const isRepo = await git.checkIsRepo();
-		if (!isRepo) {
-			res.status(400).json({
-				error: {
-					code: "NOT_GIT_REPO",
-					message: "The working directory is not a git repository",
-				},
-			});
-			return;
-		}
-
-		const toplevel = (await git.revparse(["--show-toplevel"])).trim();
+		const { toplevel } = repo;
 		const resolved = await resolveSafePath(toplevel, filePath);
 		if (!resolved) {
 			res.status(403).json({
@@ -1118,7 +1090,7 @@ export function gitRoutes(roots: RepoRoot[]): Router {
 
 		try {
 			const relativePath = toGitPath(path.relative(toplevel, resolved));
-			const gitRoot = repoGit(toplevel);
+			const { git: gitRoot } = repo;
 			// Unstaged edits are compared against the index, matching what
 			// `git diff` reports; staged edits are compared against HEAD. A
 			// file added but not yet committed has no HEAD version at all.
@@ -1148,6 +1120,7 @@ export function gitRoutes(roots: RepoRoot[]): Router {
 			}
 			res.type("text/plain").send(content.toString("utf-8"));
 		} catch {
+			if (await answeredRefusedRepo(repo, res)) return;
 			res.status(404).json({
 				error: { code: "NOT_FOUND", message: "Base file not found" },
 			});
@@ -1171,25 +1144,14 @@ export function gitRoutes(roots: RepoRoot[]): Router {
 			return;
 		}
 
-		const git = await resolveGitRepo(roots, req, res);
-		if (!git) return;
-
-		const isRepo = await git.checkIsRepo();
-		if (!isRepo) {
-			res.status(400).json({
-				error: {
-					code: "NOT_GIT_REPO",
-					message: "The working directory is not a git repository",
-				},
-			});
-			return;
-		}
+		const repo = await resolveGitRepo(roots, req, res);
+		if (!repo) return;
 
 		// git status returns paths relative to the repo root, which may
 		// differ from workingDir when the server runs from a subdirectory.
 		// Validate and resolve against the repo root so git diff finds
 		// the correct file.
-		const toplevel = (await git.revparse(["--show-toplevel"])).trim();
+		const { toplevel } = repo;
 		const resolved = await resolveSafePath(toplevel, filePath);
 		if (!resolved) {
 			res.status(403).json({
@@ -1204,7 +1166,7 @@ export function gitRoutes(roots: RepoRoot[]): Router {
 		const staged = req.query.staged === "true";
 		// Run the diff from the repo root so path interpretation is
 		// consistent with git status output (both repo-root-relative).
-		const gitRoot = repoGit(toplevel);
+		const { git: gitRoot } = repo;
 		const relativePath = path.relative(toplevel, resolved);
 		// Full blob ids on the index line let a caller name this diff when it
 		// stages or unstages lines read from it.
@@ -1217,6 +1179,7 @@ export function gitRoutes(roots: RepoRoot[]): Router {
 			try {
 				diff = await untrackedDiff(toplevel, relativePath);
 			} catch {
+				if (await answeredRefusedRepo(repo, res)) return;
 				// There is no file to diff, as when it has gone or the path names a
 				// directory.
 				res.status(404).json({
@@ -1225,7 +1188,12 @@ export function gitRoutes(roots: RepoRoot[]): Router {
 				return;
 			}
 		} else {
-			diff = await gitRoot.diff(diffArgs);
+			try {
+				diff = await gitRoot.diff(diffArgs);
+			} catch (err) {
+				if (await answeredRefusedRepo(repo, res)) return;
+				throw err;
+			}
 		}
 		const truncated = diff.length > MAX_DIFF_SIZE;
 		// An untracked file's lines stage from its diff only when the diff, as

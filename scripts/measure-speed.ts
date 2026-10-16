@@ -289,23 +289,23 @@ async function measureServer(file: string) {
 	await sample(
 		"GET /api/files (directory)",
 		() => timed(api("/api/files", { path: "." })),
-		2,
+		1,
 	);
-	await sample("GET /api/git/status", () => timed(api("/api/git/status")), 2);
+	await sample("GET /api/git/status", () => timed(api("/api/git/status")), 1);
 	await sample(
 		"GET /api/git/diff",
 		() => timed(api("/api/git/diff", { path: file, staged: "false" })),
-		3,
+		1,
 	);
 	await sample(
 		"GET /api/git/base-content",
 		() => timed(api("/api/git/base-content", { path: file, staged: "false" })),
-		3,
+		1,
 	);
 	await sample(
 		"GET /api/git/log",
 		() => timed(api("/api/git/log", { limit: "25" })),
-		2,
+		1,
 	);
 	// What the client asks for when a file opens, all at once.
 	await sample(
@@ -319,7 +319,7 @@ async function measureServer(file: string) {
 			]);
 			return performance.now() - start;
 		},
-		6,
+		2,
 	);
 
 	// A stage and unstage of the file's first change, each by line, as the
@@ -345,8 +345,8 @@ async function measureServer(file: string) {
 			unstageTimes.push(unstageMs);
 		}
 	}
-	report("POST /api/git/stage (by line)", stageTimes, "(5 git processes)");
-	report("POST /api/git/unstage (by line)", unstageTimes, "(5 git processes)");
+	report("POST /api/git/stage (by line)", stageTimes, "(3 git processes)");
+	report("POST /api/git/unstage (by line)", unstageTimes, "(3 git processes)");
 
 	const perProcess = percentile(oneGit, 0.5) - percentile(health, 0.5);
 	console.log(
