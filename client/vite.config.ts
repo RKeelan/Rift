@@ -48,19 +48,10 @@ export default defineConfig({
 							expiration: { maxEntries: 100, maxAgeSeconds: 30 * 24 * 60 * 60 },
 						},
 					},
-					{
-						// Keep-awake pings (see keepAwake.ts) must reach the network
-						// every time and leave no cache entry behind.
-						urlPattern: ({ url }: { url: URL }) =>
-							/\/api\//.test(url.pathname) &&
-							!url.searchParams.has("keepawake"),
-						handler: "NetworkFirst",
-						options: {
-							cacheName: "api-calls",
-							networkTimeoutSeconds: 10,
-						},
-					},
 				],
+				// API requests are never routed or cached: an answer must be
+				// current, and sw-api.js keeps them away from the worker.
+				importScripts: ["sw-api.js"],
 				navigateFallback: `${BASE}index.html`,
 			},
 			manifest: {
