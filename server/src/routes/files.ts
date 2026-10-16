@@ -9,22 +9,16 @@ import {
 	resolveSafePath,
 } from "../pathUtils.js";
 import { gitText } from "../runGit.js";
+import { MAX_FILE_SIZE, readTextFile } from "../textFile.js";
 import { readWorkingTreeChange } from "./git.js";
 
 const MAX_ENTRIES = 1000;
-const MAX_FILE_SIZE = 1024 * 1024; // 1 MB
-const BINARY_CHECK_SIZE = 8192; // 8 KB
 const FILE_MTIME_HEADER = "x-file-mtime-ms";
 
 interface DirEntry {
 	name: string;
 	type: "file" | "directory";
 	size: number;
-}
-
-interface TextFileInfo {
-	content: string;
-	stat: Awaited<ReturnType<typeof fs.stat>>;
 }
 
 // A line of `git check-ignore --verbose --non-matching`: the ignore file,
@@ -84,20 +78,6 @@ async function getIgnoredPaths(
 		}
 	}
 	return ignored;
-}
-
-async function isBinaryFile(filePath: string): Promise<boolean> {
-	const handle = await fs.open(filePath, "r");
-	try {
-		const buffer = Buffer.alloc(BINARY_CHECK_SIZE);
-		const { bytesRead } = await handle.read(buffer, 0, BINARY_CHECK_SIZE, 0);
-		for (let i = 0; i < bytesRead; i++) {
-			if (buffer[i] === 0) return true;
-		}
-		return false;
-	} finally {
-		await handle.close();
-	}
 }
 
 const UTF8_BOM = Buffer.from([0xef, 0xbb, 0xbf]);
@@ -188,60 +168,6 @@ async function requireRepo(
 		return null;
 	}
 	return result.path;
-}
-
-function isNotFoundError(err: unknown): err is NodeJS.ErrnoException {
-	return err instanceof Error && "code" in err && err.code === "ENOENT";
-}
-
-async function readTextFile(
-	resolved: string,
-	res: Response,
-): Promise<TextFileInfo | null> {
-	try {
-		const stat = await fs.stat(resolved);
-
-		if (stat.isDirectory()) {
-			res.status(400).json({
-				error: {
-					code: "IS_DIRECTORY",
-					message: "The specified path is a directory, not a file",
-				},
-			});
-			return null;
-		}
-
-		if (stat.size > MAX_FILE_SIZE) {
-			res.status(413).json({
-				error: {
-					code: "FILE_TOO_LARGE",
-					message: `File exceeds maximum size of ${MAX_FILE_SIZE / (1024 * 1024)} MB`,
-				},
-			});
-			return null;
-		}
-
-		if (await isBinaryFile(resolved)) {
-			res.status(415).json({
-				error: {
-					code: "BINARY_FILE",
-					message: "Binary files are not supported",
-				},
-			});
-			return null;
-		}
-
-		const content = await fs.readFile(resolved, "utf-8");
-		return { content, stat };
-	} catch (err) {
-		if (isNotFoundError(err)) {
-			res.status(404).json({
-				error: { code: "NOT_FOUND", message: "File not found" },
-			});
-			return null;
-		}
-		throw err;
-	}
 }
 
 export function fileRoutes(roots: RepoRoot[]): Router {
@@ -374,8 +300,11 @@ export function fileRoutes(roots: RepoRoot[]): Router {
 			return;
 		}
 
-		const fileInfo = await readTextFile(resolved, res);
-		if (!fileInfo) return;
+		const fileInfo = await readTextFile(resolved);
+		if ("error" in fileInfo) {
+			res.status(fileInfo.status).json({ error: fileInfo.error });
+			return;
+		}
 
 		res.setHeader(FILE_MTIME_HEADER, String(fileInfo.stat.mtimeMs));
 		res.type("text/plain").send(fileInfo.content);
@@ -476,8 +405,11 @@ export function fileRoutes(roots: RepoRoot[]): Router {
 			return;
 		}
 
-		const fileInfo = await readTextFile(resolved, res);
-		if (!fileInfo) return;
+		const fileInfo = await readTextFile(resolved);
+		if ("error" in fileInfo) {
+			res.status(fileInfo.status).json({ error: fileInfo.error });
+			return;
+		}
 
 		if (fileInfo.stat.mtimeMs !== expectedMtimeMs) {
 			res.status(409).json({

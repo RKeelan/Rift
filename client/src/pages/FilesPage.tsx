@@ -16,6 +16,7 @@ import {
 import { apiUrl } from "../apiUrl.ts";
 import { useErrorBanner } from "../components/ErrorBanner.tsx";
 import {
+	CONTEXT_WAIT_MS,
 	type FileAction,
 	type FileContext,
 	type SavedContext,
@@ -30,6 +31,10 @@ import {
 	type FileStatus,
 	FileSideView,
 	indexText,
+	type OpenedFile,
+	type OpenRequest,
+	openFile,
+	openParts,
 	type SavedDiff,
 } from "./FileSideView.tsx";
 import { FileViewer, TreeEntry, useFileTree } from "./FileTree.tsx";
@@ -199,6 +204,86 @@ export function FilesPage({
 		files.find(
 			(entry) => entry.path === selectedPath && entry.staged === staged,
 		)?.status ?? null;
+	// Tapping the file's name in its bar switches to the other side, and the
+	// name is greyed out while that side has no changes. Each side with
+	// changes stays built, so switching between them is immediate; switching
+	// replaces the history entry, so Back still returns to the list. The
+	// working tree counts as having changes while it holds unsaved edits,
+	// even ones git hasn't seen.
+	const sideIsLive = (staged: boolean) =>
+		statusOf(staged) !== null || (!staged && editorDirty);
+	const sides =
+		selected === null
+			? []
+			: [false, true].filter(
+					(staged) => staged === selected.staged || sideIsLive(staged),
+				);
+
+	// The open file, whose sides read what they show as it opens in one
+	// request, which the first of them to read it sends. It is taken as the
+	// file opens, with the tokens then current, which its answer holds for,
+	// and lasts until the file closes.
+	const openKey =
+		selected === null ? null : JSON.stringify([repoName, selected.path]);
+	const [opened, setOpened] = useState<(OpenedFile & { key: string }) | null>(
+		null,
+	);
+	if ((opened?.key ?? null) !== openKey) {
+		setOpened(
+			openKey === null || selected === null
+				? null
+				: {
+						key: openKey,
+						...openFile({
+							repoName: repoName as string,
+							path: selected.path,
+							parts: [
+								...new Set(
+									sides.flatMap((staged) =>
+										openParts(staged, statusOf(staged)),
+									),
+								),
+							],
+							untracked: statusOf(false) === "untracked",
+							refreshToken: indexChange.token,
+							diffRefreshToken,
+							headToken,
+							contentToken: stagedContentToken,
+						}),
+					},
+		);
+	}
+	// The answer is kept with the file once it lands, so that each side
+	// takes its parts in the render that lands it. One that has kept the
+	// sides waiting CONTEXT_WAIT_MS is late, and they ask for what they lack
+	// themselves. The request stops once its file closes. The check for that
+	// waits for the effects to settle, since in development the effect runs a
+	// second time for the same file.
+	const openRequest = opened?.request;
+	const currentOpenRequest = useRef<OpenRequest | undefined>(undefined);
+	useEffect(() => {
+		if (openRequest === undefined) return;
+		currentOpenRequest.current = openRequest;
+		void openRequest.read().then((answer) => {
+			setOpened((current) =>
+				current?.request === openRequest ? { ...current, answer } : current,
+			);
+		});
+		const lateTimer = setTimeout(() => {
+			setOpened((current) =>
+				current?.request === openRequest && current.answer === undefined
+					? { ...current, late: true }
+					: current,
+			);
+		}, CONTEXT_WAIT_MS);
+		return () => {
+			clearTimeout(lateTimer);
+			currentOpenRequest.current = undefined;
+			queueMicrotask(() => {
+				if (currentOpenRequest.current !== openRequest) openRequest.abort();
+			});
+		};
+	}, [openRequest]);
 
 	// Abort any in-flight requests on unmount
 	useEffect(() => {
@@ -739,17 +824,6 @@ export function FilesPage({
 					statusOf(staged) === null,
 				title: writesRefused ? WRITES_DISABLED_TITLE : undefined,
 			});
-		// Tapping the file's name in its bar switches to the other side, and the
-		// name is greyed out while that side has no changes. Each side with
-		// changes stays built, so switching between them is immediate; switching
-		// replaces the history entry, so Back still returns to the list. The
-		// working tree counts as having changes while it holds unsaved edits,
-		// even ones git hasn't seen.
-		const sideIsLive = (staged: boolean) =>
-			statusOf(staged) !== null || (!staged && editorDirty);
-		const sides = [false, true].filter(
-			(staged) => staged === selected.staged || sideIsLive(staged),
-		);
 		// A stage that builds the staged side asks for HEAD's copy for it.
 		const askForHead = !sides.includes(true);
 		const switchTo = (staged: boolean) => {
@@ -799,6 +873,7 @@ export function FilesPage({
 							headToken={headToken}
 							answeredContext={answeredContext}
 							savedDiff={savedDiff}
+							opened={opened}
 							contentToken={stagedContentToken}
 							askForHead={askForHead}
 							showError={showError}

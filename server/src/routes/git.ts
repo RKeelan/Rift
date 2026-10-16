@@ -12,6 +12,7 @@ import {
 } from "../pathUtils.js";
 import { isRefusedRepo, type LocatedRepo, locateRepo } from "../gitRepo.js";
 import { gitText, runGit } from "../runGit.js";
+import { type Refusal, readTextFile } from "../textFile.js";
 
 const MAX_DIFF_SIZE = 1024 * 1024; // 1 MB
 // The limits /api/files/content puts on a file, which a base copy of one
@@ -82,13 +83,16 @@ function buildStatusEntries(files: StatusFile[]): StatusEntry[] {
 	return entries;
 }
 
+const NOT_GIT_REPO: Refusal = {
+	status: 400,
+	error: {
+		code: "NOT_GIT_REPO",
+		message: "The working directory is not a git repository",
+	},
+};
+
 function sendNotGitRepo(res: Response): void {
-	res.status(400).json({
-		error: {
-			code: "NOT_GIT_REPO",
-			message: "The working directory is not a git repository",
-		},
-	});
+	res.status(NOT_GIT_REPO.status).json({ error: NOT_GIT_REPO.error });
 }
 
 // Answers NOT_GIT_REPO when a command failed because git refuses the
@@ -104,14 +108,14 @@ async function answeredRefusedRepo(
 	return true;
 }
 
-// Finds the repository the request names, answering the request itself, and
-// returning null, when it cannot: the name is missing or forbidden, no such
-// directory exists, or it is not in a repository.
-async function resolveGitRepo(
+// Finds the directory the request names, answering the request itself, and
+// returning null, when it cannot: the name is missing or forbidden, or no
+// such directory exists.
+async function resolveRepoDir(
 	roots: RepoRoot[],
 	req: Request,
 	res: Response,
-): Promise<LocatedRepo | null> {
+): Promise<string | null> {
 	const repoName = req.query.repo as string;
 	if (!repoName) {
 		res.status(400).json({
@@ -133,7 +137,20 @@ async function resolveGitRepo(
 		res.status(status).json({ error: { code, message } });
 		return null;
 	}
-	const repo = await locateRepo(result.path);
+	return result.path;
+}
+
+// Finds the repository the request names, answering the request itself, and
+// returning null, when it cannot: as resolveRepoDir cannot, or when the
+// directory is not in a repository.
+async function resolveGitRepo(
+	roots: RepoRoot[],
+	req: Request,
+	res: Response,
+): Promise<LocatedRepo | null> {
+	const dir = await resolveRepoDir(roots, req, res);
+	if (dir === null) return null;
+	const repo = await locateRepo(dir);
 	if (!repo) {
 		sendNotGitRepo(res);
 		return null;
@@ -489,12 +506,6 @@ export function newFileDiffIsExact(diff: string): boolean {
 // lines cannot be staged from it.
 class InexactDiffError extends Error {}
 
-/** A request an endpoint refuses: the status it answers with, and why. */
-interface Refusal {
-	status: number;
-	error: { code: string; message: string };
-}
-
 /**
  * git's diff of one side of a file, as /api/git/diff answers with it, or the
  * endpoint's refusal.
@@ -701,6 +712,110 @@ async function readChangeContext(
 			...(head === undefined ? {} : { head }),
 		},
 	};
+}
+
+/**
+ * The parts of a file that opening it can ask for: its text, and the parts
+ * of its change context.
+ */
+const OPEN_PARTS = [
+	"file",
+	"unstagedDiff",
+	"stagedDiff",
+	"index",
+	"head",
+] as const;
+type OpenPart = (typeof OPEN_PARTS)[number];
+type OpenGitPart = Exclude<OpenPart, "file">;
+
+/**
+ * A file's text as /api/files/content answers with it: the text it sends, a
+ * leading byte order mark and all, and the modification time it gives in its
+ * header. Or the endpoint's refusal.
+ */
+type FileAnswer = { content: string; mtimeMs: number } | Refusal;
+
+/** The parts of a file an open asked for, each as its endpoint answers. */
+type OpenAnswer = Partial<
+	Record<OpenPart, FileAnswer | DiffAnswer | CopyAnswer>
+>;
+
+/**
+ * Reads the `parts` of an open request, a list separated by commas, which
+ * asks for every part when it is absent. Returns null when it names anything
+ * else, so the caller can reject it.
+ */
+function validateOpenParts(value: unknown): Set<OpenPart> | null {
+	if (value === undefined) return new Set(OPEN_PARTS);
+	if (typeof value !== "string") return null;
+	const parts = new Set<OpenPart>();
+	for (const part of value.split(",")) {
+		const known = OPEN_PARTS.find((name) => name === part);
+		if (known === undefined) return null;
+		parts.add(known);
+	}
+	return parts;
+}
+
+/**
+ * The git parts of a file an open asks for, read at once, each as the
+ * endpoint that reads it alone answers. Outside a repository each answers
+ * NOT_GIT_REPO. In a repository git refuses, every git command fails, so the
+ * parts are put down to that only when every one has failed as they then
+ * would, and each answers NOT_GIT_REPO then too.
+ */
+async function readOpenGitParts(
+	dir: string,
+	filePath: string,
+	resolved: string,
+	parts: OpenGitPart[],
+	untracked: boolean,
+): Promise<(DiffAnswer | CopyAnswer)[]> {
+	if (parts.length === 0) return [];
+	const repo = await locateRepo(dir);
+	if (!repo) return parts.map(() => NOT_GIT_REPO);
+
+	// Like the endpoints, the git parts name the file from the repository's
+	// top level, and the text from the directory.
+	const { toplevel } = repo;
+	const inRepo =
+		toplevel === dir ? resolved : await resolveSafePath(toplevel, filePath);
+	if (!inRepo) {
+		return parts.map(() => ({
+			status: 403,
+			error: {
+				code: "PATH_FORBIDDEN",
+				message: "Path escapes the working directory",
+			},
+		}));
+	}
+	const relativePath = path.relative(toplevel, inRepo);
+	const gitPath = toGitPath(relativePath);
+	const read = {
+		unstagedDiff: () =>
+			untracked
+				? readUntrackedDiff(toplevel, relativePath)
+				: readDiff(toplevel, ["diff", "--full-index", "--", relativePath]),
+		stagedDiff: () =>
+			readDiff(toplevel, [
+				"diff",
+				"--cached",
+				"--full-index",
+				"--",
+				relativePath,
+			]),
+		index: () => readCopy(toplevel, gitPath, false),
+		head: () => readCopy(toplevel, gitPath, true),
+	};
+	const answers = await Promise.all(parts.map((part) => read[part]()));
+	const failedAsRefused = answers.every(
+		(answer) =>
+			"error" in answer && (answer.status === 404 || answer.status === 500),
+	);
+	if (failedAsRefused && (await isRefusedRepo(toplevel))) {
+		return parts.map(() => NOT_GIT_REPO);
+	}
+	return answers;
 }
 
 // Stages the selected lines of a change by rebuilding a partial patch from the
@@ -1380,6 +1495,87 @@ export function gitRoutes(roots: RepoRoot[]): Router {
 			throw err;
 		}
 		res.json(diffAnswer(diff, false));
+	});
+
+	// GET /api/git/open?repo=<name>&path=<file>&parts=<list>&untracked=<bool>
+	// What a file's sides are drawn from as it opens, read at once and
+	// answered together, so that opening a file waits on one request. `parts`
+	// names the parts to read, separated by commas, and without it every one
+	// is read. Each is what the endpoint that reads it alone answers:
+	//   file          what /api/files/content answers, as { content, mtimeMs }:
+	//                 the text it sends and the modification time it gives in
+	//                 its x-file-mtime-ms header
+	//   unstagedDiff  what /diff answers, with untracked=true when `untracked`
+	//   stagedDiff    what /diff?staged=true answers
+	//   index         what /base-content answers, as { content }: the index's
+	//                 copy
+	//   head          what /base-content?staged=true answers: HEAD's copy
+	// A part its endpoint would refuse, such as a deleted file's text or HEAD's
+	// copy of a file added since, is { status, error }: the status and the
+	// error the endpoint answers with. A directory outside any repository has
+	// its file read all the same, and each git part answers NOT_GIT_REPO.
+	// Responds 400 INVALID_PARTS when `parts` names anything else, and refuses
+	// a missing or forbidden repo or path as the endpoints do.
+	router.get("/open", async (req, res) => {
+		const filePath = req.query.path as string;
+		if (!filePath) {
+			res.status(400).json({
+				error: {
+					code: "MISSING_PATH",
+					message: "path parameter is required",
+				},
+			});
+			return;
+		}
+		const parts = validateOpenParts(req.query.parts);
+		if (parts === null) {
+			res.status(400).json({
+				error: {
+					code: "INVALID_PARTS",
+					message: `parts must name some of ${OPEN_PARTS.join(", ")}`,
+				},
+			});
+			return;
+		}
+
+		const dir = await resolveRepoDir(roots, req, res);
+		if (dir === null) return;
+		const resolved = await resolveSafePath(dir, filePath);
+		if (!resolved) {
+			res.status(403).json({
+				error: {
+					code: "PATH_FORBIDDEN",
+					message: "Path escapes the working directory",
+				},
+			});
+			return;
+		}
+
+		const gitParts = [...parts].filter(
+			(part): part is OpenGitPart => part !== "file",
+		);
+		const [file, gitAnswers] = await Promise.all([
+			parts.has("file")
+				? readTextFile(resolved).then(
+						(info): FileAnswer =>
+							"error" in info
+								? info
+								: { content: info.content, mtimeMs: info.stat.mtimeMs },
+					)
+				: undefined,
+			readOpenGitParts(
+				dir,
+				filePath,
+				resolved,
+				gitParts,
+				req.query.untracked === "true",
+			),
+		]);
+		const answer: OpenAnswer = file === undefined ? {} : { file };
+		gitParts.forEach((part, at) => {
+			answer[part] = gitAnswers[at];
+		});
+		res.json(answer);
 	});
 
 	return router;

@@ -136,6 +136,25 @@ describe("finding a repository's top level", () => {
 		expect(started[0]).toContain("diff");
 	});
 
+	test("opening a file starts one git process for each git part it reads", async () => {
+		const res = await supertest(app).get(
+			"/api/git/open?repo=root/normal&path=a.txt&parts=file,index,unstagedDiff",
+		);
+		expect(res.status).toBe(200);
+		expect(res.body.file.content).toBe("one\ntwo\nthree\n");
+		expect(started.sort()).toEqual([
+			"diff --full-index -- a.txt",
+			"show :a.txt",
+		]);
+
+		started = [];
+		const both = await supertest(app).get(
+			"/api/git/open?repo=root/normal&path=a.txt",
+		);
+		expect(both.status).toBe(200);
+		expect(started).toHaveLength(4);
+	});
+
 	test("a linked worktree, whose .git is a file, is found without starting git", async () => {
 		const dir = path.join(reposRoot, "linked-wt");
 		expect((await fs.stat(path.join(dir, ".git"))).isFile()).toBe(true);
@@ -218,6 +237,13 @@ describe("finding a repository's top level", () => {
 					.send({ path: "b.txt", message: "m" });
 				expect(res.status).toBe(400);
 				expect(res.body.error.code).toBe("NOT_GIT_REPO");
+			}
+			const open = await supertest(app).get(
+				`/api/git/open?repo=root/${name}&path=b.txt`,
+			);
+			expect(open.status).toBe(200);
+			for (const part of ["unstagedDiff", "stagedDiff", "index", "head"]) {
+				expect(open.body[part].error.code).toBe("NOT_GIT_REPO");
 			}
 		});
 	}

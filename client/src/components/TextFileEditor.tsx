@@ -13,6 +13,7 @@ import {
 	useState,
 	useSyncExternalStore,
 } from "react";
+import { flushSync } from "react-dom";
 import { apiUrl } from "../apiUrl.ts";
 import {
 	applyDiff,
@@ -961,6 +962,12 @@ export interface FileContext {
 }
 
 /**
+ * A file's text as the page read it while the file opened, with its
+ * modification time when it is the working tree's, or the request's refusal.
+ */
+export type OpenedText = { text: string; mtimeMs?: number } | Refusal;
+
+/**
  * What a stage or unstage answers with. A server that does not give the
  * file's context leaves it out, and the page then reads it afresh.
  */
@@ -1028,6 +1035,11 @@ export interface TextFileEditorProps {
 	// place in the same step as the change context handed over with it, so the
 	// editor, its selection and the cursor's line on screen stay as they were.
 	text?: string;
+	// Reads the file's text from the request the page sent as the file
+	// opened, which the editor's first load takes in place of asking for it.
+	// It answers null when that request has nothing for the editor, which
+	// then asks itself. A reload always asks.
+	openedText?: () => Promise<OpenedText | null>;
 	// Whether the editor is out of sight, as the side of a file not on screen
 	// is. Text handed to a hidden editor moves it to the change the text
 	// brings, as a stage from the file's other side does, so that the change
@@ -1086,6 +1098,7 @@ export function TextFileEditor({
 	deleted = false,
 	reloadKey = 0,
 	text,
+	openedText,
 	hidden = false,
 	askForHead = false,
 	onSaved,
@@ -1256,6 +1269,10 @@ export function TextFileEditor({
 	// at its first change, in the frame the context arrives.
 	const [textShown, setTextShown] = useState(!changeDiffLoading);
 	if (!changeDiffLoading && !textShown) setTextShown(true);
+	// Whether the view of the loaded text has been built. The view is built
+	// after the render that hands over the text, so until it is, the editor
+	// goes on saying it is loading, rather than showing an empty pane.
+	const [viewBuilt, setViewBuilt] = useState(false);
 	const changeDiffLoadingRef = useRef(changeDiffLoading);
 
 	// A context that has not arrived a second after the text loaded, as when
@@ -1273,6 +1290,11 @@ export function TextFileEditor({
 	// The text the page last handed over, which a load takes in place of
 	// asking the server for the file.
 	const textRef = useRef(text);
+	// Read by a load, which a new reader does not start.
+	const openedTextRef = useRef(openedText);
+	useLayoutEffect(() => {
+		openedTextRef.current = openedText;
+	}, [openedText]);
 	// Read as text is handed over, which a switch of sides does not redraw.
 	const hiddenRef = useRef(hidden);
 	useLayoutEffect(() => {
@@ -1472,6 +1494,7 @@ export function TextFileEditor({
 		setGitDiffCheck(gitDiffCheckRef.current);
 		setUntrackedWhole(false);
 		setTextShown(false);
+		setViewBuilt(false);
 		offerDraft(null);
 		setDraftNotKept(false);
 		loadCountRef.current += 1;
@@ -1480,10 +1503,37 @@ export function TextFileEditor({
 
 		(async () => {
 			try {
-				// A text the page has already is taken as it is.
+				// A text the page has already is taken as it is, and one the page
+				// is reading as the file opens is taken from that request, unless
+				// it keeps the file waiting CONTEXT_WAIT_MS. The text is then read
+				// alone, and shown as soon as it loads, its wait for its changes
+				// being over.
 				let text = textRef.current;
 				let nextMtimeMs = Number.NaN;
-				if (text === undefined) {
+				const readOpened =
+					reloadToken === 0 ? openedTextRef.current : undefined;
+				let opened: OpenedText | null = null;
+				let late = false;
+				if (text === undefined && readOpened) {
+					let lateTimer: ReturnType<typeof setTimeout> | undefined;
+					const answer = await Promise.race([
+						readOpened(),
+						new Promise<"late">((resolve) => {
+							lateTimer = setTimeout(() => resolve("late"), CONTEXT_WAIT_MS);
+						}),
+					]);
+					clearTimeout(lateTimer);
+					if (!active) return;
+					late = answer === "late";
+					opened = answer === "late" ? null : answer;
+				}
+				if (opened !== null && "error" in opened) {
+					throw new Error(getErrorMessage(opened, opened.status));
+				}
+				if (opened !== null) {
+					nextMtimeMs = opened.mtimeMs ?? Number.NaN;
+					text = textRef.current ?? opened.text;
+				} else if (text === undefined) {
 					// A deleted file has no working tree to read, so it opens against
 					// the version being removed: base-content returns the index blob
 					// when the deletion is unstaged (staged=false) and the HEAD blob
@@ -1530,6 +1580,7 @@ export function TextFileEditor({
 					? loadedFileRef.current
 					: null;
 				setContent(normalized);
+				if (late) setTextShown(true);
 				setMtimeMs(Number.isFinite(nextMtimeMs) ? nextMtimeMs : null);
 				offerStoredDraft();
 			} catch (err) {
@@ -2457,6 +2508,16 @@ export function TextFileEditor({
 			// A context that arrived while the editor was being built opens it
 			// at its first change before it is first drawn.
 			openAtFirstChangeRef.current();
+			// Its strips act once the editor has rendered whether git's diff
+			// describes the text, which the view worked out as it was built.
+			// Rendered now, not in a later task, with the view in place of the
+			// loading message, the strips of a view built with its context in
+			// hand, as when a file opens, act from the frame that first draws
+			// them.
+			flushSync(() => {
+				setGitDiffCheck(gitDiffCheckRef.current);
+				setViewBuilt(true);
+			});
 
 			const loader = getLanguageLoader(filePath);
 			if (loader) {
@@ -3028,7 +3089,9 @@ export function TextFileEditor({
 
 	return (
 		<div className="text-file-editor">
-			{(loading || waitingForContext) && (
+			{(loading ||
+				waitingForContext ||
+				(content !== null && !viewBuilt && error === null)) && (
 				<div className="text-file-editor-message">Loading...</div>
 			)}
 			{error && <div className="text-file-editor-error">{error}</div>}
