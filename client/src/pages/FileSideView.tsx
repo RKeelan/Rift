@@ -5,6 +5,7 @@ import {
 	type DiffAnswer,
 	type FileAction,
 	type FileContext,
+	type OpenedText,
 	type Refusal,
 	type SavedContext,
 	TextFileEditor,
@@ -44,6 +45,156 @@ export interface SavedDiff {
 	diff: SavedContext["unstagedDiff"];
 }
 
+/** A part of a file that opening it reads, as the open request names it. */
+export type OpenPart =
+	| "file"
+	| "unstagedDiff"
+	| "stagedDiff"
+	| "index"
+	| "head";
+
+/**
+ * What the open request answers with: each part it asked for, as the
+ * endpoint that reads it alone answers, or that endpoint's refusal. The
+ * working tree's text comes with the modification time the file's own
+ * endpoint gives in a header.
+ */
+export interface OpenAnswer {
+	file?: { content: string; mtimeMs: number } | Refusal;
+	unstagedDiff?: DiffAnswer | Refusal;
+	stagedDiff?: DiffAnswer | Refusal;
+	index?: { content: string } | Refusal;
+	head?: { content: string } | Refusal;
+}
+
+/**
+ * A file as it opens: the parts its sides read, asked for in one request,
+ * and the tokens current as it opened, which the answer holds for.
+ */
+export interface OpenedFile {
+	repoName: string;
+	path: string;
+	parts: OpenPart[];
+	// Whether the working tree's diff is read against nothing, as an
+	// untracked file's is.
+	untracked: boolean;
+	refreshToken: number;
+	diffRefreshToken: number;
+	headToken: number;
+	contentToken: number;
+	request: OpenRequest;
+	// The answer once it has landed, undefined until then.
+	answer?: OpenAnswer | null;
+	// Set once the answer has kept the sides waiting CONTEXT_WAIT_MS, after
+	// which each side asks for what it still lacks itself, and takes from the
+	// answer only what it still lacks when it lands.
+	late?: boolean;
+}
+
+/** The request that opens a file. */
+export interface OpenRequest {
+	// Sends the request the first time it is called, by whichever reader of
+	// a part asks first, and resolves with its answer, or with null when it
+	// failed, which leaves each part to a request of its own.
+	read: () => Promise<OpenAnswer | null>;
+	// Stops the request, whose answer then is null.
+	abort: () => void;
+}
+
+/**
+ * The parts one side of a file reads as it opens: the text it shows, the
+ * copy it compares that against, and git's diff of the two. A deleted
+ * file's side shows the copy being removed, and marks every line of it
+ * without a diff. An untracked file's working tree compares against
+ * nothing, and the staged side of a file with nothing staged shows no diff.
+ */
+export function openParts(
+	staged: boolean,
+	status: FileStatus | null,
+): OpenPart[] {
+	if (status === "deleted") return [staged ? "head" : "index"];
+	if (staged) {
+		return status === null
+			? ["index", "head"]
+			: ["index", "head", "stagedDiff"];
+	}
+	if (status === "untracked") return ["file", "unstagedDiff"];
+	return ["file", "index", "unstagedDiff"];
+}
+
+/** The part of a file that a side's editor shows, of those it reads. */
+function shownPart(
+	staged: boolean,
+	status: FileStatus | null,
+): "file" | "index" | "head" {
+	if (status === "deleted") return staged ? "head" : "index";
+	return staged ? "index" : "file";
+}
+
+/**
+ * A file as it opens, whose request goes out once something reads it. An
+ * open the server refuses whole, as one without the endpoint does, or that
+ * fails, answers null, and each side then asks for its parts alone, which
+ * reports what goes wrong.
+ */
+export function openFile(
+	file: Omit<OpenedFile, "request" | "answer" | "late">,
+): OpenedFile {
+	const controller = new AbortController();
+	let answer: Promise<OpenAnswer | null> | undefined;
+	return {
+		...file,
+		request: {
+			read: () => {
+				answer ??= (async () => {
+					const params = new URLSearchParams({
+						repo: file.repoName,
+						path: file.path,
+						parts: file.parts.join(","),
+					});
+					if (file.untracked) params.set("untracked", "true");
+					try {
+						const res = await fetch(apiUrl(`/api/git/open?${params}`), {
+							signal: controller.signal,
+						});
+						return res.ok ? ((await res.json()) as OpenAnswer) : null;
+					} catch {
+						return null;
+					}
+				})();
+				return answer;
+			},
+			abort: () => controller.abort(),
+		},
+	};
+}
+
+/**
+ * A part of the file's open answer for a read it holds for, by the tokens
+ * `holds` checks: "pending" while the answer is out and not yet late, and
+ * null when the open did not read it, failed, or is late, so the side reads
+ * it itself.
+ */
+function openedPart<P extends OpenPart>(
+	opened: OpenedFile | null | undefined,
+	repoName: string,
+	path: string,
+	part: P,
+	holds: (opened: OpenedFile) => boolean,
+): NonNullable<OpenAnswer[P]> | "pending" | null {
+	if (
+		!opened ||
+		opened.repoName !== repoName ||
+		opened.path !== path ||
+		!opened.parts.includes(part) ||
+		!holds(opened)
+	) {
+		return null;
+	}
+	if (opened.answer === undefined) return opened.late ? null : "pending";
+	return opened.answer?.[part] ?? null;
+}
+
 interface ChangeContextOptions {
 	repoName: string;
 	path: string;
@@ -66,6 +217,10 @@ interface ChangeContextOptions {
 	// tree takes in place of fetching it, for the file and the tokens it
 	// holds for.
 	savedDiff?: SavedDiff | null;
+	// The file as it opened, whose one request gives the side the parts it
+	// reads as it opens, in place of asking for each, while the tokens it
+	// holds for are current.
+	opened?: OpenedFile | null;
 	showError: (message: string) => void;
 }
 
@@ -125,12 +280,55 @@ export function indexText(context: FileContext): string | undefined {
 }
 
 /**
+ * Reads the text a side's editor shows from the file's open request, while
+ * everything the side shows is as it was when the file opened, or undefined
+ * when the request is not the side's to read it from. The reader answers
+ * null when the request did not read the part, or failed, and the editor
+ * then reads the text itself.
+ */
+function openedTextReader(
+	opened: OpenedFile | null | undefined,
+	side: {
+		repoName: string;
+		path: string;
+		refreshToken: number;
+		diffRefreshToken: number;
+		headToken: number;
+		contentToken: number;
+	},
+	part: "file" | "index" | "head",
+): (() => Promise<OpenedText | null>) | undefined {
+	if (
+		!opened ||
+		opened.repoName !== side.repoName ||
+		opened.path !== side.path ||
+		!opened.parts.includes(part) ||
+		opened.refreshToken !== side.refreshToken ||
+		opened.diffRefreshToken !== side.diffRefreshToken ||
+		opened.headToken !== side.headToken ||
+		opened.contentToken !== side.contentToken
+	) {
+		return undefined;
+	}
+	return async () => {
+		const answer = (await opened.request.read())?.[part];
+		if (answer === undefined) return null;
+		if ("error" in answer) return answer;
+		return {
+			text: asText(answer.content),
+			...("mtimeMs" in answer ? { mtimeMs: answer.mtimeMs } : {}),
+		};
+	};
+}
+
+/**
  * What one side of a file's changes is compared against, and git's diff of
  * it: the index and the unstaged diff for the working tree, HEAD and the
  * staged diff for the index. The two are fetched together, and the diff
- * counts as loading until both have landed. After a stage or unstage, both
- * come from the action's answer instead, and land at once, and after a save
- * the working tree's diff comes from the save's answer.
+ * counts as loading until both have landed. As the file opens, both
+ * come from the request that opens it, and after a stage or unstage
+ * from the action's answer, and land at once. After a save the working
+ * tree's diff comes from the save's answer.
  */
 export function useChangeContext({
 	repoName,
@@ -142,6 +340,7 @@ export function useChangeContext({
 	headToken,
 	answeredContext,
 	savedDiff,
+	opened,
 	showError,
 }: ChangeContextOptions) {
 	// The last answer to a request for the copy of the file that this side
@@ -183,7 +382,7 @@ export function useChangeContext({
 	// staged side's comparison, HEAD, holds while nothing reloads the file,
 	// and an answer gives it only to a staged side it builds.
 	const given = answerFor(answeredContext, repoName, path, refreshToken);
-	const givenCopy =
+	const answeredCopy =
 		given === null || baseRequest === null
 			? null
 			: !staged
@@ -191,10 +390,26 @@ export function useChangeContext({
 				: given.headToken === headToken
 					? (given.context.head ?? null)
 					: null;
+	// The open request gives the copy read under the tokens current as the
+	// file opened, and the side waits for it rather than asking itself,
+	// unless it is late. A late answer gives the copy only if the side's own
+	// request has not.
+	const openedCopy =
+		baseRequest === null
+			? null
+			: openedPart(opened, repoName, path, staged ? "head" : "index", (file) =>
+					staged
+						? file.headToken === headToken
+						: file.refreshToken === refreshToken,
+				);
 	const fetchedCopy =
 		baseAnswer !== null && baseAnswer.request === baseRequest
 			? baseAnswer
 			: null;
+	const givenCopy =
+		answeredCopy ??
+		(openedCopy === "pending" || fetchedCopy !== null ? null : openedCopy);
+	const awaitingCopy = givenCopy === null && openedCopy === "pending";
 	const baseAnswered = givenCopy !== null || fetchedCopy !== null;
 
 	// A copy an answer gives is kept as its request's answer, so the side
@@ -206,7 +421,7 @@ export function useChangeContext({
 	}, [baseRequest, givenCopy]);
 
 	useEffect(() => {
-		if (baseRequest === null || baseAnswered) return;
+		if (baseRequest === null || baseAnswered || awaitingCopy) return;
 
 		const controller = new AbortController();
 		const answer = (base: string | null | undefined) =>
@@ -249,6 +464,7 @@ export function useChangeContext({
 	}, [
 		baseRequest,
 		baseAnswered,
+		awaitingCopy,
 		repoName,
 		path,
 		staged,
@@ -331,11 +547,43 @@ export function useChangeContext({
 		savedDiff.diffRefreshToken === diffRefreshToken
 			? savedDiff.diff
 			: null;
-	const givenDiff = answeredDiff ?? savedGiven;
+	// The open request's diff is the side's while the file is as it opened,
+	// and the working tree's is against nothing just when the request read it
+	// so. A late answer gives it only if the side's own request has not.
+	const fromRequest =
+		diffAnswer !== null && diffAnswer.request === diffRequest
+			? diffAnswer
+			: null;
+	const openedDiff =
+		diffRequest === null
+			? null
+			: staged
+				? openedPart(
+						opened,
+						repoName,
+						path,
+						"stagedDiff",
+						(file) => file.refreshToken === refreshToken,
+					)
+				: openedPart(
+						opened,
+						repoName,
+						path,
+						"unstagedDiff",
+						(file) =>
+							file.refreshToken === refreshToken &&
+							file.diffRefreshToken === diffRefreshToken &&
+							file.untracked === (diffKind === "untracked"),
+					);
+	const givenDiff =
+		answeredDiff ??
+		savedGiven ??
+		(openedDiff === "pending" || fromRequest !== null ? null : openedDiff);
+	const awaitingDiff = givenDiff === null && openedDiff === "pending";
 	const diffGiven = givenDiff !== null;
 
 	useEffect(() => {
-		if (diffRequest === null || diffGiven) return;
+		if (diffRequest === null || diffGiven || awaitingDiff) return;
 
 		const controller = new AbortController();
 
@@ -385,6 +633,7 @@ export function useChangeContext({
 		diffKey,
 		diffRequest,
 		diffGiven,
+		awaitingDiff,
 	]);
 
 	const diffFailure =
@@ -397,10 +646,6 @@ export function useChangeContext({
 	// read, and a request that failed, hand over no diff without loading.
 	// Nothing changes the index but what the status reports, so a staged side
 	// it lists no change for has an empty diff, without asking git.
-	const fromRequest =
-		diffAnswer !== null && diffAnswer.request === diffRequest
-			? diffAnswer
-			: null;
 	const diffResult =
 		givenDiff !== null
 			? "error" in givenDiff
@@ -526,6 +771,11 @@ export function FileSideView({
 	);
 	const text =
 		staged && answered !== null ? indexText(answered.context) : undefined;
+	const openedText = openedTextReader(
+		context.opened,
+		{ ...context, contentToken },
+		shownPart(staged, status),
+	);
 
 	return (
 		<div
@@ -539,6 +789,7 @@ export function FileSideView({
 					repo={repoName}
 					staged={staged}
 					deleted
+					openedText={openedText}
 					fileAction={fileAction(
 						staged ? "Unstage deletion" : "Stage deletion",
 					)}
@@ -559,6 +810,7 @@ export function FileSideView({
 					staged
 					reloadKey={contentToken}
 					text={text}
+					openedText={openedText}
 					hidden={!active}
 					askForHead={askForHead}
 					onUnstaged={onUnstaged}
@@ -579,6 +831,7 @@ export function FileSideView({
 					repo={repoName}
 					readOnly={!canWrite}
 					readOnlyLabel={readOnlyLabel}
+					openedText={openedText}
 					askForHead={askForHead}
 					onSaved={onSaved}
 					onStaged={onStaged}

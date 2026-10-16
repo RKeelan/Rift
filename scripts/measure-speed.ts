@@ -307,19 +307,31 @@ async function measureServer(file: string) {
 		() => timed(api("/api/git/log", { limit: "25" })),
 		1,
 	);
-	// What the client asks for when a file opens, all at once.
+	// What the client asks for when a file opens: its text, the index's copy
+	// and git's diff of the two for a file with unstaged changes alone, and
+	// HEAD's copy and the staged diff as well for one with changes of both
+	// kinds.
 	await sample(
-		"open a file (content, base, diff at once)",
-		async () => {
-			const start = performance.now();
-			await Promise.all([
-				timed(api("/api/files/content", { path: file })),
-				timed(api("/api/git/base-content", { path: file, staged: "false" })),
-				timed(api("/api/git/diff", { path: file, staged: "false" })),
-			]);
-			return performance.now() - start;
-		},
+		"GET /api/git/open (one side)",
+		() =>
+			timed(
+				api("/api/git/open", {
+					path: file,
+					parts: "file,index,unstagedDiff",
+				}),
+			),
 		2,
+	);
+	await sample(
+		"GET /api/git/open (both sides)",
+		() =>
+			timed(
+				api("/api/git/open", {
+					path: file,
+					parts: "file,index,unstagedDiff,head,stagedDiff",
+				}),
+			),
+		4,
 	);
 
 	// A save of the file as it is, as the editor sends one, asking for the
