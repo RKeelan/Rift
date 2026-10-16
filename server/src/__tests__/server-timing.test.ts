@@ -1,4 +1,8 @@
-import { describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { execFileSync } from "node:child_process";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import supertest from "supertest";
 import { type AppConfig, createApp } from "../app.js";
 
@@ -58,5 +62,90 @@ describe("Server-Timing", () => {
 			"/assets/missing.js",
 		);
 		expect(response.headers["server-timing"]).toBeUndefined();
+	});
+});
+
+describe("Server-Timing for a request that runs git", () => {
+	let reposRoot: string;
+	let repoDir: string;
+	let app: ReturnType<typeof createApp>;
+
+	// The app's time, then git's: the time its processes took and their count.
+	function timings(header: string | undefined) {
+		const match =
+			/^app;dur=(\d+\.\d), git;dur=(\d+\.\d);desc="(\d+) process(es)?"$/.exec(
+				header ?? "",
+			);
+		if (!match) throw new Error(`no git time in Server-Timing: ${header}`);
+		return {
+			app: Number(match[1]),
+			git: Number(match[2]),
+			processes: Number(match[3]),
+		};
+	}
+
+	beforeAll(async () => {
+		reposRoot = await fs.mkdtemp(path.join(os.tmpdir(), "rift-timing-"));
+		repoDir = path.join(reposRoot, "repo");
+		await fs.mkdir(repoDir);
+		const git = (...args: string[]) =>
+			execFileSync("git", args, { cwd: repoDir });
+		git("init", "-q");
+		git("config", "user.email", "you@example.com");
+		git("config", "user.name", "You");
+		git("config", "core.autocrlf", "false");
+		await fs.writeFile(path.join(repoDir, "a.txt"), "one\ntwo\nthree\n");
+		git("add", "a.txt");
+		git("commit", "-q", "-m", "initial");
+		await fs.writeFile(path.join(repoDir, "a.txt"), "one\nTWO\nthree\n");
+		app = createApp(
+			makeConfig({
+				roots: [{ label: "root", path: reposRoot }],
+				allowWrites: true,
+			}),
+		);
+	});
+
+	afterAll(async () => {
+		await fs.rm(reposRoot, { recursive: true, force: true });
+	});
+
+	test("a status adds the time of its one git process", async () => {
+		const response = await supertest(app).get("/api/git/status?repo=root/repo");
+		expect(response.status).toBe(200);
+		const {
+			app: appMs,
+			git,
+			processes,
+		} = timings(response.headers["server-timing"]);
+		expect(processes).toBe(1);
+		expect(git).toBeGreaterThan(0);
+		expect(git).toBeLessThanOrEqual(appMs);
+	});
+
+	test("a stage by line counts each process, after its body is read", async () => {
+		const response = await supertest(app)
+			.post("/api/git/stage?repo=root/repo")
+			.send({ path: "a.txt", ranges: [[2, 2]] });
+		expect(response.status).toBe(200);
+		// The diff, the patch applied to the index, and the status after.
+		expect(timings(response.headers["server-timing"]).processes).toBe(3);
+
+		const unstage = await supertest(app)
+			.post("/api/git/unstage?repo=root/repo")
+			.send({ path: "a.txt" });
+		expect(unstage.status).toBe(200);
+		expect(timings(unstage.headers["server-timing"]).processes).toBe(2);
+	});
+
+	test("requests at the same time count only their own processes", async () => {
+		const [status, diff, health] = await Promise.all([
+			supertest(app).get("/api/git/status?repo=root/repo"),
+			supertest(app).get("/api/git/diff?repo=root/repo&path=a.txt"),
+			supertest(app).get("/api/health"),
+		]);
+		expect(timings(status.headers["server-timing"]).processes).toBe(1);
+		expect(timings(diff.headers["server-timing"]).processes).toBe(1);
+		duration(health.headers["server-timing"]);
 	});
 });

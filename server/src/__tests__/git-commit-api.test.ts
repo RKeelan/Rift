@@ -179,6 +179,58 @@ describe("POST /api/git/commit", () => {
 		expect(git("rev-parse HEAD")).toBe(head);
 	});
 
+	test("reports a hook that refuses without a word as a failure", async () => {
+		await initRepo();
+		const hook = path.join(repoDir, ".git", "hooks", "pre-commit");
+		await fs.writeFile(hook, "#!/bin/sh\nexit 1\n");
+		await fs.chmod(hook, 0o755);
+		await fs.writeFile(path.join(repoDir, "a.txt"), "two\n");
+		git("add a.txt");
+		const head = git("rev-parse HEAD");
+
+		const res = await commit("Change a");
+
+		expect(res.status).toBe(500);
+		expect(res.body.error.code).toBe("GIT_ERROR");
+		expect(git("rev-parse HEAD")).toBe(head);
+	});
+
+	test("answers once the commit is made, though a hook leaves a job holding git's output", async () => {
+		await initRepo();
+		const hook = path.join(repoDir, ".git", "hooks", "post-commit");
+		await fs.writeFile(
+			hook,
+			"#!/bin/sh\n(cd / && sleep 3 && echo late >&2) &\n",
+		);
+		await fs.chmod(hook, 0o755);
+		await fs.writeFile(path.join(repoDir, "a.txt"), "two\n");
+		git("add a.txt");
+
+		const start = performance.now();
+		const res = await commit("Change a");
+
+		expect(performance.now() - start).toBeLessThan(2000);
+		expect(res.status).toBe(200);
+		expect(git("rev-parse HEAD").trim()).toBe(res.body.commit);
+	});
+
+	test("runs hooks that use the shell's tools", async () => {
+		await initRepo();
+		const hook = path.join(repoDir, ".git", "hooks", "pre-commit");
+		await fs.writeFile(
+			hook,
+			"#!/bin/sh\necho abc | sed s/b/X/ | grep -q aXc || { echo 'no sed or grep' >&2; exit 1; }\n",
+		);
+		await fs.chmod(hook, 0o755);
+		await fs.writeFile(path.join(repoDir, "a.txt"), "two\n");
+		git("add a.txt");
+
+		const res = await commit("Change a");
+
+		expect(res.status).toBe(200);
+		expect(git("rev-parse HEAD").trim()).toBe(res.body.commit);
+	});
+
 	test("refuses outside a git repository", async () => {
 		await fs.mkdir(repoDir);
 

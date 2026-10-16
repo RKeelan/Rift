@@ -7,7 +7,7 @@ import {
 	resolveRepoInRoots,
 	resolveSafePath,
 } from "../pathUtils.js";
-import { repoGit } from "../repoGit.js";
+import { gitText } from "../runGit.js";
 
 const MAX_ENTRIES = 1000;
 const MAX_FILE_SIZE = 1024 * 1024; // 1 MB
@@ -35,10 +35,9 @@ const CHECK_IGNORE_LINE = /^(.*?):(\d*):(.*)\t(.*)$/;
  * when the directory is not in a repository, where check-ignore fails.
  *
  * `--verbose --non-matching` has git print a line for every path, ignored or
- * not. Without them, check-ignore prints nothing for a folder that ignores
- * nothing, and simple-git waits a further 50 ms for a command that prints
- * nothing. A verbose line names any pattern that matched, including a
- * negated one, starting with "!", which keeps its path.
+ * not, naming any pattern that matched, including a negated one, starting
+ * with "!", which keeps its path. check-ignore exits 1 when it ignores none
+ * of the paths, which is no failure.
  */
 async function getIgnoredPaths(
 	workingDir: string,
@@ -48,15 +47,19 @@ async function getIgnoredPaths(
 
 	let output: string;
 	try {
-		output = await repoGit(workingDir).raw([
-			"-c",
-			"core.quotePath=false",
-			"check-ignore",
-			"--verbose",
-			"--non-matching",
-			"--",
-			...entries,
-		]);
+		output = await gitText(
+			workingDir,
+			[
+				"-c",
+				"core.quotePath=false",
+				"check-ignore",
+				"--verbose",
+				"--non-matching",
+				"--",
+				...entries,
+			],
+			{ accept: ({ exitCode }) => exitCode === 1 },
+		);
 	} catch {
 		return null;
 	}
