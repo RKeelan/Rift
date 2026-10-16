@@ -357,10 +357,13 @@ async function measureServer(file: string) {
 // ---------------------------------------------------------------------------
 // Spawn mode
 
+// Neither way starts git hidden, as the server does not: on Windows,
+// `windowsHide` gives each process a console host of its own, which costs
+// several milliseconds a process.
 function spawnWithNode(binary: string): Promise<number> {
 	return new Promise((resolve, reject) => {
 		const start = performance.now();
-		const child = spawn(binary, ["--version"], { windowsHide: true });
+		const child = spawn(binary, ["--version"]);
 		child.stdout.resume();
 		child.stderr.resume();
 		child.on("error", reject);
@@ -798,15 +801,22 @@ class Client {
 	readonly samples = new Map<string, number[]>();
 	readonly requests = new Map<string, number[]>();
 	// The server's own time for each API request, from its Server-Timing
-	// header, and what DevTools saw beyond it, per endpoint.
+	// header, the part of it its git processes took, and what DevTools saw
+	// beyond it, per endpoint.
 	readonly serverTimes = new Map<string, number[]>();
+	readonly gitTimes = new Map<string, number[]>();
 	readonly overheads = new Map<string, number[]>();
 	// API requests DevTools has seen, by request id, until they finish.
 	private network = new Map<
 		string,
-		{ path: string; start: number; server?: number }
+		{ path: string; start: number; server?: number; git?: number }
 	>();
-	private finished: { path: string; server?: number; ms: number }[] = [];
+	private finished: {
+		path: string;
+		server?: number;
+		git?: number;
+		ms: number;
+	}[] = [];
 	// How long each timed input took to reach the page's first handler.
 	readonly delivery: number[] = [];
 
@@ -842,6 +852,8 @@ class Client {
 			);
 			const dur = key && /app;dur=([\d.]+)/.exec(headers[key]);
 			if (dur) seen.server = Number(dur[1]);
+			const git = key && /git;dur=([\d.]+)/.exec(headers[key]);
+			if (git) seen.git = Number(git[1]);
 		});
 		this.browser.on("Network.loadingFinished", (params) => {
 			const id = String(params.requestId);
@@ -851,6 +863,7 @@ class Client {
 			this.finished.push({
 				path: seen.path,
 				server: seen.server,
+				git: seen.git,
 				ms: (Number(params.timestamp) - seen.start) * 1000,
 			});
 		});
@@ -934,12 +947,14 @@ class Client {
 			list.push(ms);
 			this.requests.set(name, list);
 		}
-		for (const { path, server, ms } of this.finished) {
+		for (const { path, server, git, ms } of this.finished) {
 			if (server === undefined) continue;
 			for (const [map, value] of [
 				[this.serverTimes, server],
+				[this.gitTimes, git],
 				[this.overheads, ms - server],
 			] as const) {
+				if (value === undefined) continue;
 				const list = map.get(path) ?? [];
 				list.push(value);
 				map.set(path, list);
@@ -1309,6 +1324,8 @@ async function runInteractions(browser: Browser, client: Client, file: string) {
 			"  server's time (Server-Timing)",
 			client.serverTimes.get(label) ?? [],
 		);
+		const gitTimes = client.gitTimes.get(label);
+		if (gitTimes) report("  of which git's", gitTimes);
 		report(
 			"  overhead (DevTools' time less server's)",
 			client.overheads.get(label) ?? [],

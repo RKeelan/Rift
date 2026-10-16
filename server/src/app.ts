@@ -7,8 +7,9 @@ import {
 	parseAllowWrites,
 	writeGate,
 } from "./access.js";
+import { inWorkTree } from "./gitRepo.js";
 import { type RepoRoot, resolveRepoInRoots } from "./pathUtils.js";
-import { repoGit } from "./repoGit.js";
+import { countGitTime, type GitTime } from "./runGit.js";
 import { fileRoutes } from "./routes/files.js";
 import { gitRoutes } from "./routes/git.js";
 import { repoRoutes } from "./routes/repos.js";
@@ -160,10 +161,11 @@ export function getConfig(): AppConfig {
 }
 
 // Adds `Server-Timing: app;dur=<ms>` to every /api response, giving the time
-// from the request's arrival to the moment its headers are written. It runs
-// before the gates so a refused request carries it too, and the browser's
-// DevTools and the speed script read it to split a request's time into the
-// server's and everything else.
+// from the request's arrival to the moment its headers are written. A request
+// that ran git adds `git;dur=<ms>;desc="<n> processes"`, the time its git
+// processes took, summed. It runs before the gates so a refused request
+// carries it too, and the browser's DevTools and the speed script read it to
+// split a request's time into the server's and everything else.
 function serverTiming(
 	req: express.Request,
 	res: express.Response,
@@ -174,17 +176,20 @@ function serverTiming(
 		return;
 	}
 	const start = performance.now();
+	const git: GitTime = { ms: 0, processes: 0 };
 	const writeHead = res.writeHead as (...args: unknown[]) => express.Response;
 	res.writeHead = ((...args: unknown[]) => {
 		if (!res.headersSent && !res.hasHeader("Server-Timing")) {
-			res.setHeader(
-				"Server-Timing",
-				`app;dur=${(performance.now() - start).toFixed(1)}`,
-			);
+			const metrics = [`app;dur=${(performance.now() - start).toFixed(1)}`];
+			if (git.processes > 0) {
+				const processes = `${git.processes} ${git.processes === 1 ? "process" : "processes"}`;
+				metrics.push(`git;dur=${git.ms.toFixed(1)};desc="${processes}"`);
+			}
+			res.setHeader("Server-Timing", metrics.join(", "));
 		}
 		return writeHead.apply(res, args);
 	}) as typeof res.writeHead;
-	next();
+	countGitTime(git, next);
 }
 
 export function createApp(config: AppConfig): express.Express {
@@ -220,8 +225,7 @@ export function createApp(config: AppConfig): express.Express {
 		}
 		let gitRepo = false;
 		try {
-			const git = repoGit(result.path);
-			gitRepo = await git.checkIsRepo();
+			gitRepo = await inWorkTree(result.path);
 		} catch {
 			// Not a git repo
 		}

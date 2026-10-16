@@ -15,9 +15,10 @@ import path from "node:path";
 import supertest from "supertest";
 import { createApp } from "../app.js";
 import { isRefusedRepo, locateRepo } from "../gitRepo.js";
+import { gitCommand } from "../runGit.js";
 
 // The git commands the server starts, as the arguments after the options Rift
-// gives every command. simple-git imports `spawn` by name, so a spy on the
+// gives every command. The runner imports `spawn` by name, so a spy on the
 // module's export would not see its calls; replacing the module does.
 let started: string[] = [];
 const realModule = { ...realChildProcess };
@@ -86,6 +87,9 @@ describe("finding a repository's top level", () => {
 			allowWrites: true,
 		});
 
+		// The runner finds git once, by running it on Windows, which no request
+		// pays for after the first.
+		await gitCommand();
 		mock.module("node:child_process", () => ({
 			...realModule,
 			spawn: recordingSpawn,

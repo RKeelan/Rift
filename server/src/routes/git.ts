@@ -1,18 +1,17 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
 import type { Request, Response } from "express";
 import { Router } from "express";
 import { deletionStagingLine } from "shared";
-import type { StatusResult } from "simple-git";
+import { gitLog, gitStatus, type StatusFile } from "../gitOutput.js";
 import {
 	type RepoRoot,
 	resolveRepoInRoots,
 	resolveSafePath,
 } from "../pathUtils.js";
 import { isRefusedRepo, type LocatedRepo, locateRepo } from "../gitRepo.js";
-import { repoGit } from "../repoGit.js";
+import { gitText, runGit } from "../runGit.js";
 
 const MAX_DIFF_SIZE = 1024 * 1024; // 1 MB
 // The limits /api/files/content puts on a file, which a base copy of one
@@ -63,10 +62,10 @@ function mapWorkingTreeStatus(code: string): FileStatus | null {
 	}
 }
 
-function buildStatusEntries(status: StatusResult): StatusEntry[] {
+function buildStatusEntries(files: StatusFile[]): StatusEntry[] {
 	const entries: StatusEntry[] = [];
 
-	for (const file of status.files) {
+	for (const file of files) {
 		// Staged change
 		const stagedStatus = mapIndexStatus(file.index);
 		if (stagedStatus) {
@@ -74,7 +73,7 @@ function buildStatusEntries(status: StatusResult): StatusEntry[] {
 		}
 
 		// Unstaged change
-		const unstagedStatus = mapWorkingTreeStatus(file.working_dir);
+		const unstagedStatus = mapWorkingTreeStatus(file.workingTree);
 		if (unstagedStatus) {
 			entries.push({ path: file.path, status: unstagedStatus, staged: false });
 		}
@@ -426,24 +425,27 @@ async function untrackedDiff(
 	relativePath: string,
 ): Promise<string> {
 	// `git diff --no-index` exits 1 whenever its sides differ, which against
-	// /dev/null they always do, and simple-git takes a failing exit with
-	// anything on stderr, such as a line-ending warning, for an error. So the
-	// exit is a failure only when it comes without a diff, as for a missing file.
-	const git = repoGit(toplevel, (error, result) =>
-		result.exitCode === 1 && result.stdOut.length > 0 ? undefined : error,
+	// /dev/null they always do, and also when it cannot read a side, as for a
+	// missing file. So exit 1 is a failure only when it comes without a diff.
+	return gitText(
+		toplevel,
+		[
+			"diff",
+			"--no-index",
+			"--full-index",
+			"--no-textconv",
+			"--no-ext-diff",
+			"--no-color",
+			"--src-prefix=a/",
+			"--dst-prefix=b/",
+			"--",
+			"/dev/null",
+			toGitPath(relativePath),
+		],
+		{
+			accept: ({ exitCode, stdout }) => exitCode === 1 && stdout.length > 0,
+		},
 	);
-	return git.diff([
-		"--no-index",
-		"--full-index",
-		"--no-textconv",
-		"--no-ext-diff",
-		"--no-color",
-		"--src-prefix=a/",
-		"--dst-prefix=b/",
-		"--",
-		"/dev/null",
-		toGitPath(relativePath),
-	]);
 }
 
 /**
@@ -493,9 +495,9 @@ class InexactDiffError extends Error {}
 // status. The diff it slices is the same output it checks against
 // expectedBlobs, so the patch holds exactly the lines the caller picked. A new
 // file's patch also creates the file, so its diff has to describe the file
-// exactly.
+// exactly. The patch goes to git on stdin.
 async function applyPartialStage(
-	gitRoot: ReturnType<typeof repoGit>,
+	toplevel: string,
 	diff: string,
 	ranges: LineRange[],
 	expectedBlobs: string | null,
@@ -508,13 +510,9 @@ async function applyPartialStage(
 	const patch = buildPartialPatch(diff, ranges);
 	if (patch === null) return;
 
-	const patchFile = path.join(os.tmpdir(), `rift-stage-${randomUUID()}.patch`);
-	await fs.writeFile(patchFile, patch);
-	try {
-		await gitRoot.raw(["apply", "--cached", "--recount", patchFile]);
-	} finally {
-		await fs.rm(patchFile, { force: true });
-	}
+	await runGit(toplevel, ["apply", "--cached", "--recount", "-"], {
+		input: patch,
+	});
 }
 
 // Unstages the selected lines of a staged change by rebuilding a partial patch
@@ -522,12 +520,13 @@ async function applyPartialStage(
 // applyPartialStage. A no-op (returning early) when the selection covers no
 // staged change, so the caller can still return the current status.
 async function applyPartialUnstage(
-	gitRoot: ReturnType<typeof repoGit>,
+	toplevel: string,
 	relativePath: string,
 	ranges: LineRange[],
 	expectedBlobs: string | null,
 ): Promise<void> {
-	const diff = await gitRoot.diff([
+	const diff = await gitText(toplevel, [
+		"diff",
 		"--cached",
 		"--full-index",
 		"--",
@@ -537,22 +536,9 @@ async function applyPartialUnstage(
 	const patch = buildPartialPatch(diff, ranges, true);
 	if (patch === null) return;
 
-	const patchFile = path.join(
-		os.tmpdir(),
-		`rift-unstage-${randomUUID()}.patch`,
-	);
-	await fs.writeFile(patchFile, patch);
-	try {
-		await gitRoot.raw([
-			"apply",
-			"--cached",
-			"--reverse",
-			"--recount",
-			patchFile,
-		]);
-	} finally {
-		await fs.rm(patchFile, { force: true });
-	}
+	await runGit(toplevel, ["apply", "--cached", "--reverse", "--recount", "-"], {
+		input: patch,
+	});
 }
 
 async function handleStageAction(
@@ -655,7 +641,6 @@ async function handleStageAction(
 		return;
 	}
 
-	const { git: gitRoot } = repo;
 	const relativePath = path.relative(toplevel, resolved);
 
 	if (
@@ -680,7 +665,7 @@ async function handleStageAction(
 	const stageDiff = () =>
 		untracked === true
 			? untrackedDiff(toplevel, relativePath)
-			: gitRoot.diff(["--full-index", "--", relativePath]);
+			: gitText(toplevel, ["diff", "--full-index", "--", relativePath]);
 	try {
 		if (action === "stage") {
 			if (ranges !== null) {
@@ -688,7 +673,7 @@ async function handleStageAction(
 				// change stages nothing, falling through to the current status.
 				if (ranges.length > 0) {
 					await applyPartialStage(
-						gitRoot,
+						toplevel,
 						await stageDiff(),
 						ranges,
 						blobs,
@@ -704,7 +689,7 @@ async function handleStageAction(
 					checkDiffBlobs(await stageDiff(), blobs);
 				}
 				// `git add` stages additions, modifications, and deletions alike.
-				await gitRoot.raw(["add", "--", relativePath]);
+				await runGit(toplevel, ["add", "--", relativePath]);
 			}
 		} else {
 			if (ranges !== null) {
@@ -712,13 +697,14 @@ async function handleStageAction(
 				// staged change unstages nothing, falling through to the current
 				// status.
 				if (ranges.length > 0) {
-					await applyPartialUnstage(gitRoot, relativePath, ranges, blobs);
+					await applyPartialUnstage(toplevel, relativePath, ranges, blobs);
 				}
 			} else {
 				// Checked and then run separately, as staging a whole file is.
 				if (blobs !== null) {
 					checkDiffBlobs(
-						await gitRoot.diff([
+						await gitText(toplevel, [
+							"diff",
 							"--cached",
 							"--full-index",
 							"--",
@@ -730,7 +716,7 @@ async function handleStageAction(
 				// A plain reset (no explicit HEAD) unstages the path whether or not
 				// the repo has any commits yet; `reset HEAD` would fail before the
 				// first commit.
-				await gitRoot.raw(["reset", "-q", "--", relativePath]);
+				await runGit(toplevel, ["reset", "-q", "--", relativePath]);
 			}
 		}
 	} catch (err) {
@@ -763,8 +749,7 @@ async function handleStageAction(
 		return;
 	}
 
-	const status = await gitRoot.status();
-	res.json({ files: buildStatusEntries(status) });
+	res.json({ files: buildStatusEntries(await gitStatus(toplevel)) });
 }
 
 export function gitRoutes(roots: RepoRoot[]): Router {
@@ -775,9 +760,9 @@ export function gitRoutes(roots: RepoRoot[]): Router {
 		const repo = await resolveGitRepo(roots, req, res);
 		if (!repo) return;
 
-		let status: StatusResult;
+		let status: StatusFile[];
 		try {
-			status = await repo.git.status();
+			status = await gitStatus(repo.toplevel);
 		} catch (err) {
 			if (await answeredRefusedRepo(repo, res)) return;
 			throw err;
@@ -824,10 +809,10 @@ export function gitRoutes(roots: RepoRoot[]): Router {
 			return;
 		}
 
-		const { git: gitRoot } = repo;
+		const { toplevel } = repo;
 		let before: StatusEntry[];
 		try {
-			before = buildStatusEntries(await gitRoot.status());
+			before = buildStatusEntries(await gitStatus(toplevel));
 		} catch (err) {
 			if (await answeredRefusedRepo(repo, res)) return;
 			throw err;
@@ -842,17 +827,12 @@ export function gitRoutes(roots: RepoRoot[]): Router {
 			return;
 		}
 
-		// The message goes through a file, as a patch does, because a command
+		// The message goes to git on stdin, as a patch does, because a command
 		// line has a length limit that a long message can pass.
-		const messageFile = path.join(
-			os.tmpdir(),
-			`rift-commit-${randomUUID()}.txt`,
-		);
 		let commit: string;
 		try {
-			await fs.writeFile(messageFile, message);
-			await gitRoot.raw(["commit", "-F", messageFile]);
-			commit = (await gitRoot.revparse(["HEAD"])).trim();
+			await runGit(toplevel, ["commit", "-F", "-"], { input: message });
+			commit = (await gitText(toplevel, ["rev-parse", "HEAD"])).trim();
 		} catch (err) {
 			// A failing hook or a missing identity reads best in git's own words.
 			res.status(500).json({
@@ -862,12 +842,9 @@ export function gitRoutes(roots: RepoRoot[]): Router {
 				},
 			});
 			return;
-		} finally {
-			await fs.rm(messageFile, { force: true });
 		}
 
-		const status = await gitRoot.status();
-		res.json({ commit, files: buildStatusEntries(status) });
+		res.json({ commit, files: buildStatusEntries(await gitStatus(toplevel)) });
 	});
 
 	// GET /api/git/log?repo=<name>&limit=<n>&offset=<n>
@@ -879,17 +856,10 @@ export function gitRoutes(roots: RepoRoot[]): Router {
 		const offset = Math.max(0, Number(req.query.offset) || 0);
 
 		try {
-			const log = await repo.git.log([
+			const commits = await gitLog(repo.toplevel, [
 				`--skip=${offset}`,
 				`--max-count=${limit}`,
 			]);
-
-			const commits = log.all.map((entry) => ({
-				hash: entry.hash,
-				author: entry.author_name,
-				date: entry.date,
-				subject: entry.message,
-			}));
 
 			res.json({ commits });
 		} catch {
@@ -917,8 +887,7 @@ export function gitRoutes(roots: RepoRoot[]): Router {
 
 		try {
 			// Get commit metadata
-			const logResult = await repo.git.log(["-1", hash]);
-			const commit = logResult.latest;
+			const [commit] = await gitLog(repo.toplevel, ["-1", hash]);
 			if (!commit) {
 				res.status(404).json({
 					error: { code: "NOT_FOUND", message: "Commit not found" },
@@ -927,7 +896,7 @@ export function gitRoutes(roots: RepoRoot[]): Router {
 			}
 
 			// Get changed files with stats
-			const raw = await repo.git.raw([
+			const raw = await gitText(repo.toplevel, [
 				"diff-tree",
 				"--root",
 				"--no-commit-id",
@@ -952,7 +921,7 @@ export function gitRoutes(roots: RepoRoot[]): Router {
 				});
 
 			// Get file statuses (A/M/D/R)
-			const statusRaw = await repo.git.raw([
+			const statusRaw = await gitText(repo.toplevel, [
 				"diff-tree",
 				"--root",
 				"--no-commit-id",
@@ -974,13 +943,7 @@ export function gitRoutes(roots: RepoRoot[]): Router {
 				status: statusMap.get(f.path) ?? "M",
 			}));
 
-			res.json({
-				hash: commit.hash,
-				author: commit.author_name,
-				date: commit.date,
-				subject: commit.message,
-				files: filesWithStatus,
-			});
+			res.json({ ...commit, files: filesWithStatus });
 		} catch {
 			if (await answeredRefusedRepo(repo, res)) return;
 			res.status(404).json({
@@ -1030,9 +993,8 @@ export function gitRoutes(roots: RepoRoot[]): Router {
 
 		try {
 			const relativePath = path.relative(toplevel, resolved);
-			const { git: gitRoot } = repo;
 			// Use git show which handles root commits (no parent) naturally
-			const diff = await gitRoot.raw([
+			const diff = await gitText(toplevel, [
 				"show",
 				"--format=",
 				"-p",
@@ -1090,13 +1052,12 @@ export function gitRoutes(roots: RepoRoot[]): Router {
 
 		try {
 			const relativePath = toGitPath(path.relative(toplevel, resolved));
-			const { git: gitRoot } = repo;
 			// Unstaged edits are compared against the index, matching what
 			// `git diff` reports; staged edits are compared against HEAD. A
 			// file added but not yet committed has no HEAD version at all.
 			const staged = req.query.staged === "true";
 			const revision = staged ? `HEAD:${relativePath}` : `:${relativePath}`;
-			const content = await gitRoot.showBuffer(revision);
+			const content = (await runGit(toplevel, ["show", revision])).stdout;
 			// The editor shows no file that is too large or binary, so a copy
 			// of one is refused as /api/files/content refuses the file
 			// itself, rather than sent whole.
@@ -1166,13 +1127,12 @@ export function gitRoutes(roots: RepoRoot[]): Router {
 		const staged = req.query.staged === "true";
 		// Run the diff from the repo root so path interpretation is
 		// consistent with git status output (both repo-root-relative).
-		const { git: gitRoot } = repo;
 		const relativePath = path.relative(toplevel, resolved);
 		// Full blob ids on the index line let a caller name this diff when it
 		// stages or unstages lines read from it.
 		const diffArgs = staged
-			? ["--cached", "--full-index", "--", relativePath]
-			: ["--full-index", "--", relativePath];
+			? ["diff", "--cached", "--full-index", "--", relativePath]
+			: ["diff", "--full-index", "--", relativePath];
 		const untracked = !staged && req.query.untracked === "true";
 		let diff: string;
 		if (untracked) {
@@ -1189,7 +1149,7 @@ export function gitRoutes(roots: RepoRoot[]): Router {
 			}
 		} else {
 			try {
-				diff = await gitRoot.diff(diffArgs);
+				diff = await gitText(toplevel, diffArgs);
 			} catch (err) {
 				if (await answeredRefusedRepo(repo, res)) return;
 				throw err;

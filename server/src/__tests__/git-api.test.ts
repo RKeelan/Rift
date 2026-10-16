@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { execSync } from "node:child_process";
+import { execFileSync, execSync } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -181,6 +181,46 @@ describe("GET /api/git/status", () => {
 		// Clean up
 		execSync("git checkout -- init.txt", { cwd: repoDir });
 		execSync("git reset HEAD init.txt", { cwd: repoDir });
+	});
+
+	test("reports a staged rename under its new name", async () => {
+		execFileSync("git", ["checkout", "HEAD", "--", "init.txt"], {
+			cwd: repoDir,
+		});
+		execFileSync("git", ["mv", "init.txt", "renamed café.txt"], {
+			cwd: repoDir,
+		});
+
+		const res = await supertest(app).get(`/api/git/status?repo=${repoRef}`);
+
+		expect(res.status).toBe(200);
+		expect(res.body.files).toEqual([
+			{ path: "renamed café.txt", status: "renamed", staged: true },
+		]);
+
+		// Clean up
+		execFileSync("git", ["mv", "renamed café.txt", "init.txt"], {
+			cwd: repoDir,
+		});
+	});
+
+	test("reports a path that starts with a space as it is", async () => {
+		await fs.writeFile(path.join(repoDir, " lead.txt"), "one\n");
+		execFileSync("git", ["add", " lead.txt"], { cwd: repoDir });
+		execFileSync("git", ["commit", "-q", "-m", "Add a leading space"], {
+			cwd: repoDir,
+		});
+		await fs.writeFile(path.join(repoDir, " lead.txt"), "two\n");
+
+		const res = await supertest(app).get(`/api/git/status?repo=${repoRef}`);
+
+		expect(res.status).toBe(200);
+		expect(res.body.files).toEqual([
+			{ path: " lead.txt", status: "modified", staged: false },
+		]);
+
+		// Clean up
+		execFileSync("git", ["checkout", "--", " lead.txt"], { cwd: repoDir });
 	});
 });
 
