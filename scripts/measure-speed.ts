@@ -1109,23 +1109,61 @@ class Client {
 		);
 	}
 
-	// Stages the first change from its strip, timed until the strip has gone
-	// and the editor's other strips are ready again. With sides to switch
-	// between, the file's name no longer being greyed out shows that the
-	// status has caught up.
-	async stageFromStrip() {
+	// Scrolls down a screen at a time until a strip is on the page, since the
+	// editor draws only the strips near the lines on screen.
+	async scrollToStrip() {
+		const strip = `document.querySelector(${js(`${ACTIVE} ${ENABLED_STRIP}`)})`;
+		for (let step = 0; step < 100; step++) {
+			if (await this.browser.evaluate<boolean>(`Boolean(${strip})`)) return;
+			await this.browser.evaluate(
+				`(() => { const scroller = document.querySelector(${js(`${ACTIVE} .cm-scroller`)}); scroller.scrollTop += scroller.clientHeight * 0.8; })()`,
+			);
+			await Bun.sleep(50);
+		}
+		throw new Error(`no strip to scroll to, on ${await this.describe()}`);
+	}
+
+	// Taps the first enabled strip, timed until the change's strip has gone
+	// and the editor's other strips are ready again.
+	private async fromStrip(
+		label: string,
+		conditions: Record<string, string>,
+		record: boolean,
+	) {
 		const button = `document.querySelector(${js(`${ACTIVE} ${ENABLED_STRIP}`)})`;
+		await this.waitFor(button, "a strip to tap");
 		const point = await this.point(button);
 		const start = await this.browser.evaluate<string>(
 			`${button}.closest(".cm-changeStrip").dataset.start`,
 		);
-		const conditions: Record<string, string> = {
-			done: `!document.querySelector(${js(`${ACTIVE} .cm-changeStrip[data-start="${start}"]`)}) && !document.querySelector(${js(`${ACTIVE} ${DISABLED_STRIP}`)})`,
-		};
-		if (await this.hasSwitch()) {
+		const gone = `!document.querySelector(${js(`${ACTIVE} .cm-changeStrip[data-start="${start}"]`)})`;
+		await this.measure(
+			label,
+			{
+				...conditions,
+				done: `${gone} && !document.querySelector(${js(`${ACTIVE} ${DISABLED_STRIP}`)})`,
+			},
+			point,
+			record,
+		);
+	}
+
+	// Stages the first change from its strip. With sides to switch between,
+	// the file's name no longer being greyed out shows that the status has
+	// caught up.
+	async stageFromStrip(record = true) {
+		const conditions: Record<string, string> = {};
+		if (record && (await this.hasSwitch())) {
 			conditions.status = `${this.sideSwitch()}.getAttribute("aria-disabled") === "false"`;
 		}
-		await this.measure("stage a change from its strip", conditions, point);
+		await this.fromStrip("stage a change from its strip", conditions, record);
+	}
+
+	// Unstages the first change from its strip on the staged side, which must
+	// hold another change: a staged side left empty keeps its last strip
+	// greyed out.
+	async unstageFromStrip() {
+		await this.fromStrip("unstage a change from its strip", {}, true);
 	}
 
 	// The file's name in the bar on screen, which switches to its other side.
@@ -1298,12 +1336,17 @@ async function runInteractions(browser: Browser, client: Client, file: string) {
 		await client.pickAndUnpick();
 		await client.stageFromStrip();
 		if (await client.hasSwitch()) {
+			// A second change staged leaves one to remain once the first is
+			// unstaged, which the staged side needs to redraw its strips.
+			await client.scrollToStrip();
+			await client.stageFromStrip(false);
 			await client.flip("Staged");
+			await client.unstageFromStrip();
 			await client.flip("Unstaged");
 		}
 		await client.back();
-		// Unstaging the whole file puts its index entry back as it was, and
-		// the Files tab reads the status again when it opens.
+		// Unstaging what is left of the file puts its index entry back as it
+		// was, and the Files tab reads the status again when it opens.
 		await request(api("/api/git/unstage"), post({ path: file }));
 		await client.openFilesTab();
 		process.stdout.write(".");
