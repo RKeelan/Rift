@@ -874,6 +874,65 @@ function getLanguageLoader(filename: string): LanguageLoader | null {
 	}
 }
 
+// The modules the editor loads as it builds a view, in the order it loads
+// them.
+const EDITOR_CODE: (() => Promise<unknown>)[] = [
+	() => import("@codemirror/state"),
+	() => import("@codemirror/view"),
+	() => import("@codemirror/language"),
+	() => import("@codemirror/commands"),
+	() => import("@lezer/highlight"),
+	() => import("./linePicking.ts"),
+];
+
+// What preloadEditor has loaded or is loading: "editor" for the editor's own
+// modules, and each file extension's language support.
+const preloaded = new Set<string>();
+
+/**
+ * Loads the editor's code, and the language support for each of the files
+ * named, ahead of opening one, so that the first view built need not wait on
+ * either. Each loads once, one module after another, so that no single task
+ * evaluates them all, and a call made while another is loading leaves what
+ * that one will load to it. Resolves with what this call loaded: "editor" for
+ * the editor's code, and the extension of each language.
+ */
+export async function preloadEditor(
+	paths: Iterable<string>,
+): Promise<string[]> {
+	const loads = new Map<string, () => Promise<unknown>>([
+		[
+			"editor",
+			async () => {
+				for (const load of EDITOR_CODE) await load();
+			},
+		],
+	]);
+	for (const path of paths) {
+		const loader = getLanguageLoader(path);
+		const extension = path.split(".").pop()?.toLowerCase();
+		if (loader && extension && !loads.has(extension)) {
+			loads.set(extension, loader);
+		}
+	}
+	for (const name of loads.keys()) {
+		if (preloaded.has(name)) loads.delete(name);
+		else preloaded.add(name);
+	}
+	const loaded: string[] = [];
+	for (const [name, load] of loads) {
+		try {
+			await load();
+			loaded.push(name);
+		} catch {
+			// The editor loads it again as it opens a file, and reports a failure
+			// then.
+			preloaded.delete(name);
+		}
+	}
+	return loaded;
+}
+
 function getErrorMessage(body: unknown, status: number): string {
 	if (
 		typeof body === "object" &&
