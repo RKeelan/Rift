@@ -97,5 +97,28 @@ describe("PWA build output", () => {
 			const sw = readFileSync(resolve(distDir, "sw.js"), "utf-8");
 			expect(sw).toInclude(`${BASE}index.html`);
 		});
+
+		test("no route caches API requests", () => {
+			const sw = readFileSync(resolve(distDir, "sw.js"), "utf-8");
+			expect(sw).not.toInclude("api-calls");
+			expect(sw).not.toMatch(/NetworkFirst/);
+			// Every registered route is a regexp or function over the URL; none
+			// may mention the API path.
+			const routes = [...sw.matchAll(/registerRoute\(([^;]*)\);/g)].map(
+				(match) => match[1],
+			);
+			for (const route of routes) {
+				expect(route).not.toInclude("/api");
+			}
+		});
+
+		test("API requests bypass the worker where static routing exists", () => {
+			const sw = readFileSync(resolve(distDir, "sw.js"), "utf-8");
+			expect(sw).toInclude("sw-api.js");
+			const script = readFileSync(resolve(distDir, "sw-api.js"), "utf-8");
+			expect(script).toInclude("addRoutes");
+			expect(script).toInclude('source: "network"');
+			expect(script).toInclude('caches.delete("api-calls")');
+		});
 	});
 });
