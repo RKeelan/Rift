@@ -1105,6 +1105,144 @@ describe("FilesPage", () => {
 		});
 	});
 
+	// Serves one changed file whose stage is always refused, so the file stays
+	// open for another try. Returns each stage's body.
+	function serveRefusedStage(
+		file: StatusFile,
+		options: { mtimeMs: () => number; savedMtimeMs?: number },
+	) {
+		const stageBodies: Record<string, unknown>[] = [];
+		globalThis.fetch = mock(
+			(input: string | URL | Request, init?: RequestInit) => {
+				const url = typeof input === "string" ? input : input.toString();
+				if (url.includes("/api/git/stage")) {
+					stageBodies.push(JSON.parse(String(init?.body)));
+					return Promise.resolve(
+						json(
+							{ error: { code: "FILE_MODIFIED", message: "File changed" } },
+							409,
+						),
+					);
+				}
+				if (url.includes("/api/git/status")) {
+					return Promise.resolve(json({ files: [file] }));
+				}
+				if (url.includes("/api/git/diff")) {
+					return Promise.resolve(json({ diff: "", truncated: false }));
+				}
+				if (url.includes("/api/git/base-content")) {
+					// The index or HEAD has no modification time to report.
+					return Promise.resolve(new Response("previous\n"));
+				}
+				if (url.includes("/api/files/content")) {
+					if (init?.method === "PUT") {
+						return Promise.resolve(json({ mtimeMs: options.savedMtimeMs }));
+					}
+					return Promise.resolve(
+						new Response("current\n", {
+							headers: { "x-file-mtime-ms": String(options.mtimeMs()) },
+						}),
+					);
+				}
+				return Promise.resolve(new Response("Not found", { status: 404 }));
+			},
+		) as typeof fetch;
+		return stageBodies;
+	}
+
+	async function openOnlyFile(container: HTMLElement) {
+		await waitFor(() => {
+			expect(container.querySelector(".changes-file-entry")).not.toBeNull();
+		});
+		fireEvent.click(container.querySelector(".changes-file-entry") as Element);
+		await waitFor(() => {
+			expect(container.querySelector(".cm-content")).not.toBeNull();
+		});
+	}
+
+	async function reloadFile(container: HTMLElement) {
+		fireEvent.click(
+			within(editorBar(container)).getByRole("button", {
+				name: "More actions",
+			}),
+		);
+		fireEvent.click(screen.getByRole("menuitem", { name: "Reload" }));
+	}
+
+	test("stages the whole file under the time of the last save, then of the last reload", async () => {
+		let mtimeMs = 1;
+		const stageBodies = serveRefusedStage(
+			{ path: "app.ts", status: "modified", staged: false },
+			{ mtimeMs: () => mtimeMs, savedMtimeMs: 3 },
+		);
+		const { container } = renderFilesPage();
+		await openOnlyFile(container);
+
+		const { EditorView } = await import("@codemirror/view");
+		const view = EditorView.findFromDOM(
+			container.querySelector(".cm-editor") as HTMLElement,
+		);
+		act(() => {
+			view?.dispatch({ changes: { from: 0, insert: "edited " } });
+		});
+		const save = screen.getByRole("button", { name: "Save" });
+		await waitFor(() => {
+			expect(greyed(save)).toBe(false);
+		});
+		fireEvent.click(save);
+		const stage = () =>
+			within(editorBar(container)).getByRole("button", { name: "Stage file" });
+		await waitFor(() => {
+			expect(greyed(stage())).toBe(false);
+		});
+		fireEvent.click(stage());
+		await waitFor(() => {
+			expect(stageBodies).toEqual([{ path: "app.ts", expectedMtimeMs: 3 }]);
+		});
+
+		mtimeMs = 5;
+		await reloadFile(container);
+		await waitFor(() => {
+			expect(greyed(stage())).toBe(false);
+		});
+		fireEvent.click(stage());
+		await waitFor(() => {
+			expect(stageBodies.length).toBe(2);
+		});
+		expect(stageBodies[1]).toEqual({ path: "app.ts", expectedMtimeMs: 5 });
+	});
+
+	test("stages a deleted file naming no time, as opened and after a reload", async () => {
+		const stageBodies = serveRefusedStage(
+			{ path: "app.ts", status: "deleted", staged: false },
+			{ mtimeMs: () => 1 },
+		);
+		const { container } = renderFilesPage();
+		await openOnlyFile(container);
+
+		const stage = () =>
+			within(editorBar(container)).getByRole("button", {
+				name: "Stage deletion",
+			});
+		await waitFor(() => {
+			expect(greyed(stage())).toBe(false);
+		});
+		fireEvent.click(stage());
+		await waitFor(() => {
+			expect(stageBodies.length).toBe(1);
+		});
+
+		await reloadFile(container);
+		await waitFor(() => {
+			expect(greyed(stage())).toBe(false);
+		});
+		fireEvent.click(stage());
+		await waitFor(() => {
+			expect(stageBodies.length).toBe(2);
+		});
+		expect(stageBodies).toEqual([{ path: "app.ts" }, { path: "app.ts" }]);
+	});
+
 	test("refetches the diff when the editor reloads the file", async () => {
 		let diffRequests = 0;
 
@@ -1381,7 +1519,11 @@ describe("FilesPage", () => {
 			expect(stageBodies.length).toBe(1);
 			expect(greyed(stageFile)).toBe(true);
 		});
-		expect(JSON.parse(stageBodies[0])).toEqual({ path: "app.ts" });
+		// It names the text on screen by the modification time it loaded.
+		expect(JSON.parse(stageBodies[0])).toEqual({
+			path: "app.ts",
+			expectedMtimeMs: 1,
+		});
 
 		await act(async () => {
 			finishStage();
@@ -1390,6 +1532,77 @@ describe("FilesPage", () => {
 			expect(listShown(container)).toBe(true);
 		});
 		expect(screen.getByLabelText("Unstage app.ts")).not.toBeNull();
+	});
+
+	test("refuses to stage the whole file from the bar when it changed on disk", async () => {
+		const stageBodies: string[] = [];
+		const files: StatusFile[] = [
+			{ path: "app.ts", status: "modified", staged: false },
+		];
+
+		globalThis.fetch = mock(
+			(input: string | URL | Request, init?: RequestInit) => {
+				const url = typeof input === "string" ? input : input.toString();
+				if (url.includes("/api/git/stage")) {
+					stageBodies.push(String(init?.body ?? ""));
+					return Promise.resolve(
+						new Response(
+							JSON.stringify({
+								error: {
+									code: "FILE_MODIFIED",
+									message: "File changed on disk since it was loaded",
+								},
+							}),
+							{ status: 409, headers: { "Content-Type": "application/json" } },
+						),
+					);
+				}
+				if (url.includes("/api/git/status")) {
+					return Promise.resolve(
+						new Response(JSON.stringify({ files }), {
+							status: 200,
+							headers: { "Content-Type": "application/json" },
+						}),
+					);
+				}
+				if (url.includes("/api/files/content")) {
+					return Promise.resolve(
+						new Response("current\n", {
+							status: 200,
+							headers: { "x-file-mtime-ms": "1" },
+						}),
+					);
+				}
+				return Promise.resolve(new Response("Not found", { status: 404 }));
+			},
+		) as typeof fetch;
+
+		const { container } = renderFilesPage();
+		await waitFor(() => {
+			expect(container.querySelector(".changes-file-entry")).not.toBeNull();
+		});
+		fireEvent.click(container.querySelector(".changes-file-entry") as Element);
+		await findEditableEditor(container);
+
+		fireEvent.click(
+			within(editorBar(container)).getByRole("button", { name: "Stage file" }),
+		);
+
+		await screen.findByText(
+			"The file changed since it was loaded. Reload before staging.",
+		);
+		expect(stageBodies.length).toBe(1);
+		// The file stays open, with its action offered again.
+		expect(listShown(container)).toBe(false);
+		await waitFor(() => {
+			expect(
+				greyed(
+					within(editorBar(container)).getByRole("button", {
+						name: "Stage file",
+					}),
+				),
+			).toBe(false);
+		});
 	});
 
 	test("stages an untracked file as shown, then returns to the list", async () => {
@@ -1539,7 +1752,9 @@ describe("FilesPage", () => {
 
 		await waitFor(() => {
 			expect(stageBodies.length).toBe(1);
-			expect(JSON.parse(stageBodies[0]).path).toBe("app.ts");
+			// The list's buttons act on files that were not opened, so they name
+			// no version.
+			expect(JSON.parse(stageBodies[0])).toEqual({ path: "app.ts" });
 		});
 
 		await waitFor(() => {
@@ -2727,7 +2942,7 @@ describe("staging and unstaging from the editor", () => {
 		expect(requests.bodies).toEqual([
 			{ path: "app.ts" },
 			{ path: "app.ts" },
-			{ path: "app.ts" },
+			{ path: "app.ts", expectedMtimeMs: 1 },
 		]);
 	});
 

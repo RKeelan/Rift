@@ -964,7 +964,8 @@ function describeLineCount(count: number): string {
 /** An action on the whole file that the page offers in the editor's bar. */
 export interface FileAction {
 	label: string;
-	onClick: () => void;
+	/** Given the modification time of the text the editor shows, or null before it has loaded one. */
+	onClick: (mtimeMs: number | null) => void;
 	disabled?: boolean;
 	title?: string;
 }
@@ -1622,7 +1623,10 @@ export function TextFileEditor({
 					}
 
 					const fetched = await response.text();
-					nextMtimeMs = Number(response.headers.get(FILE_MTIME_HEADER));
+					// A text read from the index or HEAD has no modification time, so
+					// the header is absent, which is not the time 0.
+					const mtimeHeader = response.headers.get(FILE_MTIME_HEADER);
+					nextMtimeMs = mtimeHeader === null ? Number.NaN : Number(mtimeHeader);
 					// A text the page handed over while the request was out, as a
 					// stage from the file's other side hands the index's, is the
 					// newer.
@@ -3134,6 +3138,7 @@ export function TextFileEditor({
 				: wholeFileAction
 					? {
 							...wholeFileAction,
+							onClick: () => wholeFileAction.onClick(mtimeMs),
 							disabled: wholeFileAction.disabled || fileActionBlocked,
 						}
 					: !staged && !deleted

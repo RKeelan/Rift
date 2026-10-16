@@ -515,13 +515,18 @@ export function FilesPage({
 	// Stages or unstages a whole file, asking for the file's context only
 	// when told what to ask for, since a page that leaves the file has no use
 	// for it. Returns the answer, or null when the action failed, which it
-	// reports. The action stays pending until the caller shows the answer,
-	// so the actions are offered again in the render that shows it.
+	// reports. A whole-file stage from the open file names the version the
+	// user is looking at by its modification time, so it refuses a file that
+	// changed on disk since; the list's buttons act on files that were never
+	// opened, so they name none. The action stays pending until the caller
+	// shows the answer, so the actions are offered again in the render that
+	// shows it.
 	const applyStageAction = useCallback(
 		async (
 			filePath: string,
 			action: "stage" | "unstage",
 			context?: { head: boolean },
+			expectedMtimeMs?: number,
 		): Promise<StageResponse | null> => {
 			setActionPending(true);
 			try {
@@ -532,12 +537,16 @@ export function FilesPage({
 					{
 						method: "POST",
 						headers: { "Content-Type": "application/json" },
-						body: JSON.stringify({ path: filePath, context }),
+						body: JSON.stringify({ path: filePath, context, expectedMtimeMs }),
 					},
 				);
 				if (!res.ok) {
 					const body = await res.json().catch(() => null);
-					showError(body?.error?.message ?? `Request failed (${res.status})`);
+					showError(
+						body?.error?.code === "FILE_MODIFIED"
+							? "The file changed since it was loaded. Reload before staging."
+							: (body?.error?.message ?? `Request failed (${res.status})`),
+					);
 					setActionPending(false);
 					return null;
 				}
@@ -805,7 +814,7 @@ export function FilesPage({
 	);
 
 	const handleWholeFileAction = useCallback(
-		async (staged: boolean) => {
+		async (staged: boolean, mtimeMs: number | null) => {
 			// Staging the whole file acts on it as saved, not as shown, so it
 			// waits until the editor's edits are saved.
 			if (selectedPath === null || (!staged && editorDirty)) return;
@@ -819,6 +828,9 @@ export function FilesPage({
 				selectedPath,
 				staged ? "unstage" : "stage",
 				toWorkingTree ? { head: false } : undefined,
+				// The bar offers Save, not Stage, while the buffer has unsaved
+				// edits, so the text on screen is the file as loaded or saved.
+				!staged && mtimeMs !== null ? mtimeMs : undefined,
 			);
 			if (answer === null) return;
 			if (toWorkingTree) {
@@ -861,8 +873,8 @@ export function FilesPage({
 			(staged: boolean) =>
 			(label: string): FileAction => ({
 				label,
-				onClick: () => {
-					void handleWholeFileAction(staged);
+				onClick: (mtimeMs) => {
+					void handleWholeFileAction(staged, mtimeMs);
 				},
 				// The working tree's bar offers Save in its place while the
 				// buffer has unsaved edits, so only refused writes need
