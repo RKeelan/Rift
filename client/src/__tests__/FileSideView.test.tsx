@@ -10,6 +10,7 @@ import type { FileContext } from "../components/TextFileEditor.tsx";
 import {
 	type AnsweredContext,
 	FileSideView,
+	type SavedDiff,
 	useChangeContext,
 } from "../pages/FileSideView.tsx";
 
@@ -818,5 +819,113 @@ describe("the change context a stage or unstage answers with", () => {
 		);
 		expect(view?.state.doc.toString()).toBe(ONE_STAGED.comparison);
 		expect(urls).toEqual([]);
+	});
+});
+
+describe("the working tree's diff a save answers with", () => {
+	function saved(overrides: Partial<SavedDiff> = {}): SavedDiff {
+		return {
+			repoName: "test-repo",
+			path: "notes.txt",
+			refreshToken: 0,
+			diffRefreshToken: 1,
+			diff: { diff: SAVED_DIFF, truncated: false },
+			...overrides,
+		};
+	}
+
+	// Opens the working tree's side, its comparison and diff answered.
+	async function openContext() {
+		const requests = serveHeld();
+		const view = renderContext(options());
+		await waitFor(() => {
+			expect(requests.bases.length).toBe(1);
+			expect(requests.diffs.length).toBe(1);
+		});
+		await act(async () => {
+			requests.bases[0].answer(new Response("a\nb\n"));
+			requests.diffs[0].answer(diffResponse(DIFF));
+		});
+		await waitFor(() => {
+			expect(view.result.current.diffLoading).toBe(false);
+		});
+		return { ...requests, ...view };
+	}
+
+	test("hands the working tree its new diff in the render that makes the refresh, without asking", async () => {
+		const { result, rerender, bases, diffs } = await openContext();
+
+		rerender(options({ diffRefreshToken: 1, savedDiff: saved() }));
+
+		expect(result.current).toEqual({
+			comparisonContent: "a\nb\n",
+			diff: SAVED_DIFF,
+			diffExact: true,
+			diffLoading: false,
+		});
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		expect(bases.length).toBe(1);
+		expect(diffs.length).toBe(1);
+	});
+
+	test("asks git for the diff when the save's is for another file, or the index has changed since the save was sent", async () => {
+		for (const [current, other] of [
+			[{}, saved({ path: "other.txt" })],
+			[{ refreshToken: 1 }, saved()],
+		] as const) {
+			const { result, rerender, diffs } = await openContext();
+
+			rerender(options({ ...current, diffRefreshToken: 1, savedDiff: other }));
+
+			expect(result.current.diffLoading).toBe(true);
+			await waitFor(() => {
+				expect(diffs.length).toBe(2);
+			});
+			cleanup();
+		}
+	});
+
+	test("gives the staged side nothing of it", async () => {
+		const urls: string[] = [];
+		globalThis.fetch = ((input: string) => {
+			urls.push(input);
+			return new Promise<Response>(() => {});
+		}) as unknown as typeof fetch;
+
+		const { result } = renderContext(
+			options({ staged: true, diffRefreshToken: 1, savedDiff: saved() }),
+		);
+
+		expect(result.current.diffLoading).toBe(true);
+		await waitFor(() => {
+			expect(urls.filter((url) => url.includes("/api/git/diff")).length).toBe(
+				1,
+			);
+		});
+	});
+
+	test("takes a refusal in the save's answer as the request's answer, and reports it", async () => {
+		const errors: string[] = [];
+		const { result, rerender, diffs } = await openContext();
+
+		rerender(
+			options({
+				diffRefreshToken: 1,
+				showError: (message) => errors.push(message),
+				savedDiff: saved({
+					diff: {
+						status: 500,
+						error: { code: "GIT_ERROR", message: "git diff failed" },
+					},
+				}),
+			}),
+		);
+
+		expect(result.current.diff).toBeNull();
+		expect(result.current.diffLoading).toBe(false);
+		await waitFor(() => {
+			expect(errors).toEqual(["git diff failed"]);
+		});
+		expect(diffs.length).toBe(1);
 	});
 });

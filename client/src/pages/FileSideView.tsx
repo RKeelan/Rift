@@ -6,6 +6,7 @@ import {
 	type FileAction,
 	type FileContext,
 	type Refusal,
+	type SavedContext,
 	TextFileEditor,
 } from "../components/TextFileEditor.tsx";
 
@@ -30,6 +31,19 @@ export interface AnsweredContext {
 	context: FileContext;
 }
 
+/**
+ * The working tree's diff a save answered with, and the tokens it holds for:
+ * the save's own refresh of the diff, and the refresh of the index current
+ * when the save was sent.
+ */
+export interface SavedDiff {
+	repoName: string;
+	path: string;
+	refreshToken: number;
+	diffRefreshToken: number;
+	diff: SavedContext["unstagedDiff"];
+}
+
 interface ChangeContextOptions {
 	repoName: string;
 	path: string;
@@ -39,7 +53,7 @@ interface ChangeContextOptions {
 	// comparison and git's diff are both read afresh.
 	refreshToken: number;
 	// Bumped after a save, which changes the working tree but not the index, so
-	// only the working tree's diff is refetched.
+	// only the working tree's diff is taken afresh.
 	diffRefreshToken: number;
 	// Bumped when HEAD may have changed, which only the staged side compares
 	// against.
@@ -48,6 +62,10 @@ interface ChangeContextOptions {
 	// side its comparison and diff in place of fetching them, for the file
 	// and the tokens it holds for.
 	answeredContext?: AnsweredContext | null;
+	// The working tree's diff the last save answered with, which the working
+	// tree takes in place of fetching it, for the file and the tokens it
+	// holds for.
+	savedDiff?: SavedDiff | null;
 	showError: (message: string) => void;
 }
 
@@ -111,7 +129,8 @@ export function indexText(context: FileContext): string | undefined {
  * it: the index and the unstaged diff for the working tree, HEAD and the
  * staged diff for the index. The two are fetched together, and the diff
  * counts as loading until both have landed. After a stage or unstage, both
- * come from the action's answer instead, and land at once.
+ * come from the action's answer instead, and land at once, and after a save
+ * the working tree's diff comes from the save's answer.
  */
 export function useChangeContext({
 	repoName,
@@ -122,6 +141,7 @@ export function useChangeContext({
 	diffRefreshToken,
 	headToken,
 	answeredContext,
+	savedDiff,
 	showError,
 }: ChangeContextOptions) {
 	// The last answer to a request for the copy of the file that this side
@@ -291,7 +311,7 @@ export function useChangeContext({
 	// The working tree's diff the answer gives is against nothing just when
 	// the answer lists the file as untracked, as the status it gave the side
 	// does. A save since the action was sent outdates it.
-	const givenDiff =
+	const answeredDiff =
 		given === null || diffRequest === null
 			? null
 			: staged
@@ -299,6 +319,19 @@ export function useChangeContext({
 				: given.diffRefreshToken === diffRefreshToken
 					? given.context.unstagedDiff
 					: null;
+	// A save's answer gives the working tree's diff, in the same terms, for
+	// the refresh of the diff the save made. A stage or unstage made while
+	// the save was out outdates it.
+	const savedGiven =
+		!staged &&
+		diffRequest !== null &&
+		savedDiff?.repoName === repoName &&
+		savedDiff.path === path &&
+		savedDiff.refreshToken === refreshToken &&
+		savedDiff.diffRefreshToken === diffRefreshToken
+			? savedDiff.diff
+			: null;
+	const givenDiff = answeredDiff ?? savedGiven;
 	const diffGiven = givenDiff !== null;
 
 	useEffect(() => {
@@ -387,9 +420,9 @@ export function useChangeContext({
 	// without the strips that only git's diff places, and with the new
 	// comparison alone a staged change's deleted lines go before its strip.
 	// So the side hands over a context only once both parts have landed, for
-	// the editor to draw in one step. While a refetch is out, as after a save
-	// or a reload, it goes on handing over the context it last had in full,
-	// and as the side first loads it hands over none.
+	// the editor to draw in one step. While a refetch is out, as after a
+	// reload, it goes on handing over the context it last had in full, and as
+	// the side first loads it hands over none.
 	const side = JSON.stringify([repoName, path, staged]);
 	const [held, setHeld] = useState<{
 		side: string;
@@ -446,7 +479,9 @@ export interface FileSideViewProps extends ChangeContextOptions {
 	otherSide: { available: boolean; show: () => void };
 	// The page's action on the whole file, for this side.
 	fileAction: (label: string) => FileAction;
-	onSaved: () => void;
+	// Called with the repo's changes as a save leaves them, and the working
+	// tree's new diff, when the save's answer gives them.
+	onSaved: (files?: ChangedFile[], context?: SavedContext) => void;
 	// Each is called with the repo's changes as the action leaves them, and
 	// the file's context, when the answer gives it.
 	onStaged: (files: ChangedFile[], context?: FileContext) => void;

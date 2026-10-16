@@ -5677,6 +5677,87 @@ describe("saving", () => {
 		);
 	});
 
+	describe("the file's changes in the answer", () => {
+		const CHANGES = [{ path: "notes.md", status: "modified", staged: false }];
+		const CONTEXT = {
+			unstagedDiff: {
+				diff: "@@ -1 +1,2 @@\n+new line\n alpha\n",
+				truncated: false,
+			},
+		};
+
+		// Edits and saves the file, its save answered with `answer`, and
+		// returns the save's body and what the page was called back with.
+		async function saveWith(answer: object, onPage = true) {
+			const bodies: unknown[] = [];
+			const calls: unknown[][] = [];
+			globalThis.fetch = (async (_input: string, init?: RequestInit) => {
+				if (init?.method === "PUT") {
+					bodies.push(JSON.parse(init.body as string));
+					return new Response(JSON.stringify(answer), {
+						headers: { "Content-Type": "application/json" },
+					});
+				}
+				return new Response("alpha\n", {
+					headers: { "x-file-mtime-ms": "1" },
+				});
+			}) as unknown as typeof fetch;
+			const { container } = render(
+				<TextFileEditor
+					filePath="notes.md"
+					repo="test-repo"
+					onSaved={onPage ? (...args) => calls.push(args) : undefined}
+				/>,
+			);
+			await waitFor(() => {
+				expect(container.querySelector(".cm-content")).not.toBeNull();
+			});
+			const { EditorView } = await import("@codemirror/view");
+			const view = EditorView.findFromDOM(
+				container.querySelector(".cm-editor") as HTMLElement,
+			);
+			act(() => {
+				view?.dispatch({ changes: { from: 0, insert: "new line\n" } });
+			});
+			fireEvent.click(await enabledButton("Save"));
+			await waitFor(() => {
+				expect(bodies.length).toBe(1);
+				expect(barStatus(container)).toBe("");
+			});
+			return { body: bodies[0], calls };
+		}
+
+		test("asks for them when the page draws from them, and hands them over", async () => {
+			const { body, calls } = await saveWith({
+				mtimeMs: 2,
+				files: CHANGES,
+				context: CONTEXT,
+			});
+
+			expect(body).toEqual({
+				content: "new line\nalpha\n",
+				expectedMtimeMs: 1,
+				context: {},
+			});
+			expect(calls).toEqual([[CHANGES, CONTEXT]]);
+		});
+
+		test("tells the page to read them afresh when the answer leaves them out", async () => {
+			const { calls } = await saveWith({ mtimeMs: 2 });
+
+			expect(calls).toEqual([[]]);
+		});
+
+		test("asks for nothing more than the save without a page to draw them", async () => {
+			const { body } = await saveWith({ mtimeMs: 2 }, false);
+
+			expect(body).toEqual({
+				content: "new line\nalpha\n",
+				expectedMtimeMs: 1,
+			});
+		});
+	});
+
 	describe("drafts", () => {
 		const REPO = "test-repo";
 		const PATH = "notes.md";

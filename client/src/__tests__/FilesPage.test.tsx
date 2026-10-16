@@ -1032,7 +1032,7 @@ describe("FilesPage", () => {
 		});
 	});
 
-	test("refetches the diff after the editor saves", async () => {
+	test("refetches the diff after a save whose answer leaves it out", async () => {
 		let diffRequests = 0;
 
 		globalThis.fetch = mock(
@@ -2842,6 +2842,449 @@ describe("staging and unstaging from the editor", () => {
 					.length,
 			).toBe(5);
 		});
+	});
+});
+
+describe("saving from the editor", () => {
+	// A file whose first line is changed in the working tree, and nothing
+	// staged.
+	const INDEX = "one\ntwo\nthree\n";
+	const WORKING = "ONE\ntwo\nthree\n";
+	const DIFF = "@@ -1,3 +1,3 @@\n-one\n+ONE\n two\n three\n";
+	// The file once its third line is changed too, and saved.
+	const SAVED = "ONE\ntwo\nTHREE\n";
+	const SAVED_DIFF = "@@ -1,3 +1,3 @@\n-one\n+ONE\n two\n-three\n+THREE\n";
+	const FILES = [{ path: "app.ts", status: "modified", staged: false }];
+	// The repo's changes as the save leaves them, with a file changed
+	// elsewhere meanwhile, which only the answer can have told the page of.
+	const SAVED_FILES = [
+		...FILES,
+		{ path: "other.ts", status: "untracked", staged: false },
+	];
+
+	// The answer to a save that asked for the file's context.
+	function savedAnswer(diff: string, mtimeMs = 2) {
+		return json({
+			mtimeMs,
+			files: SAVED_FILES,
+			context: { unstagedDiff: { diff, truncated: false } },
+		});
+	}
+
+	// Serves the file, answering each save with `answer`. Returns every
+	// request, by method and URL, and each save's body.
+	function serveFile(answer: (save: number) => Response | Promise<Response>) {
+		const requests: string[] = [];
+		const saves: unknown[] = [];
+		globalThis.fetch = mock(
+			async (input: string | URL | Request, init?: RequestInit) => {
+				const url = typeof input === "string" ? input : input.toString();
+				requests.push(`${init?.method ?? "GET"} ${url}`);
+				if (init?.method === "PUT") {
+					saves.push(JSON.parse(String(init.body)));
+					return answer(saves.length);
+				}
+				if (url.includes("/api/git/status")) return json({ files: FILES });
+				if (url.includes("/api/git/diff")) {
+					return json({ diff: DIFF, truncated: false });
+				}
+				if (url.includes("/api/git/base-content")) return new Response(INDEX);
+				return new Response(WORKING, { headers: { "x-file-mtime-ms": "1" } });
+			},
+		) as typeof fetch;
+		return Object.assign(requests, { saves });
+	}
+
+	// Each request for git's diff, by its `staged` parameter.
+	function diffReads(requests: string[]) {
+		return requests
+			.filter((request) => request.includes("/api/git/diff"))
+			.map((request) =>
+				new URL(request.split(" ")[1], "http://localhost").searchParams.get(
+					"staged",
+				),
+			);
+	}
+
+	// The strips of the side on screen, each by its button's label, greyed
+	// out or not.
+	function strips(container: HTMLElement) {
+		return [
+			...container.querySelectorAll(
+				".changes-editor-view:not(.changes-editor-view--hidden) .cm-changeStrip button",
+			),
+		].map(
+			(button) =>
+				`${button.getAttribute("aria-label")}${greyed(button) ? " (greyed out)" : ""}`,
+		);
+	}
+
+	async function openFile() {
+		const { container } = renderFilesPage(["/files?path=app.ts&staged=false"]);
+		await waitFor(() => {
+			expect(strips(container)).toEqual(["Stage the change at line 1"]);
+		});
+		const { EditorView } = await import("@codemirror/view");
+		const editor = EditorView.findFromDOM(
+			container.querySelector(".cm-editor") as HTMLElement,
+		);
+		if (!editor) throw new Error("no editor");
+		return { container, editor };
+	}
+
+	// Changes the third line, as the saved file has it.
+	function editThirdLine(editor: import("@codemirror/view").EditorView) {
+		act(() => {
+			editor.dispatch({ changes: { from: 8, to: 13, insert: "THREE" } });
+		});
+	}
+
+	async function save(container: HTMLElement) {
+		const button = within(editorBar(container)).getByRole("button", {
+			name: "Save",
+		});
+		await waitFor(() => {
+			expect(greyed(button)).toBe(false);
+		});
+		fireEvent.click(button);
+	}
+
+	test("saves with one request, and draws the strips and the list from its answer", async () => {
+		const requests = serveFile(() => savedAnswer(SAVED_DIFF));
+		const { container, editor } = await openFile();
+		editThirdLine(editor);
+		await waitFor(() => {
+			expect(strips(container)).toEqual([
+				"Stage the change at line 1 (greyed out)",
+			]);
+		});
+		const before = requests.length;
+
+		await save(container);
+
+		await waitFor(() => {
+			expect(strips(container)).toEqual([
+				"Stage the change at line 1",
+				"Stage the change at line 3",
+			]);
+		});
+		expect(screen.queryByText("Unsaved changes") === null).toBe(true);
+		expect(requests.slice(before)).toEqual([
+			"PUT /api/files/content?repo=test-repo&path=app.ts",
+		]);
+		expect(requests.saves).toEqual([
+			{ content: SAVED, expectedMtimeMs: 1, context: {} },
+		]);
+
+		// The list shows the repo's changes the save answered with, without
+		// asking for them.
+		fireEvent.click(backButton(container));
+		await waitFor(() => {
+			expect(listShown(container)).toBe(true);
+		});
+		expect(screen.getByLabelText("Stage other.ts")).toBeDefined();
+		expect(requests.slice(before)).toEqual([
+			"PUT /api/files/content?repo=test-repo&path=app.ts",
+		]);
+	});
+
+	test("keeps edits typed while the save is out unsaved, with the strips greyed out until they are saved", async () => {
+		let finishSave = () => {};
+		const requests = serveFile((save) =>
+			save === 1
+				? new Promise<Response>((resolve) => {
+						finishSave = () => resolve(savedAnswer(SAVED_DIFF));
+					})
+				: savedAnswer(
+						"@@ -1,3 +1,4 @@\n-one\n+ONE\n two\n-three\n+THREE\n+four\n",
+						3,
+					),
+		);
+		const { container, editor } = await openFile();
+		editThirdLine(editor);
+		const before = requests.length;
+
+		await save(container);
+		await within(editorBar(container)).findByRole("button", {
+			name: "Saving...",
+		});
+		act(() => {
+			editor.dispatch({
+				changes: { from: editor.state.doc.length, insert: "four\n" },
+			});
+		});
+		await act(async () => {
+			finishSave();
+		});
+
+		// The answer's diff describes the text saved, not the buffer, so the
+		// strips stay as they were, greyed out, while the newer edit waits to
+		// be saved.
+		await screen.findByText("Unsaved changes");
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		expect(strips(container)).toEqual([
+			"Stage the change at line 1 (greyed out)",
+		]);
+		expect(editor.state.doc.toString()).toBe(`${SAVED}four\n`);
+
+		await save(container);
+
+		await waitFor(() => {
+			expect(strips(container)).toEqual([
+				"Stage the change at line 1",
+				"Stage the change at line 3",
+			]);
+		});
+		expect(requests.slice(before)).toEqual([
+			"PUT /api/files/content?repo=test-repo&path=app.ts",
+			"PUT /api/files/content?repo=test-repo&path=app.ts",
+		]);
+		expect(requests.saves).toEqual([
+			{ content: SAVED, expectedMtimeMs: 1, context: {} },
+			{ content: `${SAVED}four\n`, expectedMtimeMs: 2, context: {} },
+		]);
+	});
+
+	test("keeps the edits unsaved, and asks for nothing more, when the file has changed on disk", async () => {
+		const requests = serveFile(() =>
+			json(
+				{
+					error: {
+						code: "FILE_MODIFIED",
+						message: "File changed on disk since it was loaded",
+					},
+				},
+				409,
+			),
+		);
+		const { container, editor } = await openFile();
+		editThirdLine(editor);
+		const before = requests.length;
+
+		await save(container);
+
+		await screen.findByText("File changed on disk since it was loaded");
+		expect(screen.getByText("Unsaved changes")).toBeDefined();
+		expect(strips(container)).toEqual([
+			"Stage the change at line 1 (greyed out)",
+		]);
+		expect(editor.state.doc.toString()).toBe(SAVED);
+		expect(requests.slice(before)).toEqual([
+			"PUT /api/files/content?repo=test-repo&path=app.ts",
+		]);
+	});
+
+	test("reads the file's diff afresh when it opens again after a save", async () => {
+		const requests = serveFile(() => savedAnswer(SAVED_DIFF));
+		const { container, editor } = await openFile();
+		editThirdLine(editor);
+		await save(container);
+		await waitFor(() => {
+			expect(strips(container)).toEqual([
+				"Stage the change at line 1",
+				"Stage the change at line 3",
+			]);
+		});
+		fireEvent.click(backButton(container));
+		await waitFor(() => {
+			expect(listShown(container)).toBe(true);
+		});
+		const before = requests.length;
+
+		fireEvent.click(
+			screen
+				.getByLabelText("Stage app.ts")
+				.closest(".changes-file-row")
+				?.querySelector(".changes-file-entry") as Element,
+		);
+
+		// The working tree may have changed outside Rift meanwhile, so the
+		// save's diff is not taken again.
+		await waitFor(() => {
+			expect(diffReads(requests.slice(before))).toEqual(["false"]);
+		});
+	});
+
+	test("reads the diff and the changes afresh after a save that an unstage overtook", async () => {
+		// The first line's change is staged, and the save changes the third.
+		const STAGED_FILES = [{ path: "app.ts", status: "modified", staged: true }];
+		const UNSTAGED_FILES = FILES;
+		let unstaged = false;
+		let saved = false;
+		let finishSave = () => {};
+		const requests: string[] = [];
+		globalThis.fetch = mock(
+			async (input: string | URL | Request, init?: RequestInit) => {
+				const url = typeof input === "string" ? input : input.toString();
+				requests.push(`${init?.method ?? "GET"} ${url}`);
+				if (init?.method === "PUT") {
+					// The save read the repo before the unstage reached it, so its
+					// diff is against the index as it was.
+					return new Promise<Response>((resolve) => {
+						finishSave = () => {
+							saved = true;
+							resolve(
+								json({
+									mtimeMs: 2,
+									files: [...STAGED_FILES, ...UNSTAGED_FILES],
+									context: {
+										unstagedDiff: {
+											diff: "@@ -1,3 +1,3 @@\n ONE\n two\n-three\n+THREE\n",
+											truncated: false,
+										},
+									},
+								}),
+							);
+						};
+					});
+				}
+				if (init?.method === "POST") {
+					unstaged = true;
+					return json({
+						files: UNSTAGED_FILES,
+						context: {
+							unstagedDiff: { diff: DIFF, truncated: false },
+							stagedDiff: { diff: "", truncated: false },
+							index: { content: INDEX },
+						},
+					});
+				}
+				if (url.includes("/api/git/status")) {
+					return json({ files: unstaged ? UNSTAGED_FILES : STAGED_FILES });
+				}
+				if (url.includes("/api/git/diff")) {
+					const diff = url.includes("staged=true")
+						? DIFF
+						: saved
+							? SAVED_DIFF
+							: "";
+					return json({ diff, truncated: false });
+				}
+				if (url.includes("/api/git/base-content")) {
+					return new Response(
+						url.includes("staged=true") || unstaged ? INDEX : WORKING,
+					);
+				}
+				return new Response(WORKING, { headers: { "x-file-mtime-ms": "1" } });
+			},
+		) as typeof fetch;
+		const { container } = renderFilesPage(["/files?path=app.ts&staged=false"]);
+		await findEditableEditor(container);
+		const { EditorView } = await import("@codemirror/view");
+		const editor = EditorView.findFromDOM(
+			container.querySelector(".cm-editor") as HTMLElement,
+		) as import("@codemirror/view").EditorView;
+		editThirdLine(editor);
+		await save(container);
+		await within(editorBar(container)).findByRole("button", {
+			name: "Saving...",
+		});
+
+		// The staged side unstages its change while the save is out.
+		switchSide(container);
+		fireEvent.click(
+			await screen.findByRole("button", {
+				name: "Unstage the change at line 1",
+			}),
+		);
+		await waitFor(() => {
+			expect(unstaged).toBe(true);
+		});
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		switchSide(container);
+		const before = requests.length;
+		await act(async () => {
+			finishSave();
+		});
+
+		// The save's diff is against the index before the unstage, so the
+		// working tree reads git's diff again, against the index as it is.
+		await waitFor(() => {
+			expect(strips(container)).toEqual([
+				"Stage the change at line 1",
+				"Stage the change at line 3",
+			]);
+		});
+		expect(diffReads(requests.slice(before))).toEqual(["false"]);
+		// So are its changes, which list the change as staged still, so the
+		// page reads them again too, and the file has nothing staged.
+		expect(requests.slice(before)).toContain(
+			"GET /api/git/status?repo=test-repo",
+		);
+		expect(side(container)).toBe("Unstaged (greyed out)");
+	});
+
+	test("draws an untracked file's lines from the save's diff against nothing", async () => {
+		const blobs = `${"0".repeat(40)}..${"3".repeat(40)}`;
+		const newFile = (...lines: string[]) =>
+			[
+				"diff --git a/new.txt b/new.txt",
+				"new file mode 100644",
+				`index ${blobs}`,
+				"--- /dev/null",
+				"+++ b/new.txt",
+				`@@ -0,0 +1,${lines.length} @@`,
+				...lines.map((line) => `+${line}`),
+				"",
+			].join("\n");
+		const files = [{ path: "new.txt", status: "untracked", staged: false }];
+		const requests: string[] = [];
+		const saves: { context?: unknown }[] = [];
+		globalThis.fetch = mock(
+			async (input: string | URL | Request, init?: RequestInit) => {
+				const url = typeof input === "string" ? input : input.toString();
+				requests.push(`${init?.method ?? "GET"} ${url}`);
+				if (init?.method === "PUT") {
+					saves.push(JSON.parse(String(init.body)));
+					return json({
+						mtimeMs: 2,
+						files,
+						context: {
+							unstagedDiff: {
+								diff: newFile("one", "two"),
+								truncated: false,
+								exact: true,
+							},
+						},
+					});
+				}
+				if (url.includes("/api/git/status")) return json({ files });
+				if (url.includes("/api/git/diff")) {
+					return json({ diff: newFile("one"), truncated: false, exact: true });
+				}
+				return new Response("one\n", { headers: { "x-file-mtime-ms": "1" } });
+			},
+		) as typeof fetch;
+		const { container } = renderFilesPage(["/files?path=new.txt&staged=false"]);
+		await waitFor(() => {
+			expect(strips(container)).toEqual(["Stage the change at line 1"]);
+		});
+		const { EditorView } = await import("@codemirror/view");
+		const editor = EditorView.findFromDOM(
+			container.querySelector(".cm-editor") as HTMLElement,
+		) as import("@codemirror/view").EditorView;
+		act(() => {
+			editor.dispatch({ changes: { from: 4, insert: "two\n" } });
+		});
+		const before = requests.length;
+
+		await save(container);
+
+		await waitFor(() => {
+			expect(screen.queryByText("Unsaved changes") === null).toBe(true);
+			expect(strips(container)).toEqual(["Stage the change at line 1"]);
+		});
+		expect(
+			container.querySelectorAll(
+				".changes-editor-view:not(.changes-editor-view--hidden) .cm-changedLine--added",
+			).length,
+		).toBe(2);
+		expect(requests.slice(before)).toEqual([
+			"PUT /api/files/content?repo=test-repo&path=new.txt",
+		]);
+		// It says the file is untracked, so the server reads its diff against
+		// nothing alongside the status.
+		expect(saves.map((body) => body.context)).toEqual([{ untracked: true }]);
 	});
 });
 

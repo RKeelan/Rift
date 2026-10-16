@@ -620,11 +620,59 @@ function validateContextRequest(
 }
 
 /**
+ * git's diff, as /api/git/diff answers with it, or, when git fails, the
+ * refusal a stage that fails answers with, giving git's message.
+ */
+function readDiff(toplevel: string, args: string[]): Promise<DiffAnswer> {
+	return gitText(toplevel, args).then(
+		(diff) => diffAnswer(diff, false),
+		(err: unknown) => ({
+			status: 500,
+			error: {
+				code: "GIT_ERROR",
+				message: err instanceof Error ? err.message : "Git command failed",
+			},
+		}),
+	);
+}
+
+/**
+ * The repository's changes and the working tree's diff of a file, read at
+ * once. Whether the file is untracked, which makes its diff the one against
+ * nothing, comes from the status, so the diff read alongside it is the one
+ * the caller expects, tracked unless it says otherwise, and the other is read
+ * once the status shows the guess was wrong.
+ */
+export async function readWorkingTreeChange(
+	toplevel: string,
+	relativePath: string,
+	expectUntracked = false,
+): Promise<{ files: StatusEntry[]; unstagedDiff: DiffAnswer }> {
+	const gitPath = toGitPath(relativePath);
+	const readUnstagedDiff = (untracked: boolean) =>
+		untracked
+			? readUntrackedDiff(toplevel, relativePath)
+			: readDiff(toplevel, ["diff", "--full-index", "--", relativePath]);
+	const [status, expectedDiff] = await Promise.all([
+		gitStatus(toplevel),
+		readUnstagedDiff(expectUntracked),
+	]);
+	const untracked = status.some(
+		(file) => file.path === gitPath && file.workingTree === "?",
+	);
+	return {
+		files: buildStatusEntries(status),
+		unstagedDiff:
+			untracked === expectUntracked
+				? expectedDiff
+				: await readUnstagedDiff(untracked),
+	};
+}
+
+/**
  * A file's change context, its parts read at once, with the repository's
  * changes read alongside. A diff that fails is refused as a stage that fails
- * is, with git's message. Whether the file is untracked, which decides the
- * working tree's diff, comes from the status, so an untracked file's diff is
- * read once that has.
+ * is, with git's message.
  */
 async function readChangeContext(
 	toplevel: string,
@@ -632,33 +680,22 @@ async function readChangeContext(
 	withHead: boolean,
 ): Promise<{ files: StatusEntry[]; context: FileContext }> {
 	const gitPath = toGitPath(relativePath);
-	const readDiff = (args: string[]): Promise<DiffAnswer> =>
-		gitText(toplevel, args).then(
-			(diff) => diffAnswer(diff, false),
-			(err: unknown) => ({
-				status: 500,
-				error: {
-					code: "GIT_ERROR",
-					message: err instanceof Error ? err.message : "Git command failed",
-				},
-			}),
-		);
-	const [status, trackedDiff, stagedDiff, index, head] = await Promise.all([
-		gitStatus(toplevel),
-		readDiff(["diff", "--full-index", "--", relativePath]),
-		readDiff(["diff", "--cached", "--full-index", "--", relativePath]),
+	const [{ files, unstagedDiff }, stagedDiff, index, head] = await Promise.all([
+		readWorkingTreeChange(toplevel, relativePath),
+		readDiff(toplevel, [
+			"diff",
+			"--cached",
+			"--full-index",
+			"--",
+			relativePath,
+		]),
 		readCopy(toplevel, gitPath, false),
 		withHead ? readCopy(toplevel, gitPath, true) : undefined,
 	]);
-	const untracked = status.some(
-		(file) => file.path === gitPath && file.workingTree === "?",
-	);
 	return {
-		files: buildStatusEntries(status),
+		files,
 		context: {
-			unstagedDiff: untracked
-				? await readUntrackedDiff(toplevel, relativePath)
-				: trackedDiff,
+			unstagedDiff,
 			stagedDiff,
 			index,
 			...(head === undefined ? {} : { head }),

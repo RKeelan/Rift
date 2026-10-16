@@ -2,12 +2,14 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type { Request, Response } from "express";
 import { Router } from "express";
+import { locateRepo } from "../gitRepo.js";
 import {
 	type RepoRoot,
 	resolveRepoInRoots,
 	resolveSafePath,
 } from "../pathUtils.js";
 import { gitText } from "../runGit.js";
+import { readWorkingTreeChange } from "./git.js";
 
 const MAX_ENTRIES = 1000;
 const MAX_FILE_SIZE = 1024 * 1024; // 1 MB
@@ -108,6 +110,54 @@ async function startsWithBom(filePath: string): Promise<boolean> {
 		return bytesRead === UTF8_BOM.length && buffer.equals(UTF8_BOM);
 	} finally {
 		await handle.close();
+	}
+}
+
+type WorkingTreeChange = Awaited<ReturnType<typeof readWorkingTreeChange>>;
+
+// How long a save waits for git to read the file's context. The file is
+// written by then, and a client waiting on a slow or stuck git would go on
+// showing the save as unfinished, so past this the save answers without the
+// context, and the reads' results are dropped when they come.
+export const SAVE_CONTEXT_TIMEOUT_MS = 1000;
+
+/**
+ * What a save that asks for the file's context answers with beside the
+ * file's new modification time: the repository's changes as the save leaves
+ * them, and the working tree's diff, which is all of the file's context that
+ * a save changes, the diff against nothing read alongside the status when
+ * the caller expects the file to be untracked. A file outside any
+ * repository has neither. Nor does a save whose status git cannot read, or
+ * cannot read within SAVE_CONTEXT_TIMEOUT_MS, since the file is written all
+ * the same; the client then reads them as it would after a save that did
+ * not ask.
+ */
+async function readSaveContext(
+	workingDir: string,
+	resolved: string,
+	expectUntracked: boolean,
+): Promise<{
+	files: WorkingTreeChange["files"];
+	context: { unstagedDiff: WorkingTreeChange["unstagedDiff"] };
+} | null> {
+	const read = async () => {
+		const repo = await locateRepo(workingDir);
+		if (!repo) return null;
+		const { files, unstagedDiff } = await readWorkingTreeChange(
+			repo.toplevel,
+			path.relative(repo.toplevel, resolved),
+			expectUntracked,
+		);
+		return { files, context: { unstagedDiff } };
+	};
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const late = new Promise<null>((resolve) => {
+		timer = setTimeout(() => resolve(null), SAVE_CONTEXT_TIMEOUT_MS);
+	});
+	try {
+		return await Promise.race([read().catch(() => null), late]);
+	} finally {
+		clearTimeout(timer);
 	}
 }
 
@@ -332,6 +382,23 @@ export function fileRoutes(roots: RepoRoot[]): Router {
 	});
 
 	// PUT /api/files/content?repo=<name>&path=<file>
+	//   body: { content, expectedMtimeMs, context? }
+	// Responds 409 FILE_MODIFIED, writing nothing, when the file's mtime is no
+	// longer expectedMtimeMs, and otherwise with the written file's new mtime,
+	// `mtimeMs`. One whose body has `context: {}` answers, for a file in a git
+	// repository, with the repo's changes as the save leaves them, `files` as
+	// /api/git/status gives them, and the part of the file's change context a
+	// save changes, as a stage's context gives it:
+	//   context.unstagedDiff  what /api/git/diff answers, with untracked=true
+	//                         when `files` lists the file as untracked
+	// A diff whose git command fails is { status: 500, error } with code
+	// GIT_ERROR and git's message. `context: { untracked: true }` says the
+	// caller expects the file to be untracked, so its diff against nothing is
+	// read alongside the status rather than after it. A save outside a
+	// repository, or one whose status git cannot read within a second, answers
+	// with mtimeMs alone, as one without `context` does. Responds 400
+	// INVALID_CONTEXT when `context` is not an object, with untracked a
+	// boolean if given.
 	router.put("/content", async (req, res) => {
 		const workingDir = await requireRepo(roots, req, res);
 		if (!workingDir) return;
@@ -344,7 +411,7 @@ export function fileRoutes(roots: RepoRoot[]): Router {
 			return;
 		}
 
-		const { content, expectedMtimeMs } = req.body ?? {};
+		const { content, expectedMtimeMs, context } = req.body ?? {};
 		if (typeof content !== "string") {
 			res.status(400).json({
 				error: {
@@ -363,6 +430,25 @@ export function fileRoutes(roots: RepoRoot[]): Router {
 				error: {
 					code: "INVALID_MTIME",
 					message: "expectedMtimeMs must be a number",
+				},
+			});
+			return;
+		}
+
+		// A caller that draws the file's changes from the answer asks for its
+		// context.
+		if (
+			context !== undefined &&
+			(typeof context !== "object" ||
+				context === null ||
+				Array.isArray(context) ||
+				!["undefined", "boolean"].includes(typeof context.untracked))
+		) {
+			res.status(400).json({
+				error: {
+					code: "INVALID_CONTEXT",
+					message:
+						"context must be an object, with untracked a boolean if given",
 				},
 			});
 			return;
@@ -411,8 +497,13 @@ export function fileRoutes(roots: RepoRoot[]): Router {
 				: content;
 
 		await fs.writeFile(resolved, toWrite, "utf-8");
-		const updatedStat = await fs.stat(resolved);
-		res.json({ mtimeMs: updatedStat.mtimeMs });
+		const [updatedStat, saveContext] = await Promise.all([
+			fs.stat(resolved),
+			context === undefined
+				? null
+				: readSaveContext(workingDir, resolved, context.untracked === true),
+		]);
+		res.json({ mtimeMs: updatedStat.mtimeMs, ...saveContext });
 	});
 
 	return router;
