@@ -60,6 +60,21 @@ interface StageResponse extends StatusResponse {
 	context?: FileContext;
 }
 
+// How a read of the status shows while it is out: as the list loading, as
+// Refresh spinning, or not at all, behind a list already shown.
+type StatusRead = "load" | "refresh" | "quiet";
+
+// The folders read again when the tab comes back from another, with any
+// folder holding a path that the status read with them finds joining or
+// leaving the changes: the root alone, not every open folder. Each folder
+// read starts a git process on the server, and with many folders open they
+// would hold up the request of the next tap, such as opening a file. An open
+// folder left unread misses only a file that appears or disappears without
+// the status showing it, as when one is created and committed outside Rift.
+// The poll misses that too while the list is shown, and Refresh reads every
+// folder.
+const FOLDERS_READ_ON_RETURN = ["."];
+
 // How long the new commit's hash stands in for the refresh time.
 const COMMIT_NOTE_MS = 10_000;
 
@@ -116,11 +131,14 @@ const WRITES_DISABLED_TITLE = "The server does not allow changes";
 /**
  * The repo's files: its changes in sections, staged, unstaged and untracked,
  * then the unchanged files as a folder tree. A directory without git has no
- * changes to show, so it gets the tree alone.
+ * changes to show, so it gets the tree alone. While another tab is shown the
+ * page stays built, hidden, with nothing open.
  */
 export function FilesPage({
+	hidden = false,
 	writesAllowed = true,
 }: {
+	hidden?: boolean;
 	writesAllowed?: boolean | null;
 }) {
 	// Whether the server allows changes is unknown (null) until it answers,
@@ -184,8 +202,8 @@ export function FilesPage({
 	const [lastCommit, setLastCommit] = useState<string | null>(null);
 	const abortRef = useRef<AbortController | null>(null);
 	const tree = useFileTree(repoName as string);
-	const selectedPath = searchParams.get("path");
-	const selectedStaged = searchParams.get("staged");
+	const selectedPath = hidden ? null : searchParams.get("path");
+	const selectedStaged = hidden ? null : searchParams.get("staged");
 	const hasSelectedFile =
 		selectedPath !== null &&
 		(selectedStaged === "true" || selectedStaged === "false");
@@ -293,13 +311,13 @@ export function FilesPage({
 	}, []);
 
 	const fetchStatus = useCallback(
-		async (isRefresh = false) => {
+		async (read: StatusRead = "load") => {
 			// Abort any in-flight request before starting a new one
 			abortRef.current?.abort();
 
-			if (isRefresh) {
+			if (read === "refresh") {
 				setRefreshing(true);
-			} else {
+			} else if (read === "load") {
 				setLoading(true);
 			}
 
@@ -347,24 +365,25 @@ export function FilesPage({
 		fetchStatus();
 	}, [fetchStatus]);
 
-	// Poll every 3 seconds while the tab is visible
+	// Poll every 3 seconds while the list is visible
 	useEffect(() => {
 		// Every selected file opens in the editor, so skip the poll whenever one
 		// is open: a refetch would disrupt the buffer being edited, or flip a
 		// read-only view out from under the reader. A directory without git has
-		// no changes to poll for, though Refresh still asks again.
-		const paused = fileOpen || notGitRepo;
+		// no changes to poll for, though Refresh still asks again. Behind
+		// another tab, the list is read again as it comes back instead.
+		const paused = fileOpen || notGitRepo || hidden;
 
 		function handleVisibilityChange() {
 			if (document.visibilityState === "visible" && !paused) {
-				fetchStatus(true);
+				fetchStatus("refresh");
 			}
 		}
 
 		document.addEventListener("visibilitychange", handleVisibilityChange);
 		const interval = setInterval(() => {
 			if (document.visibilityState === "visible" && !paused) {
-				fetchStatus(true);
+				fetchStatus("refresh");
 			}
 		}, 3000);
 
@@ -372,7 +391,7 @@ export function FilesPage({
 			document.removeEventListener("visibilitychange", handleVisibilityChange);
 			clearInterval(interval);
 		};
-	}, [fetchStatus, fileOpen, notGitRepo]);
+	}, [fetchStatus, fileOpen, notGitRepo, hidden]);
 
 	const { ensureExpanded, loadedFolderOf, refreshDirectories, refreshLoaded } =
 		tree;
@@ -381,9 +400,26 @@ export function FilesPage({
 	// checkout outside Rift can change them while leaving the status clean
 	// before and after, so nothing in the status would show it.
 	const handleRefresh = useCallback(() => {
-		fetchStatus(true);
+		fetchStatus("refresh");
 		void refreshLoaded();
 	}, [fetchStatus, refreshLoaded]);
+
+	// Folders to read again once the next status is taken, with any it says
+	// to read.
+	const foldersAfterStatus = useRef<string[]>([]);
+
+	// Coming back from another tab shows the list as it was left, and reads
+	// it again behind it without showing it: the status, then the folders
+	// read on return. Reads that find nothing changed leave the list as it
+	// is, so nothing in it moves or redraws.
+	const wasHidden = useRef(hidden);
+	useEffect(() => {
+		const reshown = wasHidden.current && !hidden;
+		wasHidden.current = hidden;
+		if (!reshown) return;
+		foldersAfterStatus.current = FOLDERS_READ_ON_RETURN;
+		fetchStatus("quiet");
+	}, [hidden, fetchStatus]);
 
 	const handleSelectFile = useCallback(
 		(entry: StatusEntry) => {
@@ -438,7 +474,8 @@ export function FilesPage({
 	// appears or disappears outside Rift afterwards. The status shows such a
 	// file as a path joining or leaving the changes, as when a new file or a
 	// deletion is committed, so the folder holding it is read again. A path
-	// that joins only as modified, as on a save, was already listed.
+	// that joins only as modified, as on a save, was already listed. Folders
+	// waiting on the status are read with these, each once.
 	const changedPathsRef = useRef<Set<string> | null>(null);
 	const treeLoading = tree.rootLoading;
 	useEffect(() => {
@@ -457,8 +494,13 @@ export function FilesPage({
 			),
 			...[...previous].filter((path) => !changed.has(path)),
 		];
-		if (moved.length === 0) return;
-		void refreshDirectories([...new Set(moved.map(loadedFolderOf))]);
+		const folders = new Set([
+			...foldersAfterStatus.current,
+			...moved.map(loadedFolderOf),
+		]);
+		foldersAfterStatus.current = [];
+		if (folders.size === 0) return;
+		void refreshDirectories([...folders]);
 	}, [files, loading, treeLoading, loadedFolderOf, refreshDirectories]);
 
 	// Stages or unstages a whole file, asking for the file's context only
@@ -612,7 +654,7 @@ export function FilesPage({
 					token: token + 1,
 					saved: null,
 				}));
-				fetchStatus(true);
+				fetchStatus("refresh");
 				return;
 			}
 			applyChangedFiles(changed);
@@ -708,7 +750,7 @@ export function FilesPage({
 			setIndexChange(({ token }) => ({ token: token + 1, answer: null }));
 			setHeadToken((value) => value + 1);
 			if (!staged) setStagedContentToken((value) => value + 1);
-			fetchStatus(true);
+			fetchStatus("refresh");
 		},
 		[fetchStatus],
 	);
@@ -978,12 +1020,14 @@ export function FilesPage({
 		</>
 	);
 
-	// The list stays built and laid out behind an open file, hidden, so going
-	// back only shows it again, scrolled where it was. Its poll pauses
-	// meanwhile.
+	// The list stays built and laid out behind an open file or another tab,
+	// hidden, so going back only shows it again, scrolled where it was. Its
+	// poll pauses meanwhile.
 	return (
-		<div className="files-view">
-			<div className={`changes-page${fileOpen ? " changes-page--hidden" : ""}`}>
+		<div className={`files-view${hidden ? " files-view--hidden" : ""}`}>
+			<div
+				className={`changes-page${fileOpen || hidden ? " changes-page--hidden" : ""}`}
+			>
 				<header className="changes-header">
 					<h1 className="changes-header-title">Files</h1>
 					{lastCommit !== null ? (

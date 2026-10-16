@@ -1122,12 +1122,11 @@ class Client {
 	}
 
 	// Leaves for the History tab, then times coming back to the Files tab
-	// until its list shows the changes and the tree again, which reads the
-	// status and the top folder afresh.
+	// until its list shows the changes and the tree again.
 	async openFilesTab() {
 		await this.tapOn(this.tabLink("History"));
 		await this.waitFor(
-			`location.pathname.endsWith("/history") && !document.querySelector(".changes-page")`,
+			`location.pathname.endsWith("/history") && !document.querySelector(${js(LIST)})`,
 			"the History tab",
 		);
 		await Bun.sleep(600);

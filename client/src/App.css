@@ -52,6 +52,16 @@ body,
 	overflow: hidden;
 }
 
+/* A session's tab, above the tab bar. The Files tab stays in it, under
+   another tab's page while that tab is shown, and isolation keeps that
+   stacking inside it. */
+.session-view {
+	position: relative;
+	flex: 1;
+	min-height: 0;
+	isolation: isolate;
+}
+
 .page {
 	flex: 1;
 	overflow-y: auto;
