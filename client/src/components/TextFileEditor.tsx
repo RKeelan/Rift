@@ -931,6 +931,44 @@ export interface ChangedFile {
 	staged: boolean;
 }
 
+/** A request the server refuses: the status it answers with, and why. */
+export interface Refusal {
+	status: number;
+	error: { code: string; message: string };
+}
+
+/** git's diff of one side of a file, as the diff endpoint answers with it. */
+export interface DiffAnswer {
+	diff: string;
+	truncated: boolean;
+	// Given for an untracked file's diff: whether it describes the file exactly.
+	exact?: boolean;
+}
+
+/**
+ * A file's change context as a stage or unstage leaves it, which it answers
+ * with beside the repo's changes. Each part is what the endpoint that reads
+ * it answers: the working tree's diff (against nothing while the file is
+ * untracked), the index's diff, and the index's and HEAD's copies of the
+ * file, or the endpoint's refusal.
+ */
+export interface FileContext {
+	unstagedDiff: DiffAnswer | Refusal;
+	stagedDiff: DiffAnswer | Refusal;
+	index: { content: string } | Refusal;
+	// Given only when the request asked for it.
+	head?: { content: string } | Refusal;
+}
+
+/**
+ * What a stage or unstage answers with. A server that does not give the
+ * file's context leaves it out, and the page then reads it afresh.
+ */
+interface StageAnswer {
+	files: ChangedFile[];
+	context?: FileContext;
+}
+
 export interface TextFileEditorProps {
 	filePath: string;
 	repo: string;
@@ -939,7 +977,7 @@ export interface TextFileEditorProps {
 	comparisonContent?: string;
 	changeDiff?: string | null;
 	// True while the page fetches git's diff and the comparison it is read
-	// against. While it refetches them, as after a stage, the page goes on
+	// against. While it refetches them, as after a save, the page goes on
 	// handing over the ones it had before, so the changes stay drawn as they
 	// were until the new ones have both arrived. As the file first loads it
 	// hands over neither, and the editor shows the file once both have
@@ -966,13 +1004,30 @@ export interface TextFileEditorProps {
 	// Changing it reloads the file, as when the index changes under a staged
 	// view from elsewhere.
 	reloadKey?: number;
+	// The text of a view that is not edited, when the page has it already, as
+	// a stage or unstage hands the staged view the index's text. The editor
+	// shows it without loading the file, and a new text takes the buffer's
+	// place in the same step as the change context handed over with it, so the
+	// editor, its selection and the cursor's line on screen stay as they were.
+	text?: string;
+	// Whether the editor is out of sight, as the side of a file not on screen
+	// is. Text handed to a hidden editor moves it to the change the text
+	// brings, as a stage from the file's other side does, so that the change
+	// is on screen once the side is; one on screen keeps its place.
+	hidden?: boolean;
+	// Whether a stage or unstage by line asks for HEAD's copy of the file with
+	// the change context its answer carries, which the page needs only to
+	// build the file's staged side from the answer.
+	askForHead?: boolean;
 	onSaved?: () => void;
-	// Called with the repo's changes once a stage or unstage has made them.
-	onStaged?: (files: ChangedFile[]) => void;
+	// Called with the repo's changes once a stage or unstage has made them,
+	// and, for one by line, the file's change context as it leaves it, when
+	// the server gives it.
+	onStaged?: (files: ChangedFile[], context?: FileContext) => void;
 	// Called in place of onStaged when the editor stages an untracked file
 	// whole, so the page can treat it as it does its own action on the file.
 	onFileStaged?: (files: ChangedFile[]) => void;
-	onUnstaged?: (files: ChangedFile[]) => void;
+	onUnstaged?: (files: ChangedFile[], context?: FileContext) => void;
 	// Called when the user reloads the file, so the page can refetch the change
 	// context that git's line numbers come from along with it.
 	onReload?: () => void;
@@ -1007,6 +1062,9 @@ export function TextFileEditor({
 	staged = false,
 	deleted = false,
 	reloadKey = 0,
+	text,
+	hidden = false,
+	askForHead = false,
 	onSaved,
 	onStaged,
 	onFileStaged,
@@ -1024,6 +1082,9 @@ export function TextFileEditor({
 	const applyLineWrapRef = useRef<((wrap: boolean) => void) | null>(null);
 	const scrollToLineRef = useRef<((lineNumber: number) => void) | null>(null);
 	const replaceDocRef = useRef<((text: string) => void) | null>(null);
+	const takeTextRef = useRef<
+		((text: string, toChange: boolean) => void) | null
+	>(null);
 	// Undo and Redo in the menu reach the editor's history through this, and
 	// are greyed out while it holds nothing to undo or redo.
 	const historyCommandsRef = useRef<{
@@ -1145,8 +1206,8 @@ export function TextFileEditor({
 		[],
 	);
 
-	// The change context is refetched independently of the buffer, as after a
-	// stage or a save. The editor reads it through this ref and redraws its
+	// The change context changes independently of the buffer, as after a stage
+	// or a save. The editor reads it through this ref and redraws its
 	// decorations in place, keeping the buffer, its selection, and its scroll
 	// position. An untracked file's inexact diff names no lines that staging
 	// could act on, so its lines are marked from its content instead.
@@ -1159,9 +1220,9 @@ export function TextFileEditor({
 	});
 
 	// Set when the editor itself has just changed what git's diff should say, by
-	// saving or by unstaging in place, and cleared when the page hands it the
-	// refetched context. Until then the old diff is known to be out of date, not
-	// evidence of a change on disk.
+	// saving, and cleared when the page hands it the refetched context. Until
+	// then the old diff is known to be out of date, not evidence of a change on
+	// disk.
 	const [contextStale, setContextStale] = useState(false);
 
 	// Whether the file's text is on screen. Once the file loads, the text
@@ -1186,18 +1247,52 @@ export function TextFileEditor({
 		return () => clearTimeout(timer);
 	}, [content, textShown]);
 
+	// The text the page last handed over, which a load takes in place of
+	// asking the server for the file.
+	const textRef = useRef(text);
+	// Read as text is handed over, which a switch of sides does not redraw.
+	const hiddenRef = useRef(hidden);
+	useLayoutEffect(() => {
+		hiddenRef.current = hidden;
+	}, [hidden]);
+
 	// The context is drawn, and the view moved to the first change, before
 	// the browser paints the render that hands it over, so no frame shows the
-	// text without them.
+	// text without them. A text handed over with it, as the index's after a
+	// stage or unstage, goes in with it, so the changes it draws are those of
+	// the text they describe.
 	useLayoutEffect(() => {
 		changeContextRef.current = {
 			comparisonContent,
 			changeDiff: decoratedDiff,
 			changeType,
 		};
-		refreshDecorationsRef.current?.();
+		textRef.current = text;
+		const handed =
+			text === undefined
+				? null
+				: {
+						text: normalizeLineEndings(text),
+						separator: detectLineSeparator(text),
+					};
+		if (
+			handed !== null &&
+			loadedFileRef.current !== null &&
+			handed.text !== originalContentRef.current
+		) {
+			lineSeparatorRef.current = handed.separator;
+			originalContentRef.current = handed.text;
+			if (takeTextRef.current) {
+				takeTextRef.current(handed.text, hiddenRef.current);
+			} else {
+				// An editor still being built starts from it.
+				docTextRef.current = handed.text;
+			}
+		} else {
+			refreshDecorationsRef.current?.();
+		}
 		openAtFirstChangeRef.current?.();
-	}, [comparisonContent, decoratedDiff, changeType]);
+	}, [comparisonContent, decoratedDiff, changeType, text]);
 
 	// Runs after the hand-over above, so a load that ends with a new context
 	// opens at the changes it draws, not at those drawn before it.
@@ -1362,36 +1457,45 @@ export function TextFileEditor({
 
 		(async () => {
 			try {
-				// A deleted file has no working tree to read, so it opens against the
-				// version being removed: base-content returns the index blob when the
-				// deletion is unstaged (staged=false) and the HEAD blob when it is
-				// staged (staged=true). A staged change opens against its index blob
-				// (`git show :path`), exposed by base-content with staged=false, so the
-				// lines the user selects match what `git diff --cached` reports for
-				// unstaging.
-				const reload = `${reloadToken}.${reloadKey}`;
-				const contentUrl = deleted
-					? apiUrl(
-							`/api/git/base-content?repo=${encodeURIComponent(repo)}&path=${encodeURIComponent(filePath)}&staged=${staged}&_reload=${reload}`,
-						)
-					: staged
+				// A text the page has already is taken as it is.
+				let text = textRef.current;
+				let nextMtimeMs = Number.NaN;
+				if (text === undefined) {
+					// A deleted file has no working tree to read, so it opens against
+					// the version being removed: base-content returns the index blob
+					// when the deletion is unstaged (staged=false) and the HEAD blob
+					// when it is staged (staged=true). A staged change opens against
+					// its index blob (`git show :path`), exposed by base-content with
+					// staged=false, so the lines the user selects match what `git diff
+					// --cached` reports for unstaging.
+					const reload = `${reloadToken}.${reloadKey}`;
+					const contentUrl = deleted
 						? apiUrl(
-								`/api/git/base-content?repo=${encodeURIComponent(repo)}&path=${encodeURIComponent(filePath)}&staged=false&_reload=${reload}`,
+								`/api/git/base-content?repo=${encodeURIComponent(repo)}&path=${encodeURIComponent(filePath)}&staged=${staged}&_reload=${reload}`,
 							)
-						: apiUrl(
-								`/api/files/content?repo=${encodeURIComponent(repo)}&path=${encodeURIComponent(filePath)}&_reload=${reload}`,
-							);
-				const response = await fetch(contentUrl, {
-					signal: controller.signal,
-				});
+						: staged
+							? apiUrl(
+									`/api/git/base-content?repo=${encodeURIComponent(repo)}&path=${encodeURIComponent(filePath)}&staged=false&_reload=${reload}`,
+								)
+							: apiUrl(
+									`/api/files/content?repo=${encodeURIComponent(repo)}&path=${encodeURIComponent(filePath)}&_reload=${reload}`,
+								);
+					const response = await fetch(contentUrl, {
+						signal: controller.signal,
+					});
 
-				if (!response.ok) {
-					const body = await response.json().catch(() => null);
-					throw new Error(getErrorMessage(body, response.status));
+					if (!response.ok) {
+						const body = await response.json().catch(() => null);
+						throw new Error(getErrorMessage(body, response.status));
+					}
+
+					const fetched = await response.text();
+					nextMtimeMs = Number(response.headers.get(FILE_MTIME_HEADER));
+					// A text the page handed over while the request was out, as a
+					// stage from the file's other side hands the index's, is the
+					// newer.
+					text = textRef.current ?? fetched;
 				}
-
-				const text = await response.text();
-				const nextMtimeMs = Number(response.headers.get(FILE_MTIME_HEADER));
 				if (!active) return;
 				const normalized = normalizeLineEndings(text);
 				lineSeparatorRef.current = detectLineSeparator(text);
@@ -1888,15 +1992,20 @@ export function TextFileEditor({
 			const cursorLineTops = new WeakMap<object, number>();
 
 			// Keeps the cursor's line where it is on screen while the change
-			// decorations are redrawn, as when a save or a stage refetches git's
-			// diff and a strip appears or goes above the line. Left to itself,
+			// decorations are redrawn, as when a save or a stage brings a new
+			// git diff and a strip appears or goes above the line. Left to itself,
 			// CodeMirror holds the line at the top of the view still, so a new
 			// strip pushes every line below it down, the one being typed
 			// included, which with the keyboard up can put it under the bar.
 			// Here the text above the strip moves up instead. CodeMirror makes
 			// the scroll in the measure that follows the redraw, so no frame
-			// shows the line moved.
-			function keepCursorLine(view: import("@codemirror/view").EditorView) {
+			// shows the line moved. A redraw that comes with an edit, as when
+			// the index's text changes under the staged view, keeps the line
+			// still through both, the edit's `changes` naming where it goes.
+			function keepCursorLine(
+				view: import("@codemirror/view").EditorView,
+				changes?: import("@codemirror/state").ChangeSet,
+			) {
 				// The first strips git's diff places come as the file opens, and
 				// the view opens at its first change instead.
 				if (!view.state.field(changeField).stripsPlaced) return [];
@@ -1909,11 +2018,15 @@ export function TextFileEditor({
 				}
 				const top = textTop(view, from);
 				// In CodeMirror's own terms, the line's top stays this far below
-				// the top of the view.
-				const scroll = EditorView.scrollIntoView(from, {
-					y: "start",
-					yMargin: top - view.scrollDOM.scrollTop,
-				});
+				// the top of the view. An effect dispatched with an edit names a
+				// place in the edited text.
+				const scroll = EditorView.scrollIntoView(
+					changes?.mapPos(from) ?? from,
+					{
+						y: "start",
+						yMargin: top - view.scrollDOM.scrollTop,
+					},
+				);
 				cursorLineTops.set(scroll.value as object, top);
 				return [scroll];
 			}
@@ -2260,6 +2373,41 @@ export function TextFileEditor({
 					annotations: Transaction.addToHistory.of(false),
 				});
 			};
+			// Text the page hands over, as the index's after a stage or unstage,
+			// goes in with the change context that came with it, which
+			// changeContextRef already holds, in a single redraw that keeps the
+			// cursor's line where it is on screen. Like text from disk, it is no
+			// step that can be undone. With `toChange`, the view moves instead
+			// to the change that holds the first lines the text changes, as
+			// Next and Previous move to one.
+			takeTextRef.current = (text: string, toChange: boolean) => {
+				const changes = view.state.changes(
+					getLineChanges(view.state.doc.toString(), text),
+				);
+				view.dispatch({
+					changes,
+					annotations: Transaction.addToHistory.of(false),
+					effects: [
+						refreshChangeDecorations.of(),
+						...(toChange ? [] : keepCursorLine(view, changes)),
+					],
+				});
+				if (!toChange) return;
+				const changedAt: number[] = [];
+				changes.iterChangedRanges((_fromA, _toA, fromB) => {
+					changedAt.push(fromB);
+				});
+				const regions = changeRegionsRef.current;
+				if (changedAt.length === 0 || regions.length === 0) return;
+				const line = view.state.doc.lineAt(changedAt[0]).number;
+				// The change whose lines run from the last start at or above the
+				// line, or else the first.
+				const start =
+					regions.filter((regionStart) => regionStart <= line).pop() ??
+					regions[0];
+				lastNavLineRef.current = start;
+				scrollToLineRef.current?.(start);
+			};
 			historyCommandsRef.current = {
 				undo: () => undo(view),
 				redo: () => redo(view),
@@ -2324,6 +2472,7 @@ export function TextFileEditor({
 			applyDraftLockRef.current = null;
 			scrollToLineRef.current = null;
 			replaceDocRef.current = null;
+			takeTextRef.current = null;
 			historyCommandsRef.current = null;
 			pickerRef.current = null;
 			selectionHoldRef.current = null;
@@ -2548,6 +2697,7 @@ export function TextFileEditor({
 					expectedBlobs?: string;
 					expectedMtimeMs?: number;
 					untracked?: boolean;
+					context?: { head: boolean };
 				} = {
 					path: filePath,
 				};
@@ -2577,6 +2727,9 @@ export function TextFileEditor({
 					if (changeType === "untracked") {
 						body.untracked = true;
 					}
+					// The page draws the file from the answer, which an untracked
+					// file staged whole leaves for the list.
+					body.context = { head: askForHead };
 				}
 				if (holdsSelection) selectionHoldRef.current?.hold();
 
@@ -2598,7 +2751,7 @@ export function TextFileEditor({
 					const errorBody = await response.json().catch(() => null);
 					throw new Error(getErrorMessage(errorBody, response.status));
 				}
-				const { files } = (await response.json()) as { files: ChangedFile[] };
+				const { files, context } = (await response.json()) as StageAnswer;
 
 				// Staging leaves the buffer as it was, so picks in other changes
 				// still name their lines, and a change staged whole drops only its
@@ -2612,7 +2765,7 @@ export function TextFileEditor({
 				if (wholeFile && onFileStaged) {
 					onFileStaged(files);
 				} else {
-					onStaged?.(files);
+					onStaged?.(files, context);
 				}
 			} catch (err) {
 				// Lines that were not staged stay picked or selected for another try.
@@ -2625,6 +2778,7 @@ export function TextFileEditor({
 			}
 		},
 		[
+			askForHead,
 			byLine,
 			changeType,
 			dirty,
@@ -2657,11 +2811,13 @@ export function TextFileEditor({
 					path: string;
 					ranges: [number, number][];
 					expectedBlobs?: string;
+					context: { head: boolean };
 				} = {
 					path: filePath,
 					ranges: region
 						? [[region.start, region.end]]
 						: (picked ?? selectionToRanges(viewRef.current.state)),
+					context: { head: askForHead },
 				};
 				if (body.ranges.length === 0) return;
 				const blobs = pickerRef.current?.diffBlobs() ?? null;
@@ -2688,36 +2844,13 @@ export function TextFileEditor({
 					const errorBody = await response.json().catch(() => null);
 					throw new Error(getErrorMessage(errorBody, response.status));
 				}
-				const { files } = (await response.json()) as { files: ChangedFile[] };
+				const { files, context } = (await response.json()) as StageAnswer;
 
 				pickerRef.current?.clear();
 				if (holdsSelection) selectionHoldRef.current?.release(true);
-				// The index just changed, so bring the buffer up to the new staged
-				// content; the decorations then shrink to whatever remains staged.
-				// Editing the buffer in place keeps the editor's selection and scroll
-				// position, which reloading would reset to the top of the file.
-				const refreshed = await fetch(
-					apiUrl(
-						`/api/git/base-content?repo=${encodeURIComponent(repo)}&path=${encodeURIComponent(filePath)}&staged=false&_reload=${Date.now()}`,
-					),
-				).catch(() => null);
-				// A new file unstaged in full has left the index, which then holds
-				// nothing of it.
-				const text = refreshed?.ok
-					? await refreshed.text()
-					: refreshed?.status === 404
-						? ""
-						: null;
-				if (text !== null && replaceDocRef.current) {
-					const normalized = normalizeLineEndings(text);
-					lineSeparatorRef.current = detectLineSeparator(text);
-					originalContentRef.current = normalized;
-					setContextStale(true);
-					replaceDocRef.current(normalized);
-				} else {
-					setReloadToken((value) => value + 1);
-				}
-				onUnstaged?.(files);
+				// The index just changed, and the page hands the view its new text
+				// with the context the answer gives.
+				onUnstaged?.(files, context);
 			} catch (err) {
 				if (holdsSelection) selectionHoldRef.current?.release(false);
 				setError(
@@ -2727,7 +2860,7 @@ export function TextFileEditor({
 				setUnstaging(false);
 			}
 		},
-		[byLine, filePath, onUnstaged, repo, staged],
+		[askForHead, byLine, filePath, onUnstaged, repo, staged],
 	);
 
 	// The editor stages or unstages picked or selected lines, and each change

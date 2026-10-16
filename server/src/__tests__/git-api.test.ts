@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { execFileSync, execSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -1742,6 +1743,292 @@ describe("POST /api/git/stage and /api/git/unstage (new files by line)", () => {
 		]);
 
 		await removeFile("round.txt");
+	});
+});
+
+describe("POST /api/git/stage and /api/git/unstage (the file's new context)", () => {
+	let reposRoot: string;
+	let repoDir: string;
+	let app: ReturnType<typeof createApp>;
+
+	beforeAll(async () => {
+		reposRoot = await fs.mkdtemp(path.join(os.tmpdir(), "rift-git-context-"));
+		repoDir = path.join(reposRoot, repoName);
+		await fs.mkdir(repoDir);
+
+		execSync("git init", { cwd: repoDir });
+		execSync("git config user.email 'you@example.com'", { cwd: repoDir });
+		execSync("git config user.name 'You'", { cwd: repoDir });
+		execSync("git config core.autocrlf false", { cwd: repoDir });
+
+		app = createApp(makeConfig(reposRoot));
+	});
+
+	afterAll(async () => {
+		await fs.rm(reposRoot, { recursive: true, force: true });
+	});
+
+	async function commitFile(name: string, content: string): Promise<void> {
+		await fs.writeFile(path.join(repoDir, name), content);
+		execSync(`git add ${name}`, { cwd: repoDir });
+		execSync(`git commit -m "add ${name}"`, { cwd: repoDir });
+	}
+
+	// What each endpoint the context stands for answers now, in the context's
+	// terms: a diff as its body, a copy as its text, and a refusal as its
+	// status and error.
+	async function endpoints(name: string, untracked: boolean) {
+		const query = `repo=${repoRef}&path=${name}`;
+		const get = (url: string) => supertest(app).get(url);
+		const part = (res: Awaited<ReturnType<typeof get>>, body: unknown) =>
+			res.ok ? body : { status: res.status, error: res.body.error };
+		const unstaged = await get(
+			`/api/git/diff?${query}&staged=false${untracked ? "&untracked=true" : ""}`,
+		);
+		const staged = await get(`/api/git/diff?${query}&staged=true`);
+		const index = await get(`/api/git/base-content?${query}&staged=false`);
+		const head = await get(`/api/git/base-content?${query}&staged=true`);
+		return {
+			unstagedDiff: part(unstaged, unstaged.body),
+			stagedDiff: part(staged, staged.body),
+			index: part(index, { content: index.text }),
+			head: part(head, { content: head.text }),
+		};
+	}
+
+	// Stages or unstages, asking for the file's context with HEAD's copy, and
+	// checks that the answer's context is what the endpoints answer once it
+	// has, the working tree's diff being against nothing while the answer
+	// lists the file as untracked.
+	async function act(
+		action: "stage" | "unstage",
+		body: { path: string; ranges?: [number, number][]; untracked?: boolean },
+	) {
+		const res = await supertest(app)
+			.post(`/api/git/${action}?repo=${repoRef}`)
+			.send({ ...body, context: { head: true } });
+		expect(res.status).toBe(200);
+		const untracked = res.body.files.some(
+			(file: { path: string; status: string }) =>
+				file.path === body.path && file.status === "untracked",
+		);
+		expect(res.body.context).toEqual(await endpoints(body.path, untracked));
+		return res.body.context;
+	}
+
+	// The lines a diff adds and deletes.
+	function changed(answer: { diff: string }): string[] {
+		const lines = answer.diff.split("\n");
+		return lines
+			.slice(lines.findIndex((line) => line.startsWith("@@")))
+			.filter((line) => /^[-+]/.test(line));
+	}
+
+	test("answers a stage and an unstage by line with both sides' new context", async () => {
+		await commitFile("lines.txt", "one\ntwo\nthree\nfour\n");
+		await fs.writeFile(
+			path.join(repoDir, "lines.txt"),
+			"one\nTWO\nthree\nFOUR\n",
+		);
+
+		const staged = await act("stage", { path: "lines.txt", ranges: [[2, 2]] });
+		expect(staged.index).toEqual({ content: "one\nTWO\nthree\nfour\n" });
+		expect(staged.head).toEqual({ content: "one\ntwo\nthree\nfour\n" });
+		expect(changed(staged.stagedDiff)).toEqual(["-two", "+TWO"]);
+		expect(changed(staged.unstagedDiff)).toEqual(["-four", "+FOUR"]);
+
+		const unstaged = await act("unstage", {
+			path: "lines.txt",
+			ranges: [[2, 2]],
+		});
+		expect(unstaged.index).toEqual({ content: "one\ntwo\nthree\nfour\n" });
+		expect(unstaged.stagedDiff).toEqual({ diff: "", truncated: false });
+		expect(changed(unstaged.unstagedDiff)).toEqual([
+			"-two",
+			"+TWO",
+			"-four",
+			"+FOUR",
+		]);
+
+		execSync("git checkout -- lines.txt", { cwd: repoDir });
+	});
+
+	test("answers a stage and an unstage of the whole file with its new context", async () => {
+		await commitFile("whole.txt", "one\ntwo\n");
+		await fs.writeFile(path.join(repoDir, "whole.txt"), "one\nTWO\n");
+
+		const staged = await act("stage", { path: "whole.txt" });
+		expect(staged.index).toEqual({ content: "one\nTWO\n" });
+		expect(staged.unstagedDiff).toEqual({ diff: "", truncated: false });
+		expect(changed(staged.stagedDiff)).toEqual(["-two", "+TWO"]);
+
+		const unstaged = await act("unstage", { path: "whole.txt" });
+		expect(unstaged.index).toEqual({ content: "one\ntwo\n" });
+		expect(unstaged.stagedDiff).toEqual({ diff: "", truncated: false });
+		expect(changed(unstaged.unstagedDiff)).toEqual(["-two", "+TWO"]);
+
+		execSync("git checkout -- whole.txt", { cwd: repoDir });
+	});
+
+	test("answers a stage of a new file's lines with no copy in HEAD", async () => {
+		await fs.writeFile(path.join(repoDir, "new.txt"), "one\ntwo\nthree\n");
+
+		const context = await act("stage", {
+			path: "new.txt",
+			ranges: [[2, 2]],
+			untracked: true,
+		});
+		expect(context.index).toEqual({ content: "two\n" });
+		expect(context.head).toEqual({
+			status: 404,
+			error: { code: "NOT_FOUND", message: "Base file not found" },
+		});
+		expect(changed(context.stagedDiff)).toEqual(["+two"]);
+		// The file is tracked now, so its working tree is diffed against the
+		// index, and its diff says nothing of being exact.
+		expect(changed(context.unstagedDiff)).toEqual(["+one", "+three"]);
+		expect("exact" in context.unstagedDiff).toBe(false);
+
+		execSync("git reset -q -- new.txt", { cwd: repoDir });
+		await fs.rm(path.join(repoDir, "new.txt"));
+	});
+
+	test("answers an untracked file staged whole with all of it staged", async () => {
+		await fs.writeFile(path.join(repoDir, "added.txt"), "one\ntwo\n");
+
+		const context = await act("stage", { path: "added.txt" });
+		expect(context.index).toEqual({ content: "one\ntwo\n" });
+		expect(context.head.status).toBe(404);
+		expect(changed(context.stagedDiff)).toEqual(["+one", "+two"]);
+		expect(context.unstagedDiff).toEqual({ diff: "", truncated: false });
+
+		execSync("git reset -q -- added.txt", { cwd: repoDir });
+		await fs.rm(path.join(repoDir, "added.txt"));
+	});
+
+	test("answers with a new file's diff against nothing once every line of it is unstaged", async () => {
+		await fs.writeFile(path.join(repoDir, "gone.txt"), "one\ntwo\n");
+		execSync("git add gone.txt", { cwd: repoDir });
+
+		const context = await act("unstage", {
+			path: "gone.txt",
+			ranges: [[1, 2]],
+		});
+		// The index holds nothing of the file now, and it is untracked again.
+		expect(context.index.status).toBe(404);
+		expect(context.stagedDiff).toEqual({ diff: "", truncated: false });
+		expect(changed(context.unstagedDiff)).toEqual(["+one", "+two"]);
+		expect(context.unstagedDiff.exact).toBe(true);
+
+		await fs.rm(path.join(repoDir, "gone.txt"));
+	});
+
+	test("answers a stage and an unstage of a deletion", async () => {
+		await commitFile("deleted.txt", "one\ntwo\n");
+		await fs.rm(path.join(repoDir, "deleted.txt"));
+
+		const staged = await act("stage", { path: "deleted.txt" });
+		expect(staged.index.status).toBe(404);
+		expect(staged.head).toEqual({ content: "one\ntwo\n" });
+		expect(changed(staged.stagedDiff)).toEqual(["-one", "-two"]);
+		expect(staged.unstagedDiff).toEqual({ diff: "", truncated: false });
+
+		const unstaged = await act("unstage", { path: "deleted.txt" });
+		expect(unstaged.index).toEqual({ content: "one\ntwo\n" });
+		expect(unstaged.stagedDiff).toEqual({ diff: "", truncated: false });
+		expect(changed(unstaged.unstagedDiff)).toEqual(["-one", "-two"]);
+
+		execSync("git checkout -- deleted.txt", { cwd: repoDir });
+	});
+
+	test("refuses a copy over 1 MB, and cuts a diff to 1 MB, as the endpoints do", async () => {
+		const line = `${"x".repeat(99)}\n`;
+		await fs.writeFile(path.join(repoDir, "large.txt"), line.repeat(11_000));
+
+		const staged = await act("stage", { path: "large.txt" });
+		expect(staged.index).toEqual({
+			status: 413,
+			error: {
+				code: "FILE_TOO_LARGE",
+				message: "File exceeds maximum size of 1 MB",
+			},
+		});
+		expect(staged.stagedDiff.truncated).toBe(true);
+		expect(staged.stagedDiff.diff.length).toBe(1024 * 1024);
+
+		// Unstaged whole, it is untracked again, and its diff against nothing,
+		// cut short, cannot describe it exactly.
+		const unstaged = await act("unstage", { path: "large.txt" });
+		expect(unstaged.unstagedDiff.truncated).toBe(true);
+		expect(unstaged.unstagedDiff.exact).toBe(false);
+
+		await fs.rm(path.join(repoDir, "large.txt"));
+	});
+
+	test("refuses a large binary copy, as the endpoints do", async () => {
+		await fs.writeFile(
+			path.join(repoDir, "blob.bin"),
+			randomBytes(16 * 1024 * 1024),
+		);
+
+		const staged = await act("stage", { path: "blob.bin" });
+		expect(staged.index.status).toBe(413);
+
+		const unstaged = await act("unstage", { path: "blob.bin" });
+		expect(unstaged.index.status).toBe(404);
+
+		await fs.rm(path.join(repoDir, "blob.bin"));
+	});
+
+	test("answers with the changes alone unless asked for the context", async () => {
+		await commitFile("plain.txt", "one\ntwo\n");
+		await fs.writeFile(path.join(repoDir, "plain.txt"), "one\nTWO\n");
+
+		for (const [action, body] of [
+			["stage", { path: "plain.txt" }],
+			["unstage", { path: "plain.txt" }],
+			["stage", { path: "plain.txt", ranges: [[2, 2]] }],
+		] as const) {
+			const res = await supertest(app)
+				.post(`/api/git/${action}?repo=${repoRef}`)
+				.send(body);
+			expect(res.status).toBe(200);
+			expect(Object.keys(res.body)).toEqual(["files"]);
+		}
+
+		execSync("git reset -q -- plain.txt", { cwd: repoDir });
+		execSync("git checkout -- plain.txt", { cwd: repoDir });
+	});
+
+	test("leaves out HEAD's copy unless asked for it", async () => {
+		await commitFile("head.txt", "one\ntwo\n");
+		await fs.writeFile(path.join(repoDir, "head.txt"), "one\nTWO\n");
+
+		const res = await supertest(app)
+			.post(`/api/git/stage?repo=${repoRef}`)
+			.send({ path: "head.txt", ranges: [[2, 2]], context: {} });
+
+		expect(res.status).toBe(200);
+		expect(Object.keys(res.body.context).sort()).toEqual([
+			"index",
+			"stagedDiff",
+			"unstagedDiff",
+		]);
+		expect(res.body.context.index).toEqual({ content: "one\nTWO\n" });
+
+		execSync("git reset -q -- head.txt", { cwd: repoDir });
+		execSync("git checkout -- head.txt", { cwd: repoDir });
+	});
+
+	test("returns INVALID_CONTEXT for a malformed context request", async () => {
+		for (const context of [true, [], { head: "yes" }]) {
+			const res = await supertest(app)
+				.post(`/api/git/unstage?repo=${repoRef}`)
+				.send({ path: "any.txt", context });
+
+			expect(res.status).toBe(400);
+			expect(res.body.error.code).toBe("INVALID_CONTEXT");
+		}
 	});
 });
 

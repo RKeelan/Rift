@@ -323,19 +323,21 @@ async function measureServer(file: string) {
 	);
 
 	// A stage and unstage of the file's first change, each by line, as the
-	// editor's strips send them. The diffs that name each are read untimed.
+	// editor's strips send them with both sides of the file open, asking for
+	// the file's context without HEAD's copy. The diffs that name each are
+	// read untimed.
 	const stageTimes: number[] = [];
 	const unstageTimes: number[] = [];
 	for (let i = 0; i < runs + 2; i++) {
 		const stage = firstHunk(await diff(file, false));
 		const stageMs = await timed(
 			api("/api/git/stage"),
-			post({ path: file, ...stage }),
+			post({ path: file, ...stage, context: { head: false } }),
 		);
 		const unstage = firstHunk(await diff(file, true));
 		const unstageMs = await timed(
 			api("/api/git/unstage"),
-			post({ path: file, ...unstage }),
+			post({ path: file, ...unstage, context: { head: false } }),
 		);
 		if ((await diff(file, true)) !== "") {
 			throw new Error(`unstaging by line left ${file} staged`);
@@ -345,8 +347,36 @@ async function measureServer(file: string) {
 			unstageTimes.push(unstageMs);
 		}
 	}
-	report("POST /api/git/stage (by line)", stageTimes, "(3 git processes)");
-	report("POST /api/git/unstage (by line)", unstageTimes, "(3 git processes)");
+	// Each reads its diff and applies the patch, then reads the status and
+	// the file's new context at once: its two diffs and the index's copy.
+	report("POST /api/git/stage (by line)", stageTimes, "(6 git processes)");
+	report("POST /api/git/unstage (by line)", unstageTimes, "(6 git processes)");
+
+	// A stage and unstage of the whole file, as the list's buttons send them,
+	// which put its index entry back as it was.
+	const wholeStageTimes: number[] = [];
+	const wholeUnstageTimes: number[] = [];
+	for (let i = 0; i < runs + 2; i++) {
+		const stageMs = await timed(api("/api/git/stage"), post({ path: file }));
+		const unstageMs = await timed(
+			api("/api/git/unstage"),
+			post({ path: file }),
+		);
+		if (i >= 2) {
+			wholeStageTimes.push(stageMs);
+			wholeUnstageTimes.push(unstageMs);
+		}
+	}
+	report(
+		"POST /api/git/stage (whole file)",
+		wholeStageTimes,
+		"(2 git processes)",
+	);
+	report(
+		"POST /api/git/unstage (whole file)",
+		wholeUnstageTimes,
+		"(2 git processes)",
+	);
 
 	const perProcess = percentile(oneGit, 0.5) - percentile(health, 0.5);
 	console.log(
