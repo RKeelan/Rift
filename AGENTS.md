@@ -73,6 +73,8 @@ bun scripts/measure-speed.ts --repo <root>/<scratch repo>
 
 Without `--mode` it runs the first three. It stages, unstages and saves one file in the repo named, one with unstaged changes in two or more places and nothing staged (`--file` chooses it), then puts the file and its index entry back as they were, so name a scratch repository. `--runs` sets the count, and `--cpu-slowdown 4` runs Chrome's CPU four times slower.
 
+Every `/api` response carries `Server-Timing: app;dur=<ms>`, the server's time from the request's arrival to its headers being written. In client and device modes, the API report lists the server's time under each endpoint, and the overhead: DevTools' time for the request less the server's, which is what the network, the browser and the service worker add. The script reads the header from DevTools' Network events, because Resource Timing leaves `serverTiming` empty for requests the service worker answers.
+
 The requirements hold on a phone, and the server and client figures leave out its network hop and its slower CPU, so they are a floor: a requirement missed on the server machine is missed on a phone too, but one met there may still be missed on one. `tailscale ping <phone>` from the server machine times the hop.
 
 #### On an Android device

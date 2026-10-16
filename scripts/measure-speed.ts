@@ -797,6 +797,16 @@ function checkLanded(name: string, aimed: Point, up: Point | null) {
 class Client {
 	readonly samples = new Map<string, number[]>();
 	readonly requests = new Map<string, number[]>();
+	// The server's own time for each API request, from its Server-Timing
+	// header, and what DevTools saw beyond it, per endpoint.
+	readonly serverTimes = new Map<string, number[]>();
+	readonly overheads = new Map<string, number[]>();
+	// API requests DevTools has seen, by request id, until they finish.
+	private network = new Map<
+		string,
+		{ path: string; start: number; server?: number }
+	>();
+	private finished: { path: string; server?: number; ms: number }[] = [];
 	// How long each timed input took to reach the page's first handler.
 	readonly delivery: number[] = [];
 
@@ -808,6 +818,44 @@ class Client {
 		private file: string,
 		private settle = false,
 	) {}
+
+	// Starts noting each API request's Server-Timing header. The page's
+	// Resource Timing leaves serverTiming empty for requests Rift's service
+	// worker answers, but DevTools sees the response headers either way.
+	async watchNetwork() {
+		this.browser.on("Network.requestWillBeSent", (params) => {
+			const { url } = params.request as { url: string };
+			if (!url.includes("/api/")) return;
+			this.network.set(String(params.requestId), {
+				path: new URL(url).pathname.replace(/^.*\/api\//, "/api/"),
+				start: Number(params.timestamp),
+			});
+		});
+		this.browser.on("Network.responseReceived", (params) => {
+			const seen = this.network.get(String(params.requestId));
+			if (!seen) return;
+			const { headers } = params.response as {
+				headers: Record<string, string>;
+			};
+			const key = Object.keys(headers).find(
+				(name) => name.toLowerCase() === "server-timing",
+			);
+			const dur = key && /app;dur=([\d.]+)/.exec(headers[key]);
+			if (dur) seen.server = Number(dur[1]);
+		});
+		this.browser.on("Network.loadingFinished", (params) => {
+			const id = String(params.requestId);
+			const seen = this.network.get(id);
+			if (!seen) return;
+			this.network.delete(id);
+			this.finished.push({
+				path: seen.path,
+				server: seen.server,
+				ms: (Number(params.timestamp) - seen.start) * 1000,
+			});
+		});
+		await this.browser.send("Network.enable");
+	}
 
 	// Times an input, from the finger lifting (or the key going down) to the
 	// frame that draws each condition, and records each as `name (condition)`,
@@ -826,6 +874,7 @@ class Client {
 		await this.browser.evaluate(
 			`performance.clearResourceTimings(); __measure.watch({ ${source} }, 15000)`,
 		);
+		this.finished = [];
 		const aimed = typeof input === "function" ? null : input;
 		if (typeof input === "function") await input();
 		else await this.input.tap(input.x, input.y);
@@ -885,6 +934,18 @@ class Client {
 			list.push(ms);
 			this.requests.set(name, list);
 		}
+		for (const { path, server, ms } of this.finished) {
+			if (server === undefined) continue;
+			for (const [map, value] of [
+				[this.serverTimes, server],
+				[this.overheads, ms - server],
+			] as const) {
+				const list = map.get(path) ?? [];
+				list.push(value);
+				map.set(path, list);
+			}
+		}
+		this.finished = [];
 	}
 
 	// Where a finger would tap the element an expression finds: its centre, or
@@ -1196,6 +1257,7 @@ async function measureClient(file: string, restore: () => Promise<void>) {
 			source: PAGE_HELPER(repo),
 		});
 		const client = new Client(browser, new CdpInput(browser), file);
+		await client.watchNetwork();
 		await runInteractions(browser, client, file);
 	} finally {
 		process.off("SIGINT", onSigint);
@@ -1243,6 +1305,14 @@ async function runInteractions(browser: Browser, client: Client, file: string) {
 	console.log("\nAPI requests as the page saw them, service worker included\n");
 	for (const [label, samples] of [...client.requests].sort()) {
 		report(label, samples);
+		report(
+			"  server's time (Server-Timing)",
+			client.serverTimes.get(label) ?? [],
+		);
+		report(
+			"  overhead (DevTools' time less server's)",
+			client.overheads.get(label) ?? [],
+		);
 	}
 }
 
@@ -1530,6 +1600,7 @@ async function measureDevice(file: string, restore: () => Promise<void>) {
 				).identifier,
 			);
 			const client = new Client(browser, input, file, true);
+			await client.watchNetwork();
 			await runInteractions(browser, client, file);
 			report("adb delivering each input, left out", input.sendTimes);
 		} finally {
