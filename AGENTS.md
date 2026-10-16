@@ -46,7 +46,7 @@ Nothing below is a requirement in itself. Each is a way to keep an interaction w
 
 - Wait on at most one round trip to the server: send the requests an interaction needs together, or as one. Each further round trip adds another hop over the network, which no work on the server can shorten.
 - Keep each endpoint the client waits on within about 50 ms on loopback on the server machine, writes included, which leaves the rest of the 100 ms for the hop and for Chrome to handle the response and draw it.
-- Draw what the client already knows without waiting for the server, and fetch or build ahead what the next tap will need, as the Unstaged/Staged switch keeps both sides of a file built.
+- Draw what the client already knows without waiting for the server, and fetch or build ahead what the next tap will need, as the Unstaged/Staged switch keeps both sides of a file built, and the Files list loads the editor's code and its changed files' languages while it is idle.
 
 ### Where the server's time goes
 

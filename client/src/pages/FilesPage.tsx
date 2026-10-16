@@ -37,6 +37,7 @@ import {
 	openParts,
 	type SavedDiff,
 } from "./FileSideView.tsx";
+import { useEditorPreload } from "./editorPreload.ts";
 import { FileViewer, TreeEntry, useFileTree } from "./FileTree.tsx";
 import "./FilesPage.css";
 
@@ -469,6 +470,14 @@ export function FilesPage({
 		return (path: string) =>
 			paths.has(path) || folders.some((folder) => path.startsWith(folder));
 	}, [changedPaths]);
+
+	// The editor's code, and the languages of the changed files, load while
+	// the list is idle on screen, so the first file opened need not wait on
+	// them.
+	useEditorPreload({
+		changedPaths,
+		idle: !hidden && !fileOpen && !loading && !tree.rootLoading,
+	});
 
 	// The tree reads each folder once, as it opens, so it misses a file that
 	// appears or disappears outside Rift afterwards. The status shows such a
